@@ -590,4 +590,4 @@ In のカスタムポート名は、ポート名・同名パラメータのキ�
 - **可変長ポート（variadic）とカスタムポートの統合**。variadic は
   `grow_variadic_input_group` が別機構として持つ。両者の統合は必要性が出てから
 - **`layer.info` / `comp.info` のポート選択 UI**。単位 3 の Ports セクションを
-  流用するが、ノード自体は `scene-info-nodes-plan.md` が担当する
+  流用するが、ノード自体は `done/scene-info-nodes-plan.md` が担当する

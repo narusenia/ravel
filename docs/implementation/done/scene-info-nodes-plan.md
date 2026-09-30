@@ -1,6 +1,7 @@
 # シーン情報ノード（layer.info / comp.info） 実装計画
 
-> **Status**: Planned — 2026-07-29
+> **Status**: 完了 — 2026-09-30（`INFO-1`〜`INFO-6`。
+> #558 / #560 / #562 / #564 / #566 と本単位）
 
 対象: レイヤーとコンポジションのメタ情報をネットワークから読む手段。
 関連要件: REQ-LAYER-002、REQ-LAYER-005、REQ-CORE-007。
@@ -159,7 +160,7 @@ InvalidationHint::Shell { comp, layer }
 
 ## 実装単位
 
-### 単位 1: `InvalidationHint::Shell`
+### 単位 1: `InvalidationHint::Shell`（**済** — #558）
 
 - ヒント追加と `merge` の強さ順の拡張
 - 殻編集（transform / timing / opacity / audio）の発行元を `Shell` に切り替える
@@ -174,7 +175,7 @@ InvalidationHint::Shell { comp, layer }
 - 殻の transform 編集で `Structural` が発行されず、GPU パイプラインの
   再コンパイルが起きないことのテスト（RESP-3 の回帰を守る）
 
-### 単位 2: `layer.info`
+### 単位 2: `layer.info`（**済** — #560）
 
 - 候補ポート表（下記）と、`-1` = 自分の解決
 - 参照先レイヤーのローカル時間は `layer.ref` の写像を共有する
@@ -210,7 +211,7 @@ InvalidationHint::Shell { comp, layer }
   `color.ramp` は実装済みで、当時は `layer.info` が無かったため駆動源を
   `math.scalar` に差し替えて通してある）
 
-### 単位 3: `comp.info`
+### 単位 3: `comp.info`（**済** — #562）
 
 - `-1` = 現在のコンポジション、それ以外は `CompId`
 - 出力候補: `resolution`(Vec2) / `frame_rate`(Scalar) / `duration_frames`(Scalar) /
@@ -228,7 +229,7 @@ InvalidationHint::Shell { comp, layer }
 - 参照先が 30000/1001 fps、現在が 30/1 のとき `comp_f` が期待値になるテスト
 - 存在しない `CompId` でエラーになるテスト
 
-### 単位 4: 情報ノードのポート選択 UI
+### 単位 4: 情報ノードのポート選択 UI（**済** — #564）
 
 - `network-interface-editing-plan.md` 単位 3 の Ports セクションを流用し、
   候補一覧からのチェック追加に切り替える（型 Select と名前入力は出さない）
@@ -257,7 +258,7 @@ InvalidationHint::Shell { comp, layer }
 こと。既定の `-1`（自コンポジション）は動くので、ノードが何もしないわけでは
 ない。他コンポジションの読み出しは `precomp` が来るまで主用途ではない。
 
-### 単位 5: 殻バインドを含む循環検出
+### 単位 5: 殻バインドを含む循環検出（**済** — #566）
 
 - 殻の node-output バインドを辺として扱い、`layer.info` の参照辺と合わせて
   循環を検出する。既存の `validate_layer_ref_cycles` / `validate_precomp_cycles`
@@ -271,12 +272,29 @@ InvalidationHint::Shell { comp, layer }
 - 3 レイヤーを跨ぐ循環が検出されるテスト
 - 循環でないバインド（A → B の一方向）が拒否されないテスト
 
-### 単位 6: レジストリ / ロケール / 文書
+### 単位 6: レジストリ / ロケール / 文書（**済**）
 
 - テンプレート登録（`registry/builtin.rs`）、プロセッサ登録
-  （`ravel-nodes/src/lib.rs`）、ポート名と候補ラベルのロケール
+  （`ravel-nodes/src/lib.rs`）、ノードの `label` / `description` /
+  `params.*` のロケール — いずれも単位 1〜5 が自分の分を運んだ
 - `docs/agent-api-reference.md` に 2 ノードと `InvalidationHint::Shell` を記載
 - REQ-LAYER-002 / 005 に情報ノードの位置づけを追記
+
+#### ポート名のロケールは入れない
+
+計画では「ポート名と候補ラベルのロケール」を挙げていたが、**入れない**と
+決めた。ポート名にロケールキーを持つノードは 1 つも無く、ノードエディタの
+ポートラベル・ホバー Popover・Properties の Ports セクションはどれも
+`port.name` をそのまま描く。情報ノードの候補ポートだけ訳すと、同じ画面で
+`merge` の `a` / `b` は英語のまま情報ノードのポートだけ日本語になる。
+
+**これは 2 ノードの話ではない。** 同じ描画経路が `net.in` / `net.out` /
+`subnet` の**ユーザーが付けた名前**も描くので、ロケールを入れるなら先に
+「表示境界で宣言ポートとユーザーポートをどう見分けるか」を決める必要が
+あり、それは全ノードに跨る判断になる。規約は
+[`../../dev/add-locale.md`](../../dev/add-locale.md) の「ポート名は翻訳しない」に
+理由ごと置いた。訳す日のために issue を起こす価値はある（全ノードのポート名が
+未翻訳、という 1 件として）。
 
 ## 検証
 

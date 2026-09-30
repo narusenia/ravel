@@ -450,7 +450,7 @@ Blender の ColorRamp 相当。`ParameterValue::Ramp` の値ドメインの消�
 - 入力が範囲外のとき両端にクランプされるテスト ✅
   （`out_of_range_input_clamps_to_the_end_stops`）
 - `layer.info(index) → color.ramp` でレイヤーごとに色が変わる結合テスト
-  （`layer.info` は `scene-info-nodes-plan.md` 単位 2 が追加する）
+  （`layer.info` は `done/scene-info-nodes-plan.md` 単位 2 が追加した）
   → **`layer.info` 版は `INFO-2` で追加する。** `layer.info` が未実装のため、
   駆動源を `math.scalar` に差し替えた結合テストで代替した
   （`a_driven_value_changes_the_colour`: 上流のスカラーが変われば出力色が

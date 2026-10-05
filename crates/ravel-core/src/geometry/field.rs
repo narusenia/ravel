@@ -8,6 +8,7 @@ use std::sync::{Arc, OnceLock};
 
 use thiserror::Error;
 
+use super::absent::{Absent, absent, absent_column};
 use super::{AttributeArray, AttributeSet, AttributeType, Domain, Geometry, GeometryError, names};
 use crate::eval::EvalContext;
 use crate::expression::{self, Component, ExpressionError, Program, Scope};
@@ -1832,36 +1833,39 @@ impl<'a> FieldApply<'a> {
 
 /// The column [`apply_field`] invents for a target the geometry does not have.
 ///
-/// A reserved standard attribute is created with the type and the semantic
-/// default the geometry spec declares for it — an invented `Cd` has to be
-/// white, not transparent black, or `combine = multiply` would blank the
+/// A reserved standard attribute is created with what a reader sees without
+/// it ([`absent_column`]) — an invented `Cd` has to be white, not transparent
+/// black, and an invented `alpha` 1, or `combine = multiply` would blank the
 /// geometry the first time anybody modulated it. Anything else takes the
 /// field's own sampled type, zeroed.
-fn created_column(target: &str, sampled: AttributeType, length: usize) -> AttributeArray {
-    match target {
-        names::CD | names::STROKE_COLOR => AttributeArray::Color(vec![Color::WHITE; length]),
-        names::STROKE_WIDTH => AttributeArray::F32(vec![0.0; length]),
-        // `fill` is declared Bool, and a reserved attribute takes its declared
-        // type even when that makes the combine fail: `combine_arrays` then
-        // reports the same unsupported-type error a geometry that already had
-        // a `fill` column would produce. Inventing an F32 `fill` instead would
-        // let `field.apply` report success while `rasterize`, which reads the
-        // attribute as Bool, went on ignoring it.
-        names::FILL => AttributeArray::Bool(vec![false; length]),
-        _ => match sampled {
-            AttributeType::Vec2 => AttributeArray::Vec2(vec![Vec2(0.0, 0.0); length]),
-            AttributeType::Vec3 => AttributeArray::Vec3(vec![Vec3(0.0, 0.0, 0.0); length]),
-            AttributeType::Vec4 => AttributeArray::Vec4(vec![Vec4(0.0, 0.0, 0.0, 0.0); length]),
-            AttributeType::Color => AttributeArray::Color(vec![Color::TRANSPARENT; length]),
-            // `I32` / `Bool` / `Str` are not modulatable: created here so
-            // `combine_arrays` reports the type it always reported, rather
-            // than this function inventing a second error for the same case.
-            AttributeType::I32 => AttributeArray::I32(vec![0; length]),
-            AttributeType::Bool => AttributeArray::Bool(vec![false; length]),
-            AttributeType::Str => AttributeArray::Str(vec![String::new(); length]),
-            AttributeType::F32 => AttributeArray::F32(vec![0.0; length]),
+fn created_column(
+    geometry: &Geometry,
+    domain: Domain,
+    target: &str,
+    sampled: AttributeType,
+    length: usize,
+) -> AttributeArray {
+    // A reserved colour or style attribute takes its declared type even when
+    // that makes the combine fail: `combine_arrays` then reports the same
+    // unsupported-type error a geometry that already had a `fill` column would
+    // produce. Inventing an F32 `fill` instead would let `field.apply` report
+    // success while `rasterize`, which reads the attribute as Bool, went on
+    // ignoring it. `I32` / `Bool` / `Str` are not modulatable: created here so
+    // `combine_arrays` reports the type it always reported, rather than this
+    // function inventing a second error for the same case.
+    let attr_type = match target {
+        names::CD | names::STROKE_COLOR => AttributeType::Color,
+        names::STROKE_WIDTH => AttributeType::F32,
+        names::FILL => AttributeType::Bool,
+        // A reserved name with a constant reading is created in that
+        // reading's type too: a scalar field driving a missing `scale` has to
+        // start a Vec2 (1, 1), not an F32 the placement would never read.
+        _ => match absent(domain, target) {
+            Some(Absent::Value(value)) => value.attr_type(),
+            _ => sampled,
         },
-    }
+    };
+    absent_column(geometry, domain, target, attr_type, length)
 }
 
 /// Returns a geometry clone with a field combined into one numeric attribute.
@@ -1910,7 +1914,13 @@ pub fn apply_field(
     let existing = match attributes.get(spec.target) {
         Some(column) => &**column,
         None if spec.create_if_missing => {
-            created = created_column(spec.target, sampled.attr_type(), positions.len());
+            created = created_column(
+                geometry,
+                spec.domain,
+                spec.target,
+                sampled.attr_type(),
+                positions.len(),
+            );
             &created
         }
         None => {
@@ -4178,6 +4188,80 @@ mod tests {
                 "{target}"
             );
         }
+    }
+
+    /// A created column starts from what the attribute reads as without it, so
+    /// scaling a missing `alpha` by 0.5 gives 0.5 and not the 0 a typed-zero
+    /// start would multiply it into.
+    #[test]
+    fn a_created_column_starts_from_its_absent_value() {
+        let multiplied = |domain, target: &'static str, factor: f32, geometry: &Geometry| {
+            let spec = FieldApply::new(domain, target).with_combine(CombineMode::Multiply);
+            apply_field(geometry, &spec, &ConstantField(factor), &ctx()).unwrap()
+        };
+        let points = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(2.0, 0.0)]);
+        let faded = multiplied(Domain::Point, names::ALPHA, 0.5, &points);
+        assert_eq!(
+            faded
+                .points()
+                .get(names::ALPHA)
+                .unwrap()
+                .as_f32(names::ALPHA),
+            Ok(&[0.5, 0.5][..])
+        );
+
+        let mut instances = Geometry::new();
+        instances
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(5.0, 0.0)]),
+            )
+            .unwrap();
+        let scaled = multiplied(Domain::Instance, names::SCALE, 2.0, &instances);
+        assert_eq!(
+            scaled
+                .instances()
+                .get(names::SCALE)
+                .unwrap()
+                .as_vec2(names::SCALE),
+            Ok(&[Vec2(2.0, 2.0), Vec2(2.0, 2.0)][..])
+        );
+
+        // A point's radius starts at the default 2 (the `pscale` reader's),
+        // not at 0, which draws no point.
+        let sized = multiplied(Domain::Point, names::PSCALE, 3.0, &points);
+        assert_eq!(
+            sized
+                .points()
+                .get(names::PSCALE)
+                .unwrap()
+                .as_f32(names::PSCALE),
+            Ok(&[6.0, 6.0][..])
+        );
+    }
+
+    /// A `Cd` created on the points of a path starts as the colour the path
+    /// strokes in, which is what the vertices read as without one; a point on
+    /// no path starts white.
+    #[test]
+    fn a_created_point_colour_starts_from_its_path() {
+        let blue = Color::new(0.0, 0.0, 1.0, 1.0);
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0); 3]);
+        geometry.push_primitive(super::super::Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        geometry
+            .primitive_attrs_mut()
+            .insert(names::CD, AttributeArray::Color(vec![blue]))
+            .unwrap();
+        let spec = FieldApply::new(Domain::Point, names::CD).with_combine(CombineMode::Multiply);
+        let result = apply_field(&geometry, &spec, &ConstantField(1.0), &ctx()).unwrap();
+        assert_eq!(
+            result.points().get(names::CD).unwrap().as_color(names::CD),
+            Ok(&[blue, blue, Color::WHITE][..])
+        );
     }
 
     /// `fill` is declared Bool, and creating it must not quietly widen that to

@@ -130,7 +130,7 @@ CPU 経路は texel を読むので、GPU 常駐フレームで来た画像は�
 | `fill` | Primitive/Instance | Bool | 塗りの有無。`rasterize` の `fill` パラメータが既定（`style.fill` が書く） |
 | `stroke_width` | Primitive/Instance | F32 | 線幅（0 = 線なし）。`rasterize` の `stroke_width` パラメータが既定（`style.stroke` が書く） |
 | `stroke_color` | Primitive/Instance/Point | Color | 線色。未設定なら `Cd`（＝塗り色）にフォールバック（`style.stroke` が書く）。**Point ドメインの列はパスの頂点ごとの線色になる**（下記） |
-| `stroke_align` | Primitive | I32 | 線の位置。0=中央 / 1=内側 / 2=外側。未設定は中央。開いたパスには内側・外側が無いので常に中央（下記） |
+| `stroke_align` | Primitive | I32 | 線の位置。0=中央 / 1=内側 / 2=外側。未設定は中央。開いたパスには内側・外側が無いので常に中央（下記）。`style.stroke` の `stroke_align` パラメータ（center / inside / outside）が書く。中央かつ列が無いときは列を作らない |
 | `dash` | Detail | Str | 破線パターン（`"4,2"` 形式。空なら実線。`style.dash` が書く） |
 | `dash_offset` | Detail | F32 | 破線の開始位置（`style.dash` が書く） |
 | `cap` | Detail | I32 | 端点の形。0=butt / 1=round / 2=square。未設定は round（`style.stroke` が書く） |

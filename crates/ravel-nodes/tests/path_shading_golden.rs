@@ -278,7 +278,8 @@ fn the_gpu_paints_the_same_gradient_as_the_cpu() {
 // ---------------------------------------------------------------------------
 
 /// Emits a fixed geometry, standing in for whatever node would write the
-/// attributes (no built-in node writes `stroke_align` yet).
+/// attributes (`style.stroke` writes `stroke_align`, but this test pins the
+/// rasterizer on its own, not the style node).
 struct Source(Geometry);
 
 impl NodeProcessor for Source {

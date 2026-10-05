@@ -327,30 +327,40 @@ impl InstanceSource {
 /// to convert — the picture and the geometry agree about what exists.
 pub const MAX_INSTANCE_DEPTH: u32 = 4;
 
-/// The affine placement one instance applies to its source: scale, then
-/// rotate, then translate.
+/// The affine placement one instance applies to its source: shear and scale,
+/// then rotate, then translate.
 ///
-/// The single definition of that composition, because two consumers have to
-/// agree on it exactly. `rasterize` reads it per instance while it draws, and
+/// The single definition of that composition, because every consumer has to
+/// agree on it exactly. `rasterize` reads it per instance while it draws,
 /// [`ops::expand_instances`](super::ops::expand_instances) bakes it into the
-/// points when an instance geometry is flattened into one geometry; a text
-/// drawn as instances and the same text converted to paths have to land on
-/// the same pixels.
+/// points when an instance geometry is flattened into one geometry, and
+/// `drawn_bounds` measures with it; a text drawn as instances and the same
+/// text converted to paths have to land on the same pixels.
 ///
-/// The columns are [`names::P`], [`names::ROT`] and [`names::SCALE`], each
-/// defaulting to the identity when the instance domain does not carry it.
-/// Two-dimensional: the 3D placement (`orient` / `scale3`) is a later unit,
-/// and a caller handed 3D positions raises
-/// [`GeometryError::RequiresPlanarP`] rather than projecting them.
+/// The linear part is `R(rot) · S(scale) · H(shear)`, which is
+/// `R(rot) · [[sx, sx·shear], [0, sy]]`: any 2×2 matrix is a rotation times an
+/// upper-triangular one (a QR decomposition), so this holds every composition
+/// of two placements exactly.
+///
+/// The columns are [`names::P`], [`names::ROT`], [`names::SCALE`] and
+/// [`names::SHEAR`], each defaulting to the identity when the instance domain
+/// does not carry it ([`InstanceColumns`] reads them). Two-dimensional: the 3D
+/// placement (`orient` / `scale3`) is a later unit, and a caller handed 3D
+/// positions raises [`GeometryError::RequiresPlanarP`] rather than projecting
+/// them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InstanceTransform {
     /// Where the instance sits, in the coordinate space of the geometry that
     /// owns the instance domain.
     pub offset: Vec2,
-    /// Turn in radians, applied after [`Self::scale`].
+    /// Turn in radians, applied after [`Self::scale`] and [`Self::shear`].
     pub rot: f32,
-    /// Per-axis scale, applied before [`Self::rot`].
+    /// Per-axis scale, applied after [`Self::shear`] and before
+    /// [`Self::rot`].
     pub scale: Vec2,
+    /// Horizontal shear, applied first: `x' = x + shear · y`. It is a factor
+    /// of the *unscaled* shape, so the matrix entry is `scale.0 · shear`.
+    pub shear: f32,
 }
 
 impl InstanceTransform {
@@ -359,26 +369,24 @@ impl InstanceTransform {
         offset: Vec2(0.0, 0.0),
         rot: 0.0,
         scale: Vec2(1.0, 1.0),
+        shear: 0.0,
     };
 
-    /// A point placed: scaled about the source origin, turned, then moved.
+    /// A point placed: sheared and scaled about the source origin, turned,
+    /// then moved.
     pub fn apply(&self, p: Vec2) -> Vec2 {
-        let scaled = Vec2(p.0 * self.scale.0, p.1 * self.scale.1);
-        let (sin, cos) = self.rot.sin_cos();
-        Vec2(
-            self.offset.0 + scaled.0 * cos - scaled.1 * sin,
-            self.offset.1 + scaled.0 * sin + scaled.1 * cos,
-        )
+        let v = self.apply_vector(p);
+        Vec2(self.offset.0 + v.0, self.offset.1 + v.1)
     }
 
-    /// A *difference* placed: scaled and turned, but not moved.
+    /// A *difference* placed: sheared, scaled and turned, but not moved.
     ///
     /// Bezier tangents ([`names::IN_TAN`] / [`names::OUT_TAN`]) are offsets
     /// from their own point rather than positions, so this is what carries a
     /// glyph's curves through an expansion. Translating them instead would
     /// pull every control point to the instance's origin.
     pub fn apply_vector(&self, v: Vec2) -> Vec2 {
-        let scaled = Vec2(v.0 * self.scale.0, v.1 * self.scale.1);
+        let scaled = Vec2((v.0 + v.1 * self.shear) * self.scale.0, v.1 * self.scale.1);
         let (sin, cos) = self.rot.sin_cos();
         Vec2(
             scaled.0 * cos - scaled.1 * sin,
@@ -388,22 +396,105 @@ impl InstanceTransform {
 
     /// `outer ∘ inner`: the placement of an instance nested inside another.
     ///
-    /// **Not the exact composition of the two affine maps.** The result is
-    /// again a scale-rotate-translate, so the turns add and the scales
-    /// multiply per axis; the true composition of a non-uniform scale with
-    /// two different turns is a shear, which this representation cannot
-    /// hold. Exact whenever either scale is uniform or either turn is zero,
-    /// which covers every instance geometry the built-in nodes produce (a
-    /// `scatter` writes a uniform scale, `text.layout` writes no turn at
-    /// all). This is the composition `rasterize` has always drawn; it is
-    /// stated here rather than fixed so that expanding a nesting and drawing
-    /// it stay the same picture.
+    /// The exact composition of the two affine maps: the linear parts are
+    /// multiplied as 2×2 matrices and the product is decomposed back into
+    /// `rot` / `scale` / `shear` by one function ([`Self::decompose`]), so
+    /// `compose(outer, inner).apply(p) == outer.apply(inner.apply(p))` for
+    /// every pair, singular ones included. Where the older per-field formula
+    /// (`rot` adds, `scale` multiplies) was already exact — an outer scale
+    /// that is uniform or an inner turn of zero, with no shear on either
+    /// side — the same `rot` and `scale` come back and `shear` is zero.
     pub fn compose(outer: Self, inner: Self) -> Self {
+        let (o, i) = (outer.matrix(), inner.matrix());
+        let product = [
+            o[0] * i[0] + o[1] * i[2],
+            o[0] * i[1] + o[1] * i[3],
+            o[2] * i[0] + o[3] * i[2],
+            o[2] * i[1] + o[3] * i[3],
+        ];
+        let (rot, scale, shear) = Self::decompose(
+            product,
+            outer.rot + inner.rot,
+            outer.scale.0 * inner.scale.0 < 0.0,
+            outer.scale.1 * inner.scale.1 < 0.0,
+        );
         Self {
             offset: outer.apply(inner.offset),
-            rot: outer.rot + inner.rot,
-            scale: Vec2(outer.scale.0 * inner.scale.0, outer.scale.1 * inner.scale.1),
+            rot,
+            scale,
+            shear,
         }
+    }
+
+    /// The linear part, row-major `[a, b, c, d]` = `[[a, b], [c, d]]`, in
+    /// `f64` so a chain of compositions does not accumulate `f32` error.
+    fn matrix(&self) -> [f64; 4] {
+        let (sin, cos) = f64::from(self.rot).sin_cos();
+        let (sx, sy, sh) = (
+            f64::from(self.scale.0),
+            f64::from(self.scale.1),
+            f64::from(self.shear),
+        );
+        [
+            cos * sx,
+            cos * sx * sh - sin * sy,
+            sin * sx,
+            sin * sx * sh + cos * sy,
+        ]
+    }
+
+    /// The one decomposition `[[a, b], [c, d]] = R(rot) · [[sx, sx·sh], [0, sy]]`.
+    ///
+    /// The first column is `sx · (cos, sin)`, which fixes `rot`; the second is
+    /// `sx·sh · (cos, sin) + sy · (-sin, cos)`, which fixes `sy` and `sh`.
+    /// `sx` can take either sign, and the pair `(rot, sx)` is only determined
+    /// up to a half turn, so the caller's hints pick the branch the older
+    /// per-field formula would have: `neg_x` / `neg_y` say which scale signs
+    /// the product of the two scales carries, and `rot` is moved by whole
+    /// turns to sit next to `hint_rot` (the sum of the two turns), so a
+    /// composition that was already exact keeps its `rot` and mirror signs.
+    ///
+    /// A first column of zero cannot give `rot`, and a shear against a zero
+    /// `sx` has no meaning, so the second column alone decides: `shear` is 0,
+    /// `sy` its length and `rot` its direction. That still represents the
+    /// matrix exactly, which keeps a rank-1 placement a line instead of
+    /// nothing. An all-zero matrix is scale `(0, 0)` at `hint_rot`.
+    ///
+    /// "Zero" is decided against what the `f32` fields can hold, not against a
+    /// fixed threshold: a first column so short that `sx` rounds to 0 or the
+    /// shear overflows is treated as zero, and any column the fields can carry
+    /// is kept, however small (`scale = (5e-13, 1)` is a valid placement).
+    fn decompose(m: [f64; 4], hint_rot: f32, neg_x: bool, neg_y: bool) -> (f32, Vec2, f32) {
+        let [a, b, c, d] = m;
+        let sign = |negative: bool| if negative { -1.0 } else { 1.0 };
+        let first = a.hypot(c);
+        let general = (first > 0.0)
+            .then(|| {
+                let sx = sign(neg_x) * first;
+                let (cos, sin) = (a / sx, c / sx);
+                (
+                    sin.atan2(cos),
+                    sx,
+                    -b * sin + d * cos,
+                    (b * cos + d * sin) / sx,
+                )
+            })
+            .filter(|&(_, sx, _, shear)| sx as f32 != 0.0 && (shear as f32).is_finite());
+        let (rot, sx, sy, shear) = if let Some(general) = general {
+            general
+        } else {
+            let second = b.hypot(d);
+            if second > 0.0 {
+                let sy = sign(neg_y) * second;
+                ((-b / sy).atan2(d / sy), 0.0, sy, 0.0)
+            } else {
+                (f64::from(hint_rot), 0.0, 0.0, 0.0)
+            }
+        };
+        let turn = std::f64::consts::TAU;
+        let hint = f64::from(hint_rot);
+        let rot = rot + turn * ((hint - rot) / turn).round();
+        (rot as f32, Vec2(sx as f32, sy as f32), shear as f32)
     }
 
     /// The mean absolute scale, which is what a stroke width scales by: a
@@ -411,6 +502,76 @@ impl InstanceTransform {
     /// number somewhere.
     pub fn uniform_scale(&self) -> f32 {
         (self.scale.0.abs() + self.scale.1.abs()) * 0.5
+    }
+}
+
+/// The instance-domain columns a placement is read from, borrowed once so a
+/// loop over instances does not look each column up per row.
+///
+/// The one place that knows which columns make an [`InstanceTransform`]
+/// (`rot`, `scale`, `shear`; `P` is the caller's, because what to do with a
+/// missing or 3D `P` differs per consumer). A column the domain does not carry
+/// reads as the identity, which is also why `shear` can be absent from every
+/// geometry that predates it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InstanceColumns<'a> {
+    rot: Option<&'a [f32]>,
+    scale: Option<&'a [Vec2]>,
+    shear: Option<&'a [f32]>,
+}
+
+impl<'a> InstanceColumns<'a> {
+    /// Reads the columns, failing on one that is present with the wrong type.
+    pub fn of(instances: &'a AttributeSet) -> Result<Self, GeometryError> {
+        Ok(Self {
+            rot: instances
+                .get(names::ROT)
+                .map(|column| column.as_f32(names::ROT))
+                .transpose()?,
+            scale: instances
+                .get(names::SCALE)
+                .map(|column| column.as_vec2(names::SCALE))
+                .transpose()?,
+            shear: instances
+                .get(names::SHEAR)
+                .map(|column| column.as_f32(names::SHEAR))
+                .transpose()?,
+        })
+    }
+
+    /// Reads the columns, treating one of the wrong type as absent — what a
+    /// measurement does, because it has no error to report.
+    pub fn lenient(instances: &'a AttributeSet) -> Self {
+        Self {
+            rot: instances
+                .get(names::ROT)
+                .and_then(|column| column.as_f32(names::ROT).ok()),
+            scale: instances
+                .get(names::SCALE)
+                .and_then(|column| column.as_vec2(names::SCALE).ok()),
+            shear: instances
+                .get(names::SHEAR)
+                .and_then(|column| column.as_f32(names::SHEAR).ok()),
+        }
+    }
+
+    /// The placement of instance `index`, sitting at `offset`. A missing
+    /// column, or a row past its end, is the identity for that field.
+    pub fn placement(&self, index: usize, offset: Vec2) -> InstanceTransform {
+        let at = |column: Option<&[f32]>, default: f32| {
+            column
+                .and_then(|v| v.get(index).copied())
+                .unwrap_or(default)
+        };
+        InstanceTransform {
+            offset,
+            rot: at(self.rot, 0.0),
+            scale: self
+                .scale
+                .and_then(|v| v.get(index).copied())
+                .unwrap_or(InstanceTransform::IDENTITY.scale),
+            shear: at(self.shear, 0.0),
+        }
     }
 }
 
@@ -1522,6 +1683,7 @@ mod tests {
             offset: Vec2(10.0, -4.0),
             rot: std::f32::consts::FRAC_PI_2,
             scale: Vec2(3.0, 2.0),
+            shear: 0.0,
         };
         // (1, 0) scales to (3, 0), turns a quarter turn to (0, 3), and moves.
         let placed = placement.apply(Vec2(1.0, 0.0));
@@ -1541,6 +1703,7 @@ mod tests {
             offset: Vec2(100.0, 100.0),
             rot: std::f32::consts::FRAC_PI_2,
             scale: Vec2(2.0, 2.0),
+            shear: 0.0,
         };
         let carried = placement.apply_vector(Vec2(1.0, 0.0));
         assert!(
@@ -1554,17 +1717,19 @@ mod tests {
     /// separate walks would put them.
     #[test]
     fn composing_two_instance_transforms_equals_applying_them_in_turn() {
-        // Uniform scales, which is where the representation is exact — see
-        // `compose`'s own note about the shear it cannot hold.
+        // Uniform scales here; the non-uniform pairs are the exactness tests
+        // below.
         let outer = InstanceTransform {
             offset: Vec2(7.0, -3.0),
             rot: 0.4,
             scale: Vec2(1.5, 1.5),
+            shear: 0.0,
         };
         let inner = InstanceTransform {
             offset: Vec2(-2.0, 6.0),
             rot: -0.9,
             scale: Vec2(2.0, 2.0),
+            shear: 0.0,
         };
         let composed = InstanceTransform::compose(outer, inner);
         for point in [Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(-4.0, 2.5)] {
@@ -1608,5 +1773,212 @@ mod tests {
             ..InstanceTransform::IDENTITY
         };
         assert_eq!(mirrored.uniform_scale(), 3.0);
+    }
+
+    /// A small deterministic generator, so a failing case is reproducible and
+    /// no dependency is needed.
+    struct Lcg(u64);
+
+    impl Lcg {
+        /// Uniform in `[lo, hi)`.
+        fn next(&mut self, lo: f32, hi: f32) -> f32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            lo + (hi - lo) * ((self.0 >> 40) as f32 / (1u64 << 24) as f32)
+        }
+
+        /// A scale component of either sign, kept away from zero.
+        fn scale(&mut self) -> f32 {
+            let magnitude = self.next(0.4, 2.5);
+            if self.next(0.0, 1.0) < 0.5 {
+                -magnitude
+            } else {
+                magnitude
+            }
+        }
+
+        fn transform(&mut self) -> InstanceTransform {
+            InstanceTransform {
+                offset: Vec2(self.next(-5.0, 5.0), self.next(-5.0, 5.0)),
+                rot: self.next(-3.1, 3.1),
+                scale: Vec2(self.scale(), self.scale()),
+                shear: self.next(-1.0, 1.0),
+            }
+        }
+    }
+
+    const PROBES: [Vec2; 4] = [
+        Vec2(0.0, 0.0),
+        Vec2(1.0, 0.0),
+        Vec2(0.0, 1.0),
+        Vec2(-3.0, 2.5),
+    ];
+
+    /// `composed.apply(p)` against applying the two placements in turn. The
+    /// expected value is that, never anything read back from `compose`.
+    fn assert_composes(outer: InstanceTransform, inner: InstanceTransform, tolerance: f32) {
+        let composed = InstanceTransform::compose(outer, inner);
+        for p in PROBES {
+            let want = outer.apply(inner.apply(p));
+            let got = composed.apply(p);
+            assert!(
+                (want.0 - got.0).abs() < tolerance && (want.1 - got.1).abs() < tolerance,
+                "{p:?}: {want:?} != {got:?}\nouter {outer:?}\ninner {inner:?}\ncomposed {composed:?}"
+            );
+        }
+    }
+
+    /// The reproduction the old composition got wrong: an outer `(2, 1)`
+    /// scale around an inner quarter turn.
+    #[test]
+    fn a_non_uniform_scale_around_a_turn_composes_exactly() {
+        let outer = InstanceTransform {
+            scale: Vec2(2.0, 1.0),
+            ..InstanceTransform::IDENTITY
+        };
+        let inner = InstanceTransform {
+            rot: std::f32::consts::FRAC_PI_2,
+            ..InstanceTransform::IDENTITY
+        };
+        let got = InstanceTransform::compose(outer, inner).apply(Vec2(1.0, 0.0));
+        assert!(got.0.abs() < 1e-6 && (got.1 - 1.0).abs() < 1e-6, "{got:?}");
+        assert_composes(outer, inner, 1e-6);
+    }
+
+    /// Random rot / scale / shear, mirrors included, compose exactly.
+    #[test]
+    fn random_placements_compose_exactly() {
+        let mut rng = Lcg(7);
+        for _ in 0..2000 {
+            let (outer, inner) = (rng.transform(), rng.transform());
+            assert_composes(outer, inner, 1e-5);
+        }
+    }
+
+    /// Where the per-field formula was exact (outer scale uniform, or inner
+    /// turn zero, and no shear) the same `rot` and `scale` come back.
+    #[test]
+    fn a_composition_the_old_formula_got_right_keeps_its_rot_and_scale() {
+        let mut rng = Lcg(11);
+        for case in 0..2000 {
+            let mut outer = rng.transform();
+            let mut inner = rng.transform();
+            outer.shear = 0.0;
+            inner.shear = 0.0;
+            if case % 2 == 0 {
+                let uniform = rng.scale();
+                outer.scale = Vec2(uniform, uniform);
+            } else {
+                inner.rot = 0.0;
+            }
+            let composed = InstanceTransform::compose(outer, inner);
+            let (rot, scale) = (
+                outer.rot + inner.rot,
+                Vec2(outer.scale.0 * inner.scale.0, outer.scale.1 * inner.scale.1),
+            );
+            assert!(
+                (composed.rot - rot).abs() < 1e-5
+                    && (composed.scale.0 - scale.0).abs() < 1e-5
+                    && (composed.scale.1 - scale.1).abs() < 1e-5
+                    && composed.shear.abs() < 1e-5,
+                "outer {outer:?} inner {inner:?} -> {composed:?}, wanted rot {rot} scale {scale:?}"
+            );
+        }
+    }
+
+    /// A placement with a zero first column, or nothing at all, still
+    /// composes exactly: rank 1 stays a line.
+    #[test]
+    fn singular_placements_compose_exactly() {
+        let flat = InstanceTransform {
+            offset: Vec2(1.0, 2.0),
+            rot: 0.7,
+            scale: Vec2(0.0, 2.0),
+            shear: 0.0,
+        };
+        let nothing = InstanceTransform {
+            scale: Vec2(0.0, 0.0),
+            ..flat
+        };
+        let mut rng = Lcg(3);
+        for _ in 0..200 {
+            let other = rng.transform();
+            for singular in [flat, nothing] {
+                assert_composes(other, singular, 1e-4);
+                assert_composes(singular, other, 1e-4);
+            }
+        }
+        // Squashing a shape to a line and turning it keeps the line.
+        let squashed = InstanceTransform::compose(
+            InstanceTransform {
+                rot: 0.3,
+                ..InstanceTransform::IDENTITY
+            },
+            InstanceTransform {
+                scale: Vec2(0.0, 1.0),
+                ..InstanceTransform::IDENTITY
+            },
+        );
+        assert_eq!(squashed.scale.0, 0.0);
+        assert!((squashed.scale.1.abs() - 1.0).abs() < 1e-6);
+        assert_eq!(squashed.shear, 0.0);
+    }
+
+    /// A very small but non-zero scale is a placement, not a singular one:
+    /// its column is kept, so a far point still lands where it should.
+    #[test]
+    fn a_tiny_scale_is_not_taken_for_zero() {
+        let tiny = InstanceTransform {
+            scale: Vec2(5e-13, 1.0),
+            ..InstanceTransform::IDENTITY
+        };
+        let composed = InstanceTransform::compose(InstanceTransform::IDENTITY, tiny);
+        let p = Vec2(1e12, 0.0);
+        let want = tiny.apply(p);
+        let got = composed.apply(p);
+        assert!(
+            (want.0 - got.0).abs() < 1e-5 && (want.1 - got.1).abs() < 1e-5,
+            "{want:?} != {got:?} ({composed:?})"
+        );
+    }
+
+    /// `shear` is applied before `scale` and `rot`: `x' = x + shear * y`.
+    #[test]
+    fn shear_is_applied_before_scale_and_turn() {
+        let placement = InstanceTransform {
+            scale: Vec2(2.0, 3.0),
+            shear: 0.5,
+            ..InstanceTransform::IDENTITY
+        };
+        // (0, 1) shears to (0.5, 1), then scales to (1, 3).
+        let got = placement.apply(Vec2(0.0, 1.0));
+        assert!(
+            (got.0 - 1.0).abs() < 1e-6 && (got.1 - 3.0).abs() < 1e-6,
+            "{got:?}"
+        );
+    }
+
+    /// The columns a placement is read from: absent ones are the identity.
+    #[test]
+    fn instance_columns_read_missing_columns_as_the_identity() {
+        let mut set = AttributeSet::new();
+        set.insert(names::P, AttributeArray::Vec2(vec![Vec2(1.0, 1.0)]))
+            .expect("column");
+        let none = InstanceColumns::of(&set).expect("no columns is fine");
+        assert_eq!(
+            none.placement(0, Vec2(4.0, 5.0)),
+            InstanceTransform {
+                offset: Vec2(4.0, 5.0),
+                ..InstanceTransform::IDENTITY
+            }
+        );
+        set.insert(names::SHEAR, AttributeArray::F32(vec![0.75]))
+            .expect("column");
+        let some = InstanceColumns::of(&set).expect("a shear column");
+        assert_eq!(some.placement(0, Vec2(0.0, 0.0)).shear, 0.75);
+        // Out of range reads as the default rather than panicking.
+        assert_eq!(some.placement(3, Vec2(0.0, 0.0)).shear, 0.0);
     }
 }

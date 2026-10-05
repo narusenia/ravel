@@ -11,7 +11,8 @@ use thiserror::Error;
 
 use super::{
     AttrName, AttributeArray, AttributeSet, AttributeType, Domain, Geometry, GeometryError,
-    InstanceSource, InstanceTransform, MAX_INSTANCE_DEPTH, Positions, Primitive, names,
+    InstanceColumns, InstanceSource, InstanceTransform, MAX_INSTANCE_DEPTH, Positions, Primitive,
+    names,
 };
 use crate::types::{Color, Rect, Vec2, Vec3, Vec4};
 
@@ -1162,11 +1163,10 @@ pub fn bounds_center(geometry: &Geometry) -> Option<Vec3> {
 /// smaller than the picture:
 ///
 /// * **the accumulated placement**, composed with
-///   [`InstanceTransform::compose`] — *not* the exact affine product. The
-///   composition keeps the result a scale-rotate-translate, so a non-uniform
-///   scale under a turn loses the shear; `container.rs` states that rather
-///   than fixing it, so that drawing and flattening stay the same picture.
-///   Measuring with the exact product bounds a picture nobody draws.
+///   [`InstanceTransform::compose`], which is the exact affine product (a
+///   non-uniform scale under a turn comes out as a `shear`). Flattening
+///   ([`expand_instances`]) bakes the same product into the points, so the
+///   bounds contain the expanded points.
 /// * **the inherited `stroke_width`**, scaled by that placement's
 ///   [`InstanceTransform::uniform_scale`] at the level it is stroked, because
 ///   that is what the rasterizer strokes with. The bbox grows by the widest
@@ -1177,7 +1177,7 @@ pub fn bounds_center(geometry: &Geometry) -> Option<Vec3> {
 ///   carries them down `Style::shape`; a source's own Detail is not read.
 ///
 /// The instance columns and the cutoff are [`expand_instances`]': the same
-/// `P` / `rot` / `scale` / `source_index`, the same [`MAX_INSTANCE_DEPTH`],
+/// `P` / `rot` / `scale` / `shear` / `source_index`, the same [`MAX_INSTANCE_DEPTH`],
 /// the same clamping of an out-of-range `source_index`. What is flattened and
 /// what is measured have to be the same set of elements.
 ///
@@ -1370,13 +1370,9 @@ fn placed_ink(
 /// by the composition of `placement` with that instance's own transform.
 ///
 /// `InstanceTransform::compose` rather than applying the two placements in
-/// turn. The composition is **not** the exact affine product — the result is
-/// again a scale-rotate-translate, so a non-uniform scale under two turns
-/// loses the shear — and `container.rs` states that rather than fixing it so
-/// that drawing and flattening stay the same picture. Measuring with the
-/// exact product would therefore bound a picture nobody draws: a 20×2 image
-/// turned a quarter-turn inside a 10×-wide instance is drawn 2×200, and the
-/// exact product says 20×20.
+/// turn: it is the exact affine product, carried as one placement so a
+/// nesting stays `O(depth)` per instance. A 20×2 image turned a quarter-turn
+/// inside a 10×-wide instance is 20×200 once placed, and the bounds say so.
 fn instance_bounds(
     geometry: &Geometry,
     depth: u32,
@@ -1402,12 +1398,7 @@ fn instance_bounds(
     // and `expand_at` requires it planar, so both draw nothing here too.
     let offsets = offsets.planar()?;
     let instances = geometry.instances();
-    let rots = instances
-        .get(names::ROT)
-        .and_then(|column| column.as_f32(names::ROT).ok());
-    let scales = instances
-        .get(names::SCALE)
-        .and_then(|column| column.as_vec2(names::SCALE).ok());
+    let columns = InstanceColumns::lenient(instances);
     let source_indices = instances
         .get(names::SOURCE_INDEX)
         .and_then(|column| column.as_i32(names::SOURCE_INDEX).ok());
@@ -1427,15 +1418,7 @@ fn instance_bounds(
 
     let mut bounds = None;
     for (index, offset) in offsets.iter().enumerate() {
-        let local = InstanceTransform {
-            offset: *offset,
-            rot: rots
-                .and_then(|values| values.get(index).copied())
-                .unwrap_or(0.0),
-            scale: scales
-                .and_then(|values| values.get(index).copied())
-                .unwrap_or(InstanceTransform::IDENTITY.scale),
-        };
+        let local = columns.placement(index, *offset);
         let next = InstanceTransform::compose(placement, local);
         let width = inherited_width.max(
             widths
@@ -2233,7 +2216,7 @@ fn normalize(value: Vec2) -> Vec2 {
 
 /// The instance columns [`expand_instances`] consumes rather than passes down.
 ///
-/// `P` / `rot` / `scale` become the placement baked into the points, and
+/// `P` / `rot` / `scale` / `shear` become the placement baked into the points, and
 /// `source_index` names a source list the expanded geometry no longer has;
 /// keeping any of them on the Point domain would describe a placement that
 /// has already happened. Everything else — `index`, `Cd`, and the
@@ -2245,13 +2228,19 @@ fn normalize(value: Vec2) -> Vec2 {
 fn is_placement_attribute(name: &str) -> bool {
     matches!(
         name,
-        names::P | names::ROT | names::SCALE | names::SCALE3 | names::ORIENT | names::SOURCE_INDEX
+        names::P
+            | names::ROT
+            | names::SCALE
+            | names::SHEAR
+            | names::SCALE3
+            | names::ORIENT
+            | names::SOURCE_INDEX
     )
 }
 
 /// Flattens an instance geometry into one geometry of points and primitives.
 ///
-/// Each instance's placement ([`InstanceTransform`]: `P` / `rot` / `scale`)
+/// Each instance's placement ([`InstanceTransform`]: `P` / `rot` / `scale` / `shear`)
 /// is baked into the copy of its source that instance contributes, and the
 /// instance's remaining attributes descend onto the Point and Primitive
 /// domains of that copy — so a per-character attribute `text.layout` wrote on
@@ -2302,16 +2291,7 @@ fn expand_at(geometry: &Geometry, depth: u32) -> Result<Geometry, GeometryOpErro
         return Ok(without_instances(geometry));
     };
     let offsets = offsets?.require_planar("instance expansion")?.to_vec();
-    let rots = geometry
-        .instances()
-        .get(names::ROT)
-        .map(|column| column.as_f32(names::ROT).map(<[f32]>::to_vec))
-        .transpose()?;
-    let scales = geometry
-        .instances()
-        .get(names::SCALE)
-        .map(|column| column.as_vec2(names::SCALE).map(<[Vec2]>::to_vec))
-        .transpose()?;
+    let columns = InstanceColumns::of(geometry.instances())?;
     let source_indices = geometry
         .instances()
         .get(names::SOURCE_INDEX)
@@ -2342,13 +2322,7 @@ fn expand_at(geometry: &Geometry, depth: u32) -> Result<Geometry, GeometryOpErro
                 );
                 continue;
             };
-            let placement = InstanceTransform {
-                offset: *offset,
-                rot: rots.as_ref().map_or(0.0, |values| values[index]),
-                scale: scales
-                    .as_ref()
-                    .map_or(InstanceTransform::IDENTITY.scale, |values| values[index]),
-            };
+            let placement = columns.placement(index, *offset);
             blocks.push((
                 Cow::Owned(expand_at(source, depth + 1)?),
                 placement,
@@ -2525,7 +2499,7 @@ pub struct InstancePiece {
 /// piece and lose the order besides. The instance domain is in character
 /// order, which is the order a caller wants to deal them out in.
 ///
-/// Each piece carries its instance's `rot` and `scale` **baked in**, and its
+/// Each piece carries its instance's `rot`, `scale` and `shear` **baked in**, and its
 /// `P` dropped: a turned character stays turned wherever it is dealt, while
 /// where it sat in the original layout is exactly what the caller is
 /// replacing. The placement is [`InstanceTransform`] with the offset removed
@@ -2559,14 +2533,7 @@ pub fn instance_pieces(geometry: &Geometry) -> Result<Vec<InstancePiece>, Geomet
         return Ok(vec![whole_piece(without_instances(geometry))]);
     };
     let count = offsets?.require_planar("instance pieces")?.len();
-    let rots = instances
-        .get(names::ROT)
-        .map(|column| column.as_f32(names::ROT).map(<[f32]>::to_vec))
-        .transpose()?;
-    let scales = instances
-        .get(names::SCALE)
-        .map(|column| column.as_vec2(names::SCALE).map(<[Vec2]>::to_vec))
-        .transpose()?;
+    let columns = InstanceColumns::of(instances)?;
     let source_indices = instances
         .get(names::SOURCE_INDEX)
         .map(|column| column.as_i32(names::SOURCE_INDEX).map(<[i32]>::to_vec))
@@ -2576,13 +2543,7 @@ pub fn instance_pieces(geometry: &Geometry) -> Result<Vec<InstancePiece>, Geomet
     for index in 0..count {
         // The offset is deliberately absent: `P` is the layout this split
         // exists to replace.
-        let placement = InstanceTransform {
-            offset: Vec2(0.0, 0.0),
-            rot: rots.as_ref().map_or(0.0, |values| values[index]),
-            scale: scales
-                .as_ref()
-                .map_or(InstanceTransform::IDENTITY.scale, |values| values[index]),
-        };
+        let placement = columns.placement(index, Vec2(0.0, 0.0));
         let source = match select_source(geometry.sources(), source_indices.as_deref(), index) {
             InstanceSource::Geometry(source) => {
                 InstanceSource::Geometry(Arc::new(placed(source, placement)?))
@@ -2718,31 +2679,20 @@ fn placed(geometry: &Geometry, placement: InstanceTransform) -> Result<Geometry,
             .expect("checked above")
             .as_vec2(names::P)?
             .to_vec();
-        let rots = instances
-            .get(names::ROT)
-            .map(|column| column.as_f32(names::ROT).map(<[f32]>::to_vec))
-            .transpose()?;
-        let scales = instances
-            .get(names::SCALE)
-            .map(|column| column.as_vec2(names::SCALE).map(<[Vec2]>::to_vec))
-            .transpose()?;
+        let columns = InstanceColumns::of(instances)?;
         offsets
             .iter()
             .enumerate()
             .map(|(index, offset)| {
-                InstanceTransform::compose(
-                    placement,
-                    InstanceTransform {
-                        offset: *offset,
-                        rot: rots.as_ref().map_or(0.0, |values| values[index]),
-                        scale: scales
-                            .as_ref()
-                            .map_or(InstanceTransform::IDENTITY.scale, |values| values[index]),
-                    },
-                )
+                InstanceTransform::compose(placement, columns.placement(index, *offset))
             })
             .collect()
     };
+    // `shear` is written only when something is sheared or the column is
+    // already there, so a geometry that never shears does not grow a column
+    // of zeros in the spreadsheet.
+    let write_shear =
+        out.instances().get(names::SHEAR).is_some() || inner.iter().any(|t| t.shear != 0.0);
     let instances = out.instances_mut();
     instances.insert(
         names::P,
@@ -2758,6 +2708,12 @@ fn placed(geometry: &Geometry, placement: InstanceTransform) -> Result<Geometry,
         names::SCALE,
         AttributeArray::Vec2(inner.iter().map(|t| t.scale).collect()),
     )?;
+    if write_shear {
+        instances.insert(
+            names::SHEAR,
+            AttributeArray::F32(inner.iter().map(|t| t.shear).collect()),
+        )?;
+    }
     Ok(out)
 }
 
@@ -3316,17 +3272,10 @@ mod tests {
         assert!(miter.width > round.width, "{miter:?} vs {round:?}");
     }
 
-    /// Nesting composes through [`InstanceTransform::compose`], not through
-    /// the exact affine product.
-    ///
-    /// `compose` keeps the result a scale-rotate-translate, so the turns add
-    /// and the scales multiply per axis — a non-uniform scale under a turn
-    /// loses the shear. `container.rs` **states** that rather than fixing it,
-    /// so that drawing and flattening stay the same picture; measuring with
-    /// the exact product therefore bounds a picture nobody draws. A 20×2 image
-    /// turned a quarter-turn inside a 10×-wide instance is drawn 2 × 200, and
-    /// applying the two placements in turn says 20 × 20 — the bbox missed the
-    /// ink by 90 units above and below.
+    /// Nesting composes through [`InstanceTransform::compose`], which is the
+    /// exact affine product: a 20×2 image turned a quarter-turn inside a
+    /// 10×-wide instance is a 20 × 20 square, the same as applying the two
+    /// placements in turn.
     #[test]
     fn nesting_is_bounded_the_way_the_placements_compose() {
         let mut inner = one_instance(image_source(20, 2), Vec2(3.0, 5.0), FRAC_PI_2);
@@ -3351,25 +3300,22 @@ mod tests {
         outer.set_sources(vec![InstanceSource::Geometry(Arc::new(inner))]);
 
         let bounds = drawn_bounds(&outer).expect("a nested image has an extent");
-        // `compose(outer, inner)` is offset `outer.apply((3, 5))` = (37, 16),
-        // a quarter turn, and scale (10, 1). So (±10, ±1) scales to (±100,
-        // ±1), the turn swaps the axes, and (37, 16) moves it. Reversing the
-        // two placements would put it at (-8, 12) instead.
+        // Applying the two placements in turn to a corner `(qx, qy)`: the
+        // inner one gives `(3 - qy, 5 + qx)`, the outer one `(7 + 10 (3 - qy),
+        // 11 + 5 + qx)` = `(37 - 10 qy, 16 + qx)`. With `qx` in ±10 and `qy`
+        // in ±1 that is x in 37 ± 10 and y in 16 ± 10. Reversing the two
+        // placements would put it somewhere else entirely.
         for (what, got, want) in [
-            ("x", bounds.x, 36.0),
-            ("y", bounds.y, -84.0),
-            ("width", bounds.width, 2.0),
-            ("height", bounds.height, 200.0),
+            ("x", bounds.x, 27.0),
+            ("y", bounds.y, 6.0),
+            ("width", bounds.width, 20.0),
+            ("height", bounds.height, 20.0),
         ] {
             assert!(
                 (got - want).abs() < 1e-3,
                 "{what}: {got} is not {want} — {bounds:?}"
             );
         }
-        assert!(
-            bounds.height > bounds.width,
-            "the exact product would report a square: {bounds:?}"
-        );
     }
 
     /// The cost condition, opt-in because it is a measurement rather than an
@@ -5377,16 +5323,19 @@ mod tests {
                 offset: Vec2(40.0, 90.0),
                 rot: 0.0,
                 scale: Vec2(2.0, 2.0),
+                shear: 0.0,
             },
             InstanceTransform {
                 offset: Vec2(70.0, 90.0),
                 rot: std::f32::consts::FRAC_PI_2,
                 scale: Vec2(3.0, 3.0),
+                shear: 0.0,
             },
             InstanceTransform {
                 offset: Vec2(100.0, 90.0),
                 rot: -0.75,
                 scale: Vec2(1.5, 0.5),
+                shear: 0.0,
             },
         ];
         for (instance, placement) in placements.iter().enumerate() {
@@ -5951,6 +5900,135 @@ mod tests {
         assert!(
             placed.0.abs() < 1e-3 && (placed.1 - 7.0).abs() < 1e-3,
             "the outer turn has to compose over the inner scale: {placed:?}"
+        );
+    }
+
+    /// A leaf of four points under two levels of placement, both turned,
+    /// non-uniformly scaled and sheared: the shape for which the old
+    /// scale-rotate-translate composition was wrong. The outer instance is at
+    /// the origin so a split (which drops the layout offset) is comparable.
+    fn sheared_nesting(outer_offset: Vec2) -> Geometry {
+        let column = |name: &str, values: AttributeArray| (name.to_owned(), values);
+        let level = |source: Geometry, columns: Vec<(String, AttributeArray)>| {
+            let mut geometry = Geometry::new();
+            for (name, values) in columns {
+                geometry
+                    .instances_mut()
+                    .insert(name.as_str(), values)
+                    .expect("one row");
+            }
+            geometry.set_instance_source(Some(Arc::new(source)));
+            geometry
+        };
+        let leaf = Geometry::from_points(vec![
+            Vec2(1.0, 0.0),
+            Vec2(0.0, 2.0),
+            Vec2(-3.0, 1.0),
+            Vec2(2.0, -2.5),
+        ]);
+        let inner = level(
+            leaf,
+            vec![
+                column(names::P, AttributeArray::Vec2(vec![Vec2(1.0, 2.0)])),
+                column(names::ROT, AttributeArray::F32(vec![FRAC_PI_2])),
+                column(names::SCALE, AttributeArray::Vec2(vec![Vec2(1.5, 0.5)])),
+                column(names::SHEAR, AttributeArray::F32(vec![-0.3])),
+            ],
+        );
+        level(
+            inner,
+            vec![
+                column(names::P, AttributeArray::Vec2(vec![outer_offset])),
+                column(names::ROT, AttributeArray::F32(vec![0.4])),
+                column(names::SCALE, AttributeArray::Vec2(vec![Vec2(2.0, 1.0)])),
+                column(names::SHEAR, AttributeArray::F32(vec![0.25])),
+            ],
+        )
+    }
+
+    /// Drawing and flattening are one picture: the bounds of a sheared nesting
+    /// contain every point `expand_instances` produces, and are about as wide.
+    #[test]
+    fn drawn_bounds_contain_the_expanded_points_of_a_sheared_nesting() {
+        let nesting = sheared_nesting(Vec2(5.0, -3.0));
+        let bounds = drawn_bounds(&nesting).expect("a nesting of points has an extent");
+        let expanded = expand_instances(&nesting).expect("the nesting expands");
+        let points = vec2_column(&expanded, names::P);
+        assert_eq!(points.len(), 4);
+        let eps = 1e-3;
+        for p in &points {
+            assert!(
+                p.0 >= bounds.x - eps
+                    && p.0 <= bounds.x + bounds.width + eps
+                    && p.1 >= bounds.y - eps
+                    && p.1 <= bounds.y + bounds.height + eps,
+                "{p:?} is outside {bounds:?}"
+            );
+        }
+        let (min_x, max_x) = points.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+            (lo.min(p.0), hi.max(p.0))
+        });
+        // Points carry a little reach of their own, so the bounds may exceed
+        // them; a bound off by a placement mistake would be far more.
+        assert!(
+            bounds.width < (max_x - min_x) + 1.0,
+            "the bounds are about as wide as the points: {bounds:?} vs {min_x}..{max_x}"
+        );
+    }
+
+    /// A piece of a sheared nesting lands the same points the original
+    /// placement does.
+    #[test]
+    fn a_piece_of_a_sheared_nesting_has_the_original_points() {
+        let nesting = sheared_nesting(Vec2(0.0, 0.0));
+        let want = vec2_column(&expand_instances(&nesting).expect("expands"), names::P);
+        let pieces = instance_pieces(&nesting).expect("a nesting splits");
+        assert_eq!(pieces.len(), 1);
+        let got = vec2_column(
+            &expand_instances(piece_geometry(&pieces[0])).expect("the piece expands"),
+            names::P,
+        );
+        assert_eq!(want.len(), 4, "the fixture has four leaf points");
+        assert_eq!(got.len(), want.len());
+        for (g, w) in got.iter().zip(&want) {
+            assert!(
+                (g.0 - w.0).abs() < 1e-3 && (g.1 - w.1).abs() < 1e-3,
+                "{g:?} != {w:?}"
+            );
+        }
+    }
+
+    /// A split writes a `shear` column only when something is sheared, so a
+    /// geometry that never shears does not grow a column of zeros.
+    #[test]
+    fn a_split_writes_shear_only_when_there_is_some() {
+        let pieces = instance_pieces(&sheared_nesting(Vec2(0.0, 0.0))).expect("splits");
+        let piece = piece_geometry(&pieces[0]);
+        assert!(piece.instances().get(names::SHEAR).is_some());
+
+        let mut inner = Geometry::from_points(vec![Vec2(1.0, 0.0)]);
+        inner
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(1.0, 0.0)]))
+            .expect("one offset");
+        inner.set_instance_source(Some(Arc::new(Geometry::from_points(vec![Vec2(1.0, 1.0)]))));
+        let mut outer = Geometry::new();
+        outer
+            .instances_mut()
+            .insert(names::SCALE, AttributeArray::Vec2(vec![Vec2(2.0, 3.0)]))
+            .expect("one scale");
+        outer
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]))
+            .expect("one offset");
+        outer.set_instance_source(Some(Arc::new(inner)));
+        let pieces = instance_pieces(&outer).expect("splits");
+        assert!(
+            piece_geometry(&pieces[0])
+                .instances()
+                .get(names::SHEAR)
+                .is_none(),
+            "nothing sheared, so no column"
         );
     }
 

@@ -308,7 +308,7 @@ F32 カーブ。つまり**「赤→青のグラデーションで塗る」が�
 > 単位 3 へ繰り延べたのと同じ構図**なので、まとめて別計画で扱う。
 > → `issues/closed/medium-gpu-nodes.md` の `MED-GPU-08`
 >
-> **→ 実装済み（`PSHADE-1`〜`3` / `5`、#587, #TBD）**: 上の結合テストは画素まで通るように
+> **→ 実装済み（`PSHADE-1`〜`3` / `5`、#587, #588）**: 上の結合テストは画素まで通るように
 > なった。`crates/ravel-nodes/tests/path_shading_golden.rs` が
 > `shape.line → attribute.curveu → field.attribute("u") → field.ramp → field.apply →
 > rasterize` を CPU / GPU で描き、始点側と終点側の色が違うことを手計算の値で pin する。

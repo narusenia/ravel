@@ -358,7 +358,7 @@ scale = outer.scale * local.scale   （成分ごと）
 
 ## MED-GPU-08 | bug / debt | `rasterize` がパスの点ごとの色を一切描かない（Point ドメインの `Cd` が無音で捨てられる）
 
-> **解決済み**: PSHADE-1〜3 / 5（#587, #TBD）。CPU に `rasterize` 専用の per-pixel 評価器
+> **解決済み**: PSHADE-1〜3 / 5（#587, #588）。CPU に `rasterize` 専用の per-pixel 評価器
 > `path_sample`（`rasterize/sample.rs`、非公開。`ravel_core::geometry::path_sample` の
 > 弧長サンプリングとは別物）を置き、WGSL の `path_sample` と同じ規則（輪郭の区切り・
 > 閉パスの折り返し・開パスの最終頂点はセグメントを始めない）で最近傍セグメントと `t` を返す。

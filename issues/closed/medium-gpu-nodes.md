@@ -284,7 +284,7 @@ low でないのは、ペンツールで描いた曲線という**ユーザー�
 
 ## MED-GPU-09 | bug | `Placement::compose` が非一様スケールと回転の合成で誤った変換を作る
 
-> **解決済み**: IXF-1〜4（#585 ほか）。`InstanceTransform` が `rot` / `scale` に予約属性
+> **解決済み**: IXF-1〜4（#585, #586）。`InstanceTransform` が `rot` / `scale` に予約属性
 > `shear` を加えた `R · S · H` を持ち、`compose` は線形部分を 2×2 の積で求めて 1 箇所の分解で
 > 戻す（厳密な合成）。列の読み取りは `InstanceColumns` に一本化した。`rasterize` は CPU / GPU とも
 > 同じ配置を使い、画像インスタンスは逆行列を `stroke_color` に詰めて WGSL が掛ける

@@ -12,8 +12,8 @@ use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{
     AttributeArray, AttributeSet, ConnectInterpolation, ConnectMode, Domain, Geometry,
-    InstanceImage, InstanceSource, InstanceTransform, SortMode, bounds_center, connect, names,
-    sort,
+    InstanceColumns, InstanceImage, InstanceSource, InstanceTransform, SortMode, bounds_center,
+    connect, names, sort,
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, NodeData, Vec2, Vec3, Vec4};
@@ -190,36 +190,46 @@ pub fn apply_transform<'a>(
         if out.instances().get(names::P).is_some() {
             transform_positions(out.instances_mut(), &apply, &apply3)?;
         }
-        // Valid instance geometry may omit rot/scale — consumers
-        // default them to 0 / (1,1) — so materialize the column from
-        // its implicit default before composing.
-        let count = out.instance_count();
-        if rotation != 0.0 {
-            if out.instances().get(names::ROT).is_none() {
-                out.instances_mut()
-                    .insert(names::ROT, AttributeArray::F32(vec![0.0; count]))?;
-            }
-            for r in out
-                .instances_mut()
-                .make_mut(names::ROT)?
-                .as_f32_mut(names::ROT)?
-            {
-                *r += rotation;
-            }
-        }
-        if scale != Vec2(1.0, 1.0) {
-            if out.instances().get(names::SCALE).is_none() {
-                out.instances_mut().insert(
-                    names::SCALE,
-                    AttributeArray::Vec2(vec![Vec2(1.0, 1.0); count]),
+        // The node's transform is the outer placement of every instance:
+        // its position went through `transform_positions` above, and the
+        // linear part is composed exactly with the instance's own, so a
+        // non-uniform scale over a turned instance shears instead of
+        // multiplying the two columns separately. `P` is not part of that
+        // linear placement, hence the zero offset.
+        if rotation != 0.0 || scale != Vec2(1.0, 1.0) {
+            let instances = out.instances();
+            let columns = InstanceColumns::of(instances)?;
+            let placements: Vec<InstanceTransform> = (0..out.instance_count())
+                .map(|index| {
+                    InstanceTransform::compose(linear, columns.placement(index, Vec2(0.0, 0.0)))
+                })
+                .collect();
+            // A column is written when it is already there or something now
+            // differs from its default: valid instance geometry may omit
+            // rot / scale / shear (consumers read them as 0 / (1,1) / 0), and
+            // a geometry that never shears must not grow a column of zeros.
+            let has = |name: &str| instances.get(name).is_some();
+            let write_rot = has(names::ROT) || rotation != 0.0;
+            let write_scale = has(names::SCALE) || scale != Vec2(1.0, 1.0);
+            let write_shear = has(names::SHEAR) || placements.iter().any(|t| t.shear != 0.0);
+            let instances = out.instances_mut();
+            if write_rot {
+                instances.insert(
+                    names::ROT,
+                    AttributeArray::F32(placements.iter().map(|t| t.rot).collect()),
                 )?;
             }
-            for s in out
-                .instances_mut()
-                .make_mut(names::SCALE)?
-                .as_vec2_mut(names::SCALE)?
-            {
-                *s = Vec2(s.0 * scale.0, s.1 * scale.1);
+            if write_scale {
+                instances.insert(
+                    names::SCALE,
+                    AttributeArray::Vec2(placements.iter().map(|t| t.scale).collect()),
+                )?;
+            }
+            if write_shear {
+                instances.insert(
+                    names::SHEAR,
+                    AttributeArray::F32(placements.iter().map(|t| t.shear).collect()),
+                )?;
             }
         }
     }
@@ -1408,6 +1418,67 @@ mod tests {
             .as_vec2(names::SCALE)
             .unwrap()[0];
         assert_eq!(scale, Vec2(4.0, 6.0));
+    }
+
+    /// What `text.on_path` hands over: instances turned to follow a curve. A
+    /// non-uniform transform over them shears, which no per-column product can
+    /// hold; the reference is flattening first and transforming the points.
+    #[test]
+    fn a_non_uniform_transform_over_turned_instances_matches_expand_then_transform() {
+        let mut glyph =
+            Geometry::from_points(vec![Vec2(1.0, 0.0), Vec2(0.0, 2.0), Vec2(-1.0, 1.0)]);
+        glyph.push_primitive(ravel_core::geometry::Primitive::Path {
+            verts: 0..3,
+            closed: true,
+        });
+        let mut geo = Geometry::new();
+        geo.set_instance_source(Some(Arc::new(glyph)));
+        geo.instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(5.0, 1.0), Vec2(9.0, 4.0)]),
+            )
+            .unwrap();
+        geo.instances_mut()
+            .insert(names::ROT, AttributeArray::F32(vec![0.0, 0.7, 1.5]))
+            .unwrap();
+        geo.instances_mut()
+            .insert(
+                names::SCALE,
+                AttributeArray::Vec2(vec![Vec2(1.0, 1.0), Vec2(1.5, 0.5), Vec2(-1.0, 2.0)]),
+            )
+            .unwrap();
+        let params = [
+            ("use_centroid", ParameterValue::Bool(false)),
+            ("pivot", ParameterValue::vec3(2.0, 1.0, 0.0)),
+            ("translate", ParameterValue::vec3(3.0, -1.0, 0.0)),
+            ("rotation", ParameterValue::vec3(0.0, 0.0, 25.0)),
+            ("scale", ParameterValue::vec3(2.5, 0.6, 1.0)),
+        ];
+        let placed_then_flattened =
+            ravel_core::geometry::expand_instances(&transformed(&params, geo.clone())).unwrap();
+        let flattened_then_placed = transformed(
+            &params,
+            ravel_core::geometry::expand_instances(&geo).unwrap(),
+        );
+        let (a, b) = (
+            point_positions(&placed_then_flattened),
+            point_positions(&flattened_then_placed),
+        );
+        assert_eq!(a.len(), 9);
+        for (a, b) in a.iter().zip(&b) {
+            assert!(
+                (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4,
+                "{a:?} vs {b:?}"
+            );
+        }
+        // The turned instances really did pick up a shear.
+        assert!(
+            transformed(&params, geo)
+                .instances()
+                .get(names::SHEAR)
+                .is_some_and(|c| c.as_f32(names::SHEAR).unwrap().iter().any(|v| *v != 0.0))
+        );
     }
 
     #[test]

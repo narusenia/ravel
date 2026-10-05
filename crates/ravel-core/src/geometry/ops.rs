@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+use super::absent::{self, absent_column, absent_value};
 use super::{
     AttrName, AttributeArray, AttributeSet, AttributeType, Domain, Geometry, GeometryError,
     InstanceColumns, InstanceSource, InstanceTransform, MAX_INSTANCE_DEPTH, Positions, Primitive,
@@ -1576,7 +1577,7 @@ fn positions(geometry: &Geometry, domain: Domain) -> Result<Positions<'_>, Geome
         })??)
 }
 
-fn broadcast_value(value: &AttributeValue, count: usize) -> AttributeArray {
+pub(super) fn broadcast_value(value: &AttributeValue, count: usize) -> AttributeArray {
     match value {
         AttributeValue::F32(value) => AttributeArray::F32(vec![*value; count]),
         AttributeValue::Vec2(value) => AttributeArray::Vec2(vec![*value; count]),
@@ -2349,8 +2350,8 @@ fn expand_at(geometry: &Geometry, depth: u32) -> Result<Geometry, GeometryOpErro
         }
     }
 
-    let mut points = ColumnAccumulator::default();
-    let mut primitive_attrs = ColumnAccumulator::default();
+    let mut points = ColumnAccumulator::new(Domain::Point);
+    let mut primitive_attrs = ColumnAccumulator::new(Domain::Primitive);
     let mut out = Geometry::new();
     // Where each block's points landed, so the placement can be baked into
     // them once every column exists.
@@ -2359,8 +2360,8 @@ fn expand_at(geometry: &Geometry, depth: u32) -> Result<Geometry, GeometryOpErro
         let inherited = instance.map(|index| (instances, index));
         let point_count = block.point_count();
         let start = points.len;
-        points.push(block.points(), inherited, point_count)?;
-        primitive_attrs.push(block.primitive_attrs(), inherited, block.primitive_count())?;
+        points.push(block, inherited, point_count)?;
+        primitive_attrs.push(block, inherited, block.primitive_count())?;
         point_ranges.push((start..start + point_count, *placement));
 
         let index_offset = out.extend_indices(block.indices());
@@ -2599,8 +2600,10 @@ pub fn instance_pieces(geometry: &Geometry) -> Result<Vec<InstancePiece>, Geomet
 /// user column the scatter happens to write wins over the source's, which
 /// is the precedence [`expand_instances`] already applies.
 ///
-/// A piece that does not carry a column contributes that column's typed
-/// zero for its instances, the fill rule `geometry.merge` uses.
+/// A piece that does not carry a column contributes that column's absent
+/// value for its instances ([`absent`]) — what a reader would see without
+/// the column — and the typed zero for a name that is not reserved. That is
+/// the fill rule `geometry.merge` uses.
 pub fn attach_piece_attributes(
     geometry: &mut Geometry,
     pieces: &[InstancePiece],
@@ -2629,29 +2632,50 @@ pub fn attach_piece_attributes(
         }
     }
 
+    // `stroke_color` last: a row without one takes the row's `Cd`, which has
+    // to be in the output by then.
+    pending.sort_by_key(|name| name.as_str() == names::STROKE_COLOR);
     for name in pending {
         let sample = pieces
             .iter()
             .find_map(|piece| piece.attributes.get(name.as_str()))
             .expect("the name came from one of the pieces");
+        let attr_type = sample.attr_type();
         let mut accumulated = empty_like(sample);
         for index in 0..count {
             let slot = source_slot(pieces.len(), source_indices.as_deref(), index);
-            append_rows(
-                name.as_str(),
-                &mut accumulated,
-                pieces[slot]
-                    .attributes
-                    .get(name.as_str())
-                    .map(|column| column.as_ref()),
-                1,
-            )?;
+            let row = match pieces[slot].attributes.get(name.as_str()) {
+                Some(column) => column.as_ref().clone(),
+                None => absent_instance_row(geometry.instances(), name.as_str(), attr_type, index),
+            };
+            append_rows(name.as_str(), &mut accumulated, &row)?;
         }
         geometry
             .instances_mut()
             .insert(name.as_str(), accumulated)?;
     }
     Ok(())
+}
+
+/// One Instance row of `name` for a piece that does not carry it: the
+/// attribute's absent value, except that a `stroke_color` follows the same
+/// output row's `Cd` (white when the output has none), the way an absent one
+/// reads in `rasterize`.
+fn absent_instance_row(
+    instances: &AttributeSet,
+    name: &str,
+    attr_type: AttributeType,
+    index: usize,
+) -> AttributeArray {
+    if name == names::STROKE_COLOR && attr_type == AttributeType::Color {
+        let fill = instances
+            .get(names::CD)
+            .and_then(|column| column.as_color(names::CD).ok())
+            .and_then(|colors| colors.get(index).copied())
+            .unwrap_or(absent::DEFAULT_COLOR);
+        return AttributeArray::Color(vec![fill]);
+    }
+    broadcast_value(&absent_value(Domain::Instance, name, attr_type), 1)
 }
 
 /// The whole geometry as its own single piece.
@@ -2750,29 +2774,55 @@ fn instance_row(instances: &AttributeSet, index: usize) -> Result<AttributeSet, 
 
 /// Concatenates attribute sets of differing shape, one block at a time.
 ///
-/// A name a block does not carry is filled with that column type's zero for
-/// the block's rows (the fill rule `geometry.merge` uses), and a name first
-/// seen partway through is back-filled the same way. Column order follows
-/// first appearance, so the output does not depend on `HashMap` iteration
-/// order.
-#[derive(Default)]
-struct ColumnAccumulator {
+/// A name a block does not carry is filled for the block's rows with what a
+/// reader would see without the column ([`absent_column`], read off the
+/// block): `alpha` 1, `scale` (1, 1), a point's `pscale` 2, and so on, the
+/// typed zero only for a name that is not reserved. The fill rule
+/// `geometry.merge` uses. Column order follows first appearance, so the
+/// output does not depend on `HashMap` iteration order.
+///
+/// Rows are appended as each block arrives and not kept. Filling a column
+/// that first appears partway through needs the earlier blocks only through
+/// what [`absent_column`] reads: the block geometry (borrowed) and its
+/// effective `Cd` (a `stroke_color` follows it), so that is all that is
+/// remembered per block.
+struct ColumnAccumulator<'a> {
+    domain: Domain,
     columns: Vec<(AttrName, AttributeArray)>,
+    blocks: Vec<AccumulatedBlock<'a>>,
     len: usize,
 }
 
-impl ColumnAccumulator {
+struct AccumulatedBlock<'a> {
+    geometry: &'a Geometry,
+    /// The block's `Cd` rows as they end up in the output, when it has a
+    /// colour column.
+    cd: Option<Cow<'a, AttributeArray>>,
+    count: usize,
+}
+
+impl<'a> ColumnAccumulator<'a> {
+    fn new(domain: Domain) -> Self {
+        Self {
+            domain,
+            columns: Vec::new(),
+            blocks: Vec::new(),
+            len: 0,
+        }
+    }
+
     /// Appends `count` rows.
     ///
-    /// `own` is the block's own column set and wins where names collide;
-    /// `inherited` is the instance domain and the row inside it whose values
-    /// broadcast over every row this block contributes.
+    /// `block`'s own columns on the accumulator's domain win where names
+    /// collide; `inherited` is the instance domain and the row inside it
+    /// whose values broadcast over every row this block contributes.
     fn push(
         &mut self,
-        own: &AttributeSet,
-        inherited: Option<(&AttributeSet, usize)>,
+        block: &'a Geometry,
+        inherited: Option<(&'a AttributeSet, usize)>,
         count: usize,
     ) -> Result<(), GeometryError> {
+        let own = block.attribute_set(self.domain);
         let mut rows: Vec<(&AttrName, Cow<'_, AttributeArray>)> = own
             .iter()
             .map(|(name, column)| (name, Cow::Borrowed(column.as_ref())))
@@ -2792,14 +2842,25 @@ impl ColumnAccumulator {
                     }),
             );
         }
-
-        let block = |name: &AttrName| {
-            rows.iter()
-                .find(|(row_name, _)| *row_name == name)
-                .map(|(_, column)| column.as_ref())
+        let cd = rows
+            .iter()
+            .position(|(name, _)| name.as_str() == names::CD)
+            .filter(|at| matches!(rows[*at].1.as_ref(), AttributeArray::Color(_)))
+            .map(|at| rows[at].1.clone());
+        let info = AccumulatedBlock {
+            geometry: block,
+            cd,
+            count,
         };
+
         for (name, accumulated) in &mut self.columns {
-            append_rows(name, accumulated, block(name), count)?;
+            match rows.iter().find(|(row, _)| *row == name) {
+                Some((_, column)) => append_rows(name, accumulated, column)?,
+                None => {
+                    let fill = fill_missing(self.domain, &info, name, accumulated.attr_type());
+                    append_rows(name, accumulated, &fill)?;
+                }
+            }
         }
         for (name, column) in &rows {
             if self.columns.iter().any(|(seen, _)| seen == *name) {
@@ -2807,10 +2868,14 @@ impl ColumnAccumulator {
             }
             let mut accumulated = empty_like(column);
             // The rows accumulated before this name appeared.
-            append_rows(name, &mut accumulated, None, self.len)?;
-            append_rows(name, &mut accumulated, Some(column), count)?;
+            for earlier in &self.blocks {
+                let fill = fill_missing(self.domain, earlier, name, accumulated.attr_type());
+                append_rows(name, &mut accumulated, &fill)?;
+            }
+            append_rows(name, &mut accumulated, column)?;
             self.columns.push(((*name).clone(), accumulated));
         }
+        self.blocks.push(info);
         self.len += count;
         Ok(())
     }
@@ -2822,6 +2887,25 @@ impl ColumnAccumulator {
         }
         Ok(set)
     }
+}
+
+/// The rows of `name` for a block that does not carry it.
+///
+/// A `stroke_color` follows the fill colour the block *ends up with*, so a
+/// `Cd` the block only has through an instance's row counts.
+fn fill_missing(
+    domain: Domain,
+    block: &AccumulatedBlock<'_>,
+    name: &str,
+    attr_type: AttributeType,
+) -> AttributeArray {
+    if name == names::STROKE_COLOR
+        && attr_type == AttributeType::Color
+        && let Some(cd) = &block.cd
+    {
+        return cd.as_ref().clone();
+    }
+    absent_column(block.geometry, domain, name, attr_type, block.count)
 }
 
 /// An empty column of the same type.
@@ -2843,44 +2927,39 @@ fn empty_like(column: &AttributeArray) -> AttributeArray {
     }
 }
 
-/// Appends `count` rows onto `into`: `from`'s values when the block carries
-/// the column, and the column type's zero otherwise.
+/// Appends `from`'s rows onto `into`.
 ///
 /// A same-name column of a different type is a type error rather than a
 /// silent conversion, exactly as it is in `geometry.merge`.
 fn append_rows(
     name: &str,
     into: &mut AttributeArray,
-    from: Option<&AttributeArray>,
-    count: usize,
+    from: &AttributeArray,
 ) -> Result<(), GeometryError> {
     macro_rules! append {
-        ($values:expr, $variant:ident, $zero:expr) => {{
+        ($values:expr, $variant:ident) => {
             match from {
-                None => $values.extend(std::iter::repeat_n($zero, count)),
-                Some(AttributeArray::$variant(block)) => {
+                AttributeArray::$variant(block) => {
                     $values.extend(block.iter().cloned());
+                    Ok(())
                 }
-                Some(other) => {
-                    return Err(GeometryError::TypeMismatch {
-                        name: name.into(),
-                        expected: AttributeType::$variant,
-                        actual: other.attr_type(),
-                    });
-                }
+                other => Err(GeometryError::TypeMismatch {
+                    name: name.into(),
+                    expected: AttributeType::$variant,
+                    actual: other.attr_type(),
+                }),
             }
-            Ok(())
-        }};
+        };
     }
     match into {
-        AttributeArray::F32(values) => append!(values, F32, 0.0),
-        AttributeArray::Vec2(values) => append!(values, Vec2, Vec2(0.0, 0.0)),
-        AttributeArray::Vec3(values) => append!(values, Vec3, Vec3(0.0, 0.0, 0.0)),
-        AttributeArray::Vec4(values) => append!(values, Vec4, Vec4(0.0, 0.0, 0.0, 0.0)),
-        AttributeArray::Color(values) => append!(values, Color, Color::TRANSPARENT),
-        AttributeArray::I32(values) => append!(values, I32, 0),
-        AttributeArray::Bool(values) => append!(values, Bool, false),
-        AttributeArray::Str(values) => append!(values, Str, String::new()),
+        AttributeArray::F32(values) => append!(values, F32),
+        AttributeArray::Vec2(values) => append!(values, Vec2),
+        AttributeArray::Vec3(values) => append!(values, Vec3),
+        AttributeArray::Vec4(values) => append!(values, Vec4),
+        AttributeArray::Color(values) => append!(values, Color),
+        AttributeArray::I32(values) => append!(values, I32),
+        AttributeArray::Bool(values) => append!(values, Bool),
+        AttributeArray::Str(values) => append!(values, Str),
     }
 }
 
@@ -5578,10 +5657,13 @@ mod tests {
         assert_eq!(alpha, vec![0.25; 18], "the source's own alpha has to win");
     }
 
-    /// Sources with different columns concatenate with typed-zero fill,
-    /// rather than the first source's schema deciding for the rest.
+    /// Sources with different columns concatenate with each missing column
+    /// filled by what a reader sees without it, rather than the first
+    /// source's schema deciding for the rest. A point with no `pscale` draws
+    /// with radius 2 (`rasterize`'s default), so the fill is 2.0 and not the
+    /// typed zero, which would draw it with no radius at all.
     #[test]
-    fn sources_with_different_columns_fill_with_typed_zeros() {
+    fn sources_with_different_columns_fill_with_their_absent_values() {
         let mut plain = Geometry::from_points(vec![Vec2(1.0, 1.0), Vec2(2.0, 2.0)]);
         plain.push_primitive(Primitive::Path {
             verts: 0..2,
@@ -5621,12 +5703,174 @@ mod tests {
             .to_vec();
         assert_eq!(
             pscale,
-            vec![0.0, 0.0, 8.0, 0.0, 0.0],
-            "the sources that have no pscale fill with the typed zero"
+            vec![2.0, 2.0, 8.0, 2.0, 2.0],
+            "the sources that have no pscale read as the default radius"
         );
         expanded
             .validate()
             .expect("every column has to be as long as the point domain");
+    }
+
+    /// A path `0..len` of points at the origin.
+    fn open_path(len: usize) -> Geometry {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0); len]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..len,
+            closed: false,
+        });
+        geometry
+    }
+
+    /// A host shape expanded together with stamped characters that carry
+    /// `alpha` and `Cd`: the host's elements read as opaque white, as they did
+    /// before the expansion, and not as transparent black.
+    #[test]
+    fn a_host_shape_keeps_its_default_alpha_and_colour_through_expansion() {
+        let mut host = open_path(3);
+        let half = AttributeArray::F32(vec![0.5]);
+        let red = Color::new(1.0, 0.0, 0.0, 1.0);
+        host.instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(10.0, 0.0)]))
+            .unwrap();
+        host.instances_mut().insert(names::ALPHA, half).unwrap();
+        host.instances_mut()
+            .insert(names::CD, AttributeArray::Color(vec![red]))
+            .unwrap();
+        host.set_instance_sources(vec![Arc::new(open_path(2))]);
+
+        let expanded = expand_instances(&host).expect("expands");
+        let points = expanded.points();
+        assert_eq!(
+            points
+                .get(names::ALPHA)
+                .unwrap()
+                .as_f32(names::ALPHA)
+                .unwrap(),
+            [1.0, 1.0, 1.0, 0.5, 0.5]
+        );
+        let white = Color::new(1.0, 1.0, 1.0, 1.0);
+        let prims = expanded.primitive_attrs();
+        assert_eq!(
+            prims
+                .get(names::ALPHA)
+                .unwrap()
+                .as_f32(names::ALPHA)
+                .unwrap(),
+            [1.0, 0.5]
+        );
+        assert_eq!(
+            prims.get(names::CD).unwrap().as_color(names::CD).unwrap(),
+            [white, red]
+        );
+        // The host path's vertices read as the path's own (white) stroke.
+        assert_eq!(
+            points.get(names::CD).unwrap().as_color(names::CD).unwrap(),
+            [white, white, white, red, red]
+        );
+    }
+
+    fn one_piece(attributes: &[(&str, AttributeArray)]) -> InstancePiece {
+        let mut row = AttributeSet::new();
+        for (name, column) in attributes {
+            row.insert(*name, column.clone()).unwrap();
+        }
+        InstancePiece {
+            source: InstanceSource::Geometry(Arc::new(Geometry::new())),
+            attributes: row,
+        }
+    }
+
+    fn three_instances() -> Geometry {
+        let mut geometry = Geometry::new();
+        geometry
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0); 3]))
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![0, 1, 2]))
+            .unwrap();
+        geometry
+    }
+
+    /// A piece with no `stroke_color` strokes in its row's fill colour: the
+    /// piece's own `Cd`, white if it has none, and an output `Cd` that already
+    /// exists decides and stays as it is.
+    #[test]
+    fn a_piece_without_a_stroke_colour_strokes_in_its_rows_fill_colour() {
+        let red = Color::new(1.0, 0.0, 0.0, 1.0);
+        let green = Color::new(0.0, 1.0, 0.0, 1.0);
+        let blue = Color::new(0.0, 0.0, 1.0, 1.0);
+        let white = Color::new(1.0, 1.0, 1.0, 1.0);
+        let pieces = [
+            one_piece(&[(names::STROKE_COLOR, AttributeArray::Color(vec![green]))]),
+            one_piece(&[(names::CD, AttributeArray::Color(vec![red]))]),
+            one_piece(&[]),
+        ];
+
+        let mut geometry = three_instances();
+        attach_piece_attributes(&mut geometry, &pieces).unwrap();
+        let get = |name| {
+            geometry
+                .instances()
+                .get(name)
+                .unwrap()
+                .as_color(name)
+                .unwrap()
+                .to_vec()
+        };
+        // Piece 0 and 2 have no `Cd`: the reader's neutral white.
+        assert_eq!(get(names::CD), [white, red, white]);
+        assert_eq!(get(names::STROKE_COLOR), [green, red, white]);
+
+        // An output `Cd` is the row's fill and is not overwritten.
+        let mut geometry = three_instances();
+        geometry
+            .instances_mut()
+            .insert(names::CD, AttributeArray::Color(vec![blue; 3]))
+            .unwrap();
+        attach_piece_attributes(&mut geometry, &pieces).unwrap();
+        let get = |name| {
+            geometry
+                .instances()
+                .get(name)
+                .unwrap()
+                .as_color(name)
+                .unwrap()
+                .to_vec()
+        };
+        assert_eq!(get(names::CD), [blue; 3]);
+        assert_eq!(get(names::STROKE_COLOR), [green, blue, blue]);
+    }
+
+    /// A reserved column with a constant absent value is filled with it for a
+    /// piece that lacks it, and an unreserved one with the typed zero.
+    #[test]
+    fn a_piece_without_alpha_is_opaque_and_without_a_user_column_is_zero() {
+        let pieces = [
+            one_piece(&[
+                (names::ALPHA, AttributeArray::F32(vec![0.25])),
+                ("mine", AttributeArray::F32(vec![7.0])),
+            ]),
+            one_piece(&[]),
+        ];
+        let mut geometry = three_instances();
+        geometry
+            .instances_mut()
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![0, 1, 1]))
+            .unwrap();
+        attach_piece_attributes(&mut geometry, &pieces).unwrap();
+        let f32s = |name| {
+            geometry
+                .instances()
+                .get(name)
+                .unwrap()
+                .as_f32(name)
+                .unwrap()
+                .to_vec()
+        };
+        assert_eq!(f32s(names::ALPHA), [0.25, 1.0, 1.0]);
+        assert_eq!(f32s("mine"), [7.0, 0.0, 0.0]);
     }
 
     /// An out-of-range `source_index` selects the last source, the rule the

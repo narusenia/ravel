@@ -65,6 +65,7 @@
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
+use ravel_core::geometry::absent::{DEFAULT_ALPHA, DEFAULT_COLOR, DEFAULT_PSCALE};
 use ravel_core::geometry::{
     AttributeSet, Domain, Geometry, InstanceColumns, InstanceImage, InstanceSource,
     InstanceTransform, MAX_INSTANCE_DEPTH, Primitive, names, stroke_reach,
@@ -92,8 +93,6 @@ mod sample;
 use sample::StrokeAlign;
 
 const SHADER_SRC: &str = include_str!("../shaders/rasterize.wgsl");
-
-const DEFAULT_POINT_RADIUS: f32 = 2.0;
 
 /// The `data0[0]` discriminant an image quad carries, beside `1.0` for a path
 /// and `0.0` for a point sprite. Read by `raster_fragment`.
@@ -169,7 +168,7 @@ impl Placement {
     fn identity() -> Self {
         Self {
             transform: InstanceTransform::IDENTITY,
-            tint: Color::new(1.0, 1.0, 1.0, 1.0),
+            tint: DEFAULT_COLOR,
         }
     }
 
@@ -857,7 +856,7 @@ fn vertex_stroke_colors(
             .enumerate()
             .map(|(offset, color)| {
                 let alpha = attr_f32(geo.points(), names::ALPHA, verts.start + offset)
-                    .unwrap_or(1.0)
+                    .unwrap_or(DEFAULT_ALPHA)
                     * primitive_alpha;
                 tinted(*color, alpha, tint)
             })
@@ -1231,7 +1230,7 @@ fn flatten_geometry<'a>(
         }
         let center = placement.apply(*position);
         let radius =
-            radii.as_ref().map_or(DEFAULT_POINT_RADIUS, |r| r[index]) * placement.uniform_scale();
+            radii.as_ref().map_or(DEFAULT_PSCALE, |r| r[index]) * placement.uniform_scale();
         if radius <= 0.0 {
             continue;
         }
@@ -1282,9 +1281,9 @@ fn flatten_geometry<'a>(
             // Instance tint is multiplicative: fall back to neutral white so
             // the base color applies once, at the leaf elements.
             tint: tinted(
-                element_color(instances, index, Color::new(1.0, 1.0, 1.0, 1.0)),
+                element_color(instances, index, DEFAULT_COLOR),
                 element_alpha(instances, index),
-                Color::new(1.0, 1.0, 1.0, 1.0),
+                DEFAULT_COLOR,
             ),
         };
         match select_instance_source(sources, source_indices, index) {
@@ -1719,9 +1718,9 @@ fn raster_instances(
             // Instance tint is multiplicative: fall back to neutral white so
             // the base color applies once, at the leaf elements.
             tint: tinted(
-                element_color(inst, i, Color::new(1.0, 1.0, 1.0, 1.0)),
+                element_color(inst, i, DEFAULT_COLOR),
                 element_alpha(inst, i),
-                Color::new(1.0, 1.0, 1.0, 1.0),
+                DEFAULT_COLOR,
             ),
         };
         let combined = compose(placement, local);
@@ -1901,8 +1900,7 @@ fn raster_points(
             continue;
         }
         let center = placement.apply(*p);
-        let radius =
-            radii.as_ref().map_or(DEFAULT_POINT_RADIUS, |r| r[i]) * placement.uniform_scale();
+        let radius = radii.as_ref().map_or(DEFAULT_PSCALE, |r| r[i]) * placement.uniform_scale();
         if radius <= 0.0 {
             continue;
         }
@@ -1946,8 +1944,9 @@ fn base_color(params: &ResolvedParams) -> Color {
     // overlaid onto this parameter by the evaluator (attribute > pin >
     // parameter, REQ-LAYER-008).
     let [r, g, b, a] = params.vec4_or("color", {
-        let [r, g, b] = params.vec3_or("color", [1.0, 1.0, 1.0]);
-        [r, g, b, 1.0]
+        let [r, g, b] =
+            params.vec3_or("color", [DEFAULT_COLOR.r, DEFAULT_COLOR.g, DEFAULT_COLOR.b]);
+        [r, g, b, DEFAULT_COLOR.a]
     });
     Color::new(r, g, b, a)
 }
@@ -2054,7 +2053,7 @@ fn element_color(set: &AttributeSet, index: usize, fallback: Color) -> Color {
 }
 
 fn element_alpha(set: &AttributeSet, index: usize) -> f32 {
-    attr_f32(set, names::ALPHA, index).unwrap_or(1.0)
+    attr_f32(set, names::ALPHA, index).unwrap_or(DEFAULT_ALPHA)
 }
 
 /// The style one element draws with: its own `fill` / `stroke_width` /
@@ -3965,6 +3964,37 @@ mod tests {
         for (a, b) in drawn.as_f32().iter().zip(expanded.as_f32().iter()) {
             assert!((a - b).abs() < 1e-3, "nested {a} vs expanded {b}");
         }
+    }
+
+    /// Two sources stamped together, only one of which carries `pscale`: the
+    /// loose point of the other still draws at the default radius after the
+    /// expansion, where a zero-filled `pscale` would draw it with no radius.
+    #[test]
+    fn an_expanded_source_without_pscale_still_draws_its_point() {
+        let plain = Geometry::from_points(vec![Vec2(10.0, 10.0)]);
+        let mut sized = Geometry::from_points(vec![Vec2(10.0, 10.0)]);
+        sized
+            .points_mut()
+            .insert(names::PSCALE, AttributeArray::F32(vec![8.0]))
+            .unwrap();
+        let mut host = Geometry::new();
+        host.instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(20.0, 0.0)]),
+            )
+            .unwrap();
+        host.instances_mut()
+            .insert(names::SOURCE_INDEX, AttributeArray::I32(vec![0, 1]))
+            .unwrap();
+        host.set_instance_sources(vec![Arc::new(plain), Arc::new(sized)]);
+        let flat = ravel_core::geometry::expand_instances(&host).unwrap();
+        let fb = run(true, 0.0, &flat, 40, 20);
+        assert!(pixel(&fb, 10, 10)[3] > 0.9, "the default-radius point");
+        assert!(pixel(&fb, 30, 10)[3] > 0.9, "the pscale 8 point");
+        // Radius 2 stops short of 5 pixels from the centre; radius 8 does not.
+        assert_eq!(pixel(&fb, 15, 10)[3], 0.0);
+        assert!(pixel(&fb, 35, 10)[3] > 0.9);
     }
 
     /// A shear column is inverted by the image sampler: the pixel values come

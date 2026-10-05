@@ -135,6 +135,45 @@ pub const IN_TAN: &str = "in_tan";
 /// segment). Reserved for pen-drawn paths (REQ-UI-011).
 pub const OUT_TAN: &str = "out_tan";
 
+/// Every reserved name above, in declaration order. `geometry::absent`'s
+/// coverage test walks this list, so a name added here has to be given an
+/// absent value (or listed as having none) before the tests pass.
+pub const ALL: [&str; 33] = [
+    P,
+    ANCHOR,
+    INDEX,
+    SOURCE_INDEX,
+    ID,
+    ROT,
+    SCALE,
+    SHEAR,
+    ORIENT,
+    SCALE3,
+    N,
+    CD,
+    ALPHA,
+    PSCALE,
+    FILL,
+    STROKE_WIDTH,
+    STROKE_COLOR,
+    STROKE_ALIGN,
+    DASH,
+    DASH_OFFSET,
+    CAP,
+    JOIN,
+    AGE,
+    LIFE,
+    VELOCITY,
+    U,
+    IN_TAN,
+    OUT_TAN,
+    CHAR_INDEX,
+    WORD_INDEX,
+    LINE_INDEX,
+    CHAR_PROGRESS,
+    ADVANCE,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,41 +184,7 @@ mod tests {
     #[test]
     fn reserved_names_keep_their_spelling() {
         assert_eq!(
-            [
-                P,
-                ANCHOR,
-                INDEX,
-                SOURCE_INDEX,
-                ID,
-                ROT,
-                SCALE,
-                SHEAR,
-                ORIENT,
-                SCALE3,
-                N,
-                CD,
-                ALPHA,
-                PSCALE,
-                FILL,
-                STROKE_WIDTH,
-                STROKE_COLOR,
-                STROKE_ALIGN,
-                DASH,
-                DASH_OFFSET,
-                CAP,
-                JOIN,
-                AGE,
-                LIFE,
-                VELOCITY,
-                U,
-                IN_TAN,
-                OUT_TAN,
-                CHAR_INDEX,
-                WORD_INDEX,
-                LINE_INDEX,
-                CHAR_PROGRESS,
-                ADVANCE,
-            ],
+            ALL,
             [
                 "P",
                 "anchor",

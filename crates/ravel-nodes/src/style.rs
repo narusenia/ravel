@@ -10,6 +10,7 @@
 //! above all — therefore modulates the look like any other attribute.
 
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
+use ravel_core::geometry::absent::{DEFAULT_COLOR, DEFAULT_FILL, DEFAULT_STROKE_WIDTH};
 use ravel_core::geometry::{
     AttributeValue, Domain, Geometry, attribute_set, attribute_set_in_group, names,
 };
@@ -18,19 +19,6 @@ use ravel_core::types::{Color, NodeData};
 use std::sync::Arc;
 
 use crate::attribute::{domain_param, geometry_input};
-
-/// What `rasterize` falls back to when nobody wrote the attribute, which is
-/// what the elements outside a `group` have to keep looking like. They are the
-/// `rasterize` template's own parameter defaults; see
-/// [`ravel_core::geometry::attribute_set_in_group`].
-const UNSET_FILL: bool = true;
-const UNSET_STROKE_WIDTH: f32 = 0.0;
-const UNSET_COLOR: Color = Color {
-    r: 1.0,
-    g: 1.0,
-    b: 1.0,
-    a: 1.0,
-};
 
 pub struct StyleFillProcessor;
 
@@ -46,7 +34,7 @@ impl StyleFillProcessor {
 /// attribute if it is there and the node parameter only when it is not. So
 /// materializing `stroke_width` for a group also decides the value for every
 /// element outside it — and "no opinion" is not a value a dense column can
-/// hold. Seeding the outside with `UNSET_STROKE_WIDTH` turns
+/// hold. Seeding the outside with `DEFAULT_STROKE_WIDTH` turns
 /// `rasterize(stroke_width = 8)` into no stroke at all for the elements the
 /// user did not select, which is silent destruction of what they can see.
 ///
@@ -91,7 +79,7 @@ impl NodeProcessor for StyleFillProcessor {
             names::FILL,
             AttributeValue::Bool(params.bool_or("enabled", true)),
             group,
-            AttributeValue::Bool(UNSET_FILL),
+            AttributeValue::Bool(DEFAULT_FILL),
         )?;
         // `Cd` is the fill colour (the standard attribute table says so), so a
         // fill style writes it. It is the same column `field.apply` and
@@ -103,7 +91,7 @@ impl NodeProcessor for StyleFillProcessor {
             names::CD,
             AttributeValue::Color(color_param(params)),
             group,
-            AttributeValue::Color(UNSET_COLOR),
+            AttributeValue::Color(DEFAULT_COLOR),
         )?))
     }
 }
@@ -136,7 +124,7 @@ impl NodeProcessor for StyleStrokeProcessor {
             names::STROKE_WIDTH,
             AttributeValue::F32(params.f32_or("width", 1.0)),
             group,
-            AttributeValue::F32(UNSET_STROKE_WIDTH),
+            AttributeValue::F32(DEFAULT_STROKE_WIDTH),
         )?;
         let with_color = attribute_set_in_group(
             &with_width,
@@ -144,7 +132,7 @@ impl NodeProcessor for StyleStrokeProcessor {
             names::STROKE_COLOR,
             AttributeValue::Color(color_param(params)),
             group,
-            AttributeValue::Color(UNSET_COLOR),
+            AttributeValue::Color(DEFAULT_COLOR),
         )?;
         let with_align = stroke_align_in(&with_color, domain, group, params)?;
         // Cap and join are Detail attributes: one shape for the whole

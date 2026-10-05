@@ -3,6 +3,7 @@
 
 //! Column-oriented geometry attributes with copy-on-write structural sharing.
 
+pub mod absent;
 mod attribute;
 mod container;
 mod field;

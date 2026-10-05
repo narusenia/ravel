@@ -28,7 +28,7 @@ pub const DOMAINS: [Domain; 4] = [
 /// name sorting alone would bury `P` between `alpha` and `pscale`; the standard
 /// names come first in a reading order, and everything else follows sorted by
 /// name (`AttributeSet::describe` already sorts).
-const STANDARD_ORDER: [&str; 11] = [
+const STANDARD_ORDER: [&str; 12] = [
     names::INDEX,
     names::ID,
     names::P,
@@ -39,6 +39,7 @@ const STANDARD_ORDER: [&str; 11] = [
     names::ROT,
     names::ORIENT,
     names::SCALE,
+    names::SHEAR,
     names::SCALE3,
 ];
 
@@ -349,6 +350,24 @@ mod tests {
         assert_eq!(names_of(&columns), ["#", "index", "P", "Cd", "pscale"]);
         assert!(columns[0].is_row_number());
         assert_eq!(columns[2].ty, Some(AttributeType::Vec2));
+    }
+
+    #[test]
+    fn shear_sits_right_after_scale_in_the_instance_columns() {
+        let mut geometry = Geometry::new();
+        for (name, column) in [
+            ("zeta", AttributeArray::F32(vec![0.0])),
+            (names::SHEAR, AttributeArray::F32(vec![0.0])),
+            (names::SCALE, AttributeArray::Vec2(vec![Vec2(1.0, 1.0)])),
+            (names::ROT, AttributeArray::F32(vec![0.0])),
+            (names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0)])),
+        ] {
+            geometry.instances_mut().insert(name, column).unwrap();
+        }
+        assert_eq!(
+            names_of(&columns(&geometry, Domain::Instance)),
+            ["#", "P", "rot", "scale", "shear", "zeta"]
+        );
     }
 
     #[test]

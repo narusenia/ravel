@@ -50,7 +50,7 @@
 - 左端は**合成された要素番号列**（見出し `#`）。属性ではないので、`index`
   属性を持たないドメインでも必ず出る。横スクロールしても左に固定する
 - 続けて**標準属性**（`index` / `id` / `P` / `N` / `Cd` / `alpha` / `pscale` /
-  `rot` / `orient` / `scale` / `scale3` の順）、その後に残りを名前順。
+  `rot` / `orient` / `scale` / `shear` / `scale3` の順）、その後に残りを名前順。
   `AttributeSet` は `HashMap` なので、順序は必ずこの規則で決める
 - 数値型の列は右寄せ、`Bool` と `Str` は左寄せ
 

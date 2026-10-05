@@ -101,8 +101,9 @@ pub fn drawn_bounds(geometry: &Geometry) -> Option<Rect>
 > `rasterize::flatten_geometry` はルートから下へ 3 つを持ち回るので、
 > 持ち回らない bbox は描画より小さくなる:
 >
-> 1. **累積した配置**。（2026-10-05 追記: 下記の近似は `MED-GPU-09` で解消し、
->    `compose` は厳密な積になった。同じ `done/` の `instance-transform-shear-plan.md`）
+> 1. **累積した配置**。（2026-10-05 追記: この項の残りは解消前の記述で、今の指針ではない。
+>    `MED-GPU-09` で `compose` は厳密な積になり、描画・バウンズ・展開は同じ変換を使う。
+>    同じ `done/` の `instance-transform-shear-plan.md`）
 >    しかも合成は `InstanceTransform::compose` で、
 >    **厳密なアフィン積ではない**（非一様スケールと 2 つの回転の合成は
 >    shear になるが、この表現は持てない）。`container.rs:389` が「描画と展開が

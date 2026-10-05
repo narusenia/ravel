@@ -82,7 +82,7 @@ pub fn execute<H: EvalWorkerHooks>(
         plan.document.clone(),
         plan.comp,
         plan.range.clone(),
-        Box::new(ImageSequenceEncoder::new(plan.output.clone())),
+        Box::new(ImageSequenceEncoder::new(plan.output.clone()).with_overwrite(plan.overwrite)),
         plan.render_output(),
     )
     .with_overwrite(plan.overwrite);

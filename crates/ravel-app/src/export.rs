@@ -191,7 +191,9 @@ pub fn build_render_job(request: &ExportRequest, document: Arc<Document>) -> Ren
         document,
         request.comp,
         request.range.clone(),
-        Box::new(ImageSequenceEncoder::new(request.output.clone())),
+        Box::new(
+            ImageSequenceEncoder::new(request.output.clone()).with_overwrite(request.overwrite),
+        ),
         request.render_output(),
     )
     .with_overwrite(request.overwrite)

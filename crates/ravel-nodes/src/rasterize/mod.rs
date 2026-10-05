@@ -89,6 +89,7 @@ use crate::flatten;
 use crate::gpu_util;
 
 mod sample;
+use sample::StrokeAlign;
 
 const SHADER_SRC: &str = include_str!("../shaders/rasterize.wgsl");
 
@@ -877,6 +878,7 @@ fn path_run_key(
     element: Style,
     prim_index: usize,
     verts: &Range<usize>,
+    closed: bool,
     tint: Color,
 ) -> (RunKey, Option<Vec<Color>>) {
     let (color, stroke_color) = element_colors(element, geo.primitive_attrs(), prim_index, tint);
@@ -892,6 +894,17 @@ fn path_run_key(
         color,
         stroke_color,
         vertex_colored: point_colors.is_some(),
+        // Only a closed path has an inside, and only a stroke has an
+        // alignment: anything else is centre and keeps the zeno route.
+        align: if closed && element.stroke_width > 0.0 {
+            StrokeAlign::from_attribute(attr_i32(
+                geo.primitive_attrs(),
+                names::STROKE_ALIGN,
+                prim_index,
+            ))
+        } else {
+            StrokeAlign::Center
+        },
     };
     (key, point_colors)
 }
@@ -1106,7 +1119,7 @@ impl PathRun {
     fn push_item(mut self, vertex_end: usize, items: &mut Vec<DrawItem>) {
         let scaled_stroke = self.key.stroke_width * self.scale;
         let padding = if scaled_stroke > 0.0 {
-            scaled_stroke * 0.5 + 1.0
+            self.key.align.reach_width(scaled_stroke) * 0.5 + 1.0
         } else {
             1.0
         };
@@ -1126,7 +1139,7 @@ impl PathRun {
                 scaled_stroke,
                 // `0` is "no vertex colours", so the start is stored plus one.
                 self.color_start.map_or(0.0, |start| (start + 1) as f32),
-                0.0,
+                self.key.align.code(),
             ],
         });
     }
@@ -1170,7 +1183,8 @@ fn flatten_geometry<'a>(
         {
             continue;
         }
-        let (key, point_colors) = path_run_key(geo, element, prim_index, verts, placement.tint);
+        let (key, point_colors) =
+            path_run_key(geo, element, prim_index, verts, *closed, placement.tint);
 
         let joins = run
             .as_ref()
@@ -1431,6 +1445,10 @@ struct RunKey {
     /// key because both rasterizers keep per-vertex data beside the polyline
     /// of such a run, and a run holds either all of its paths' colours or none.
     vertex_colored: bool,
+    /// Where the stroke lies. Part of the key because the winding number that
+    /// decides "inside" is counted per run, so paths of different alignments
+    /// cannot share one.
+    align: StrokeAlign,
 }
 
 /// A run of consecutive same-style closed paths, drawn as **one** shape.
@@ -1478,16 +1496,21 @@ impl<'a> FillRun<'a> {
     /// `MoveTo`, and a closed one its own `Close`, so zeno sees separate
     /// subpaths of one shape rather than a polyline that jumps between them.
     fn push_contour(&mut self, contour: &Contour, placement: Placement) {
-        if self.key.vertex_colored && !self.device.is_empty() {
+        let keeps_polyline = self.reads_per_pixel();
+        if keeps_polyline && !self.device.is_empty() {
             self.device.push(CONTOUR_BREAK);
-            self.colors.push(Color::new(0.0, 0.0, 0.0, 0.0));
+            if self.key.vertex_colored {
+                self.colors.push(Color::new(0.0, 0.0, 0.0, 0.0));
+            }
         }
         for (i, p) in contour.points.iter().enumerate() {
             let v = placement.apply(*p);
             self.min = Vec2(self.min.0.min(v.0), self.min.1.min(v.1));
             self.max = Vec2(self.max.0.max(v.0), self.max.1.max(v.1));
-            if let Some(colors) = &contour.colors {
+            if keeps_polyline {
                 self.device.push([v.0, v.1]);
+            }
+            if let Some(colors) = &contour.colors {
                 self.colors.push(colors[i]);
             }
             let v = Vector::new(v.0, v.1);
@@ -1502,12 +1525,59 @@ impl<'a> FillRun<'a> {
         }
     }
 
+    /// Whether the stroke needs the per-pixel evaluator, and so the device
+    /// polyline: a colour that varies along it, or an alignment that moves
+    /// where it lies.
+    fn reads_per_pixel(&self) -> bool {
+        self.key.vertex_colored || self.key.align != StrokeAlign::Center
+    }
+
+    /// An aligned stroke, drawn **without zeno**: alignment changes the
+    /// coverage itself, and zeno strokes only about the centre. Coverage is
+    /// the signed-distance band the shader computes
+    /// ([`sample::stroke_coverage`]), so cap, join and dash do not apply —
+    /// the stroke is round and solid, exactly as the GPU draws it.
+    fn render_aligned_stroke(&self, canvas: &mut Canvas<'_>) {
+        let (width, height) = (canvas.width, canvas.height);
+        let stroke_width = self.key.stroke_width * self.scale;
+        let rect = coverage_rect(
+            (self.min, self.max),
+            stroke_reach(self.key.align.reach_width(stroke_width), false),
+            width,
+            height,
+        );
+        for y in rect.y0..rect.y1 {
+            for x in rect.x0..rect.x1 {
+                let found = sample::path_sample(
+                    &self.device,
+                    self.closed,
+                    [x as f32 + 0.5, y as f32 + 0.5],
+                );
+                let coverage = sample::stroke_coverage(&found, stroke_width, self.key.align);
+                if coverage <= 0.0 {
+                    continue;
+                }
+                let color = if self.key.vertex_colored {
+                    self.vertex_color(&found)
+                } else {
+                    self.key.stroke_color
+                };
+                let i = ((y * width + x) * 4) as usize;
+                blend_pixel(&mut canvas.pixels[i..i + 4], color, coverage);
+            }
+        }
+    }
+
     /// The stroke colour at the centre of pixel `(x, y)`: the colours at both
     /// ends of the nearest segment, mixed by where on it the pixel's nearest
     /// point lies.
     fn vertex_color_at(&self, x: u32, y: u32) -> Color {
         let found =
             sample::path_sample(&self.device, self.closed, [x as f32 + 0.5, y as f32 + 0.5]);
+        self.vertex_color(&found)
+    }
+
+    fn vertex_color(&self, found: &sample::PathSample) -> Color {
         mix_color(
             self.colors[found.nearest_segment as usize],
             self.colors[found.segment_end as usize],
@@ -1529,7 +1599,9 @@ impl<'a> FillRun<'a> {
                 self.key.color,
             );
         }
-        if self.key.stroke_width > 0.0 {
+        if self.key.stroke_width > 0.0 && self.key.align != StrokeAlign::Center {
+            self.render_aligned_stroke(canvas);
+        } else if self.key.stroke_width > 0.0 {
             // Round caps/joins are the default because they match the GPU
             // stroke, which is an unsigned distance to the polyline
             // (inherently round at caps and joins). Anything else the `cap` /
@@ -1589,7 +1661,8 @@ fn raster_paths(
         }
 
         let element = element_style(style, geo.primitive_attrs(), prim_index);
-        let (key, point_colors) = path_run_key(geo, element, prim_index, verts, placement.tint);
+        let (key, point_colors) =
+            path_run_key(geo, element, prim_index, verts, *closed, placement.tint);
 
         let joins = run
             .as_ref()
@@ -5147,5 +5220,254 @@ mod tests {
         let gpu_frame = run_gpu(&gpu, &pool, &geo, false, 3.0, &ctx(64, 40));
         assert_equivalent(&cpu, &gpu_frame, "vertex colours under instances");
         assert_opaque_colours_match(&cpu, &gpu_frame, 40, "vertex colours under instances");
+    }
+
+    // ---- stroke alignment ---------------------------------------------------
+
+    /// A closed 16 px square, (8, 8)..(24, 24), in a 32 px canvas.
+    fn aligned_square(align: Option<i32>) -> Geometry {
+        let mut geo = Geometry::from_points(vec![
+            Vec2(8.0, 8.0),
+            Vec2(24.0, 8.0),
+            Vec2(24.0, 24.0),
+            Vec2(8.0, 24.0),
+        ]);
+        geo.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        if let Some(align) = align {
+            geo.primitive_attrs_mut()
+                .insert(names::STROKE_ALIGN, AttributeArray::I32(vec![align]))
+                .unwrap();
+        }
+        geo
+    }
+
+    /// Which pixels of row `y` carry stroke, as the half-open `x` range of
+    /// full-alpha pixels. The row is chosen mid-edge, so only the edge's own
+    /// band shows.
+    fn full_alpha_span(fb: &FrameBuffer, y: u32, within: std::ops::Range<u32>) -> Vec<u32> {
+        within.filter(|x| alpha(fb, *x, y) > 0.99).collect()
+    }
+
+    /// Centre, inside and outside put a width-4 stroke on the left edge
+    /// (x = 8) at different places. Hand-derived from the band of signed
+    /// distance: pixel `x` has its centre `x + 0.5` and so `d = 8 - x - 0.5`
+    /// (positive outside the square). Centre covers `|d| <= 1.5`, inside
+    /// `-3.5 <= d <= -0.5`, outside `0.5 <= d <= 3.5`.
+    #[test]
+    fn each_alignment_puts_the_stroke_on_its_own_side_of_the_edge() {
+        let row = 16;
+        let span = |align| {
+            let fb = run(false, 4.0, &aligned_square(align), 32, 32);
+            full_alpha_span(&fb, row, 0..16)
+        };
+        assert_eq!(span(Some(names::STROKE_ALIGN_CENTER)), vec![6, 7, 8, 9]);
+        assert_eq!(span(Some(names::STROKE_ALIGN_INSIDE)), vec![8, 9, 10, 11]);
+        assert_eq!(span(Some(names::STROKE_ALIGN_OUTSIDE)), vec![4, 5, 6, 7]);
+    }
+
+    /// The edge of an aligned band is feathered by one pixel, so the pixel
+    /// just past it is empty and the one on it is full.
+    #[test]
+    fn an_aligned_stroke_stops_where_its_band_stops() {
+        let inside = run(false, 4.0, &aligned_square(Some(1)), 32, 32);
+        assert_eq!(alpha(&inside, 7, 16), 0.0, "nothing outside the path");
+        assert_eq!(alpha(&inside, 12, 16), 0.0, "nothing past the width");
+        let outside = run(false, 4.0, &aligned_square(Some(2)), 32, 32);
+        assert_eq!(alpha(&outside, 3, 16), 0.0, "nothing past the width");
+        assert_eq!(alpha(&outside, 9, 16), 0.0, "nothing inside the path");
+    }
+
+    /// Centre — written or not — is the zeno route and draws what it always
+    /// drew; an open path has no inside, so it strokes at the centre however
+    /// it is aligned.
+    #[test]
+    fn centre_and_open_paths_keep_the_unaligned_picture() {
+        let plain = run(false, 4.0, &aligned_square(None), 32, 32);
+        let centre = run(false, 4.0, &aligned_square(Some(0)), 32, 32);
+        assert_eq!(plain.as_f32(), centre.as_f32());
+
+        let mut open = horizontal_path(Vec2(4.0, 16.0), Vec2(28.0, 16.0));
+        let unaligned = run(false, 4.0, &open, 32, 32);
+        for align in [1, 2] {
+            open.primitive_attrs_mut()
+                .insert(names::STROKE_ALIGN, AttributeArray::I32(vec![align]))
+                .unwrap();
+            assert_eq!(
+                run(false, 4.0, &open, 32, 32).as_f32(),
+                unaligned.as_f32(),
+                "an open path aligned {align}"
+            );
+        }
+    }
+
+    /// The default stays off the per-pixel route; alignment is what turns it on.
+    #[test]
+    fn only_an_aligned_stroke_reads_the_path_per_pixel() {
+        let before = sample::calls();
+        run(false, 4.0, &aligned_square(Some(0)), 32, 32);
+        assert_eq!(sample::calls(), before, "a centre stroke scanned the path");
+        run(false, 4.0, &aligned_square(Some(1)), 32, 32);
+        assert!(sample::calls() > before, "an inside stroke never scanned");
+    }
+
+    /// An aligned stroke is round and solid whatever `cap`, `join` and `dash`
+    /// say — the signed distance knows neither — which is also what the GPU
+    /// draws, so a node forced to the CPU by them agrees with itself.
+    #[test]
+    fn an_aligned_stroke_ignores_dash() {
+        let dashed = with_dash(aligned_square(Some(2)), "2,6", 0.0);
+        let fb = run(false, 4.0, &dashed, 32, 32);
+        // Every pixel along the left outside band is inked: no gaps.
+        for y in 10..22 {
+            assert!(alpha(&fb, 5, y) > 0.99, "gap at y = {y}");
+        }
+    }
+
+    /// Alignment and vertex colours compose: the band is the aligned one and
+    /// the colour along it is the nearest segment's mix. On the left edge
+    /// (vertex 3 -> vertex 0, blue -> red) at y = 16.5 the pixel is
+    /// `t = (24 - 16.5) / 16` of the way from blue to red.
+    #[test]
+    fn an_aligned_stroke_takes_vertex_colours() {
+        let mut geo = aligned_square(Some(2));
+        geo.points_mut()
+            .insert(names::CD, AttributeArray::Color(vec![RED, RED, BLUE, BLUE]))
+            .unwrap();
+        let fb = run(false, 4.0, &geo, 32, 32);
+        let t = 7.5 / 16.0;
+        assert_rgb(
+            pixel(&fb, 6, 16),
+            [t, 0.0, 1.0 - t],
+            1e-3,
+            "outside the left edge",
+        );
+        assert_eq!(alpha(&fb, 9, 16), 0.0, "still nothing inside");
+    }
+
+    /// An outside stroke reaches a whole width from the path, which is twice
+    /// what a centred one does: the bounds have to say so.
+    #[test]
+    fn an_outside_stroke_stays_inside_the_drawn_bounds() {
+        for align in [0, 1, 2] {
+            let mut geo = aligned_square(Some(align));
+            geo.primitive_attrs_mut()
+                .insert(names::STROKE_WIDTH, AttributeArray::F32(vec![6.0]))
+                .unwrap();
+            let bounds = drawn_bounds(&geo).expect("a stroked path has an extent");
+            let fb = run(false, 0.0, &geo, 32, 32);
+            let mut drawn = 0;
+            for y in 0..fb.height {
+                for x in 0..fb.width {
+                    if alpha(&fb, x, y) <= 0.0 {
+                        continue;
+                    }
+                    drawn += 1;
+                    assert!(
+                        x as f32 >= bounds.x
+                            && (x + 1) as f32 <= bounds.x + bounds.width
+                            && y as f32 >= bounds.y
+                            && (y + 1) as f32 <= bounds.y + bounds.height,
+                        "align {align}: pixel ({x}, {y}) is drawn outside {bounds:?}"
+                    );
+                }
+            }
+            assert!(drawn > 0);
+        }
+    }
+
+    /// The shader draws the same bands. A 60 px canvas keeps the antialiased
+    /// edges a small share of the picture, and the opaque pixels are compared
+    /// on their own so a misplaced band cannot hide in the edge tolerance.
+    #[test]
+    fn gpu_matches_cpu_for_aligned_strokes() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+
+        let big_square = |align: i32| {
+            let mut geo = Geometry::from_points(vec![
+                Vec2(10.0, 10.0),
+                Vec2(50.0, 12.0),
+                Vec2(48.0, 50.0),
+                Vec2(12.0, 48.0),
+            ]);
+            geo.push_primitive(Primitive::Path {
+                verts: 0..4,
+                closed: true,
+            });
+            geo.primitive_attrs_mut()
+                .insert(names::STROKE_ALIGN, AttributeArray::I32(vec![align]))
+                .unwrap();
+            geo
+        };
+        for (label, align) in [("centre", 0), ("inside", 1), ("outside", 2)] {
+            let geo = big_square(align);
+            let cpu = run(true, 6.0, &geo, 60, 60);
+            let gpu_frame = run_gpu(&gpu, &pool, &geo, true, 6.0, &ctx(60, 60));
+            assert_equivalent(&cpu, &gpu_frame, label);
+            assert_opaque_colours_match(&cpu, &gpu_frame, 500, label);
+        }
+
+        // A counter wound the other way: outside the *shape* includes the
+        // hole, so an outside stroke rings the hole too.
+        let mut ring = Geometry::from_points(vec![
+            Vec2(6.0, 6.0),
+            Vec2(54.0, 6.0),
+            Vec2(54.0, 54.0),
+            Vec2(6.0, 54.0),
+            Vec2(20.0, 20.0),
+            Vec2(20.0, 40.0),
+            Vec2(40.0, 40.0),
+            Vec2(40.0, 20.0),
+        ]);
+        for verts in [0..4, 4..8] {
+            ring.push_primitive(Primitive::Path {
+                verts,
+                closed: true,
+            });
+        }
+        for align in [1, 2] {
+            ring.primitive_attrs_mut()
+                .insert(names::STROKE_ALIGN, AttributeArray::I32(vec![align, align]))
+                .unwrap();
+            let cpu = run(true, 4.0, &ring, 60, 60);
+            let gpu_frame = run_gpu(&gpu, &pool, &ring, true, 4.0, &ctx(60, 60));
+            assert_equivalent(&cpu, &gpu_frame, "aligned ring");
+            assert_opaque_colours_match(&cpu, &gpu_frame, 500, "aligned ring");
+        }
+
+        // With vertex colours, outside.
+        let mut coloured = big_square(2);
+        coloured
+            .points_mut()
+            .insert(
+                names::CD,
+                AttributeArray::Color(vec![RED, GREEN, BLUE, GREEN]),
+            )
+            .unwrap();
+        let cpu = run(false, 5.0, &coloured, 60, 60);
+        let gpu_frame = run_gpu(&gpu, &pool, &coloured, false, 5.0, &ctx(60, 60));
+        assert_equivalent(&cpu, &gpu_frame, "aligned vertex colours");
+        assert_opaque_colours_match(&cpu, &gpu_frame, 500, "aligned vertex colours");
+
+        // A dash forces the node onto the CPU; the aligned stroke it draws
+        // there is the one the GPU would have drawn.
+        let dashed = with_dash(big_square(2), "4,4", 0.0);
+        let node = make_node(false, 6.0);
+        let mut shaders = ShaderManager::new(gpu.clone());
+        let proc = RasterizeProcessor::new(gpu.clone(), &mut shaders, pool.clone(), &node);
+        let out = evaluate(&node, Arc::new(proc), &dashed, &ctx(60, 60));
+        let fallback = out
+            .downcast_ref::<FrameBuffer>()
+            .expect("a dash falls back to the CPU");
+        assert_eq!(fallback.as_f32(), run(false, 6.0, &dashed, 60, 60).as_f32());
+        let undashed = run_gpu(&gpu, &pool, &big_square(2), false, 6.0, &ctx(60, 60));
+        assert_equivalent(
+            fallback,
+            &undashed,
+            "dashed fallback equals the GPU's solid band",
+        );
     }
 }

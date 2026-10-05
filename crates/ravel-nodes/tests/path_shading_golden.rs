@@ -20,13 +20,14 @@
 //! `t = (x + 0.5 - 8) / 48` along a line from `x = 8` to `x = 56` — and none
 //! is copied from a render.
 
-use ravel_core::eval::{EvalContext, Evaluator, NodeProcessor};
+use ravel_core::eval::{EvalContext, EvalScope, Evaluator, NodeProcessor, ResolvedParams};
+use ravel_core::geometry::{AttributeArray, Geometry, Primitive, names};
 use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::param_ramp::RampParam;
 use ravel_core::registry::NodeRegistry;
 use ravel_core::registry::builtin::register_builtins;
-use ravel_core::types::{Color, FrameBuffer, FrameRate};
+use ravel_core::types::{Color, FrameBuffer, FrameRate, NodeData, Vec2};
 use ravel_gpu::{GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
 use ravel_nodes::attribute::CurveUProcessor;
 use ravel_nodes::field::{ApplyFieldProcessor, AttributeFieldProcessor, RampFieldProcessor};
@@ -268,6 +269,144 @@ fn the_gpu_paints_the_same_gradient_as_the_cpu() {
     }
     assert!(
         compared > 200,
+        "only {compared} opaque pixels were compared"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stroke alignment together with vertex colours
+// ---------------------------------------------------------------------------
+
+/// Emits a fixed geometry, standing in for whatever node would write the
+/// attributes (no built-in node writes `stroke_align` yet).
+struct Source(Geometry);
+
+impl NodeProcessor for Source {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        Ok(Arc::new(self.0.clone()))
+    }
+}
+
+/// A 28 px square at (10, 10) whose points run red, red, blue, blue and whose
+/// stroke lies **outside** it.
+fn outside_coloured_square() -> Geometry {
+    let mut geo = Geometry::from_points(vec![
+        Vec2(10.0, 10.0),
+        Vec2(38.0, 10.0),
+        Vec2(38.0, 38.0),
+        Vec2(10.0, 38.0),
+    ]);
+    geo.push_primitive(Primitive::Path {
+        verts: 0..4,
+        closed: true,
+    });
+    geo.points_mut()
+        .insert(names::CD, AttributeArray::Color(vec![RED, RED, BLUE, BLUE]))
+        .unwrap();
+    geo.primitive_attrs_mut()
+        .insert(
+            names::STROKE_ALIGN,
+            AttributeArray::I32(vec![names::STROKE_ALIGN_OUTSIDE]),
+        )
+        .unwrap();
+    geo
+}
+
+fn render_geometry(backend: Backend, geometry: Geometry, stroke_width: f32) -> FrameBuffer {
+    let mut registry = NodeRegistry::new();
+    register_builtins(&mut registry);
+    let source = registry
+        .create_node("shape.rect", NodeId::new(1))
+        .expect("a geometry-typed node to stand in");
+    let rasterize = node(
+        &registry,
+        "rasterize",
+        2,
+        &[
+            ("fill", ParameterValue::Bool(false)),
+            ("stroke_width", ParameterValue::Float(stroke_width)),
+        ],
+    );
+    let graph = Graph::new()
+        .add_node(source)
+        .unwrap()
+        .add_node(rasterize.clone())
+        .unwrap()
+        .add_edge(
+            EdgeId::new(1),
+            NodeId::new(1),
+            OutputPortIndex(0),
+            NodeId::new(2),
+            InputPortIndex(0),
+        )
+        .unwrap();
+    let mut evaluator = Evaluator::new();
+    evaluator.register(NodeId::new(1), Arc::new(Source(geometry)));
+    let processor: Arc<dyn NodeProcessor> = match backend {
+        Backend::Cpu => Arc::new(RasterizeProcessor::from_node(&rasterize)),
+        Backend::Gpu => {
+            let gpu = GpuContext::new_blocking().expect("GPU required");
+            let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+            let mut shaders = ShaderManager::new(gpu.clone());
+            Arc::new(RasterizeProcessor::new(gpu, &mut shaders, pool, &rasterize))
+        }
+    };
+    evaluator.register(NodeId::new(2), processor);
+    let ctx = EvalContext::new(0, FrameRate::new(24, 1), (48, 48));
+    let out = evaluator.evaluate(&graph, NodeId::new(2), &ctx).unwrap();
+    match backend {
+        Backend::Cpu => out.downcast_ref::<FrameBuffer>().unwrap().clone(),
+        Backend::Gpu => out
+            .downcast_ref::<GpuFrameBuffer>()
+            .expect("resident")
+            .to_frame_buffer()
+            .expect("readback"),
+    }
+}
+
+/// Outside alignment puts the 6 px stroke at x = 4..10 left of the square's
+/// left edge, shaded from blue (the last vertex) to red (the first):
+/// pixel (5, 24) is `t = (38 - 24.5) / 28` of the way. Nothing is drawn inside.
+/// Both rasterizers draw it.
+#[test]
+fn an_outside_stroke_is_shaded_by_vertex_colours_on_both_rasterizers() {
+    let cpu = render_geometry(Backend::Cpu, outside_coloured_square(), 6.0);
+    let gpu = render_geometry(Backend::Gpu, outside_coloured_square(), 6.0);
+    let t = 13.5 / 28.0;
+    for (fb, tolerance, label) in [(&cpu, 1e-3, "CPU"), (&gpu, 0.02, "GPU")] {
+        assert_rgb(pixel(fb, 5, 24), [t, 0.0, 1.0 - t], tolerance, label);
+        assert_eq!(
+            pixel(fb, 12, 24)[3],
+            0.0,
+            "{label}: nothing inside the square"
+        );
+        assert_eq!(pixel(fb, 2, 24)[3], 0.0, "{label}: nothing past the width");
+    }
+    let mut compared = 0;
+    for (c, g) in cpu
+        .as_f32()
+        .chunks_exact(4)
+        .zip(gpu.as_f32().chunks_exact(4))
+    {
+        if c[3] > 0.99 && g[3] > 0.99 {
+            compared += 1;
+            for channel in 0..3 {
+                assert!(
+                    (c[channel] - g[channel]).abs() < 0.02,
+                    "CPU {c:?} vs GPU {g:?}"
+                );
+            }
+        }
+    }
+    assert!(
+        compared > 400,
         "only {compared} opaque pixels were compared"
     );
 }

@@ -20,7 +20,7 @@ struct DrawItem {
     //   image:  placement offset x, offset y, unused
     data0: vec4<f32>,
     // path:  fill flag, stroke width, vertex colour start + 1 (0 = the stroke
-    //        is one colour), unused
+    //        is one colour), stroke_align (0 centre, 1 inside, 2 outside)
     // image: unused, unused, rectangle half width, half height (the inverse
     //        of the placement's linear part rides in `stroke_color`)
     data1: vec4<f32>,
@@ -194,8 +194,23 @@ fn path_coverage(item: DrawItem, found: PathSample) -> vec2<f32> {
         }
     }
     var stroke_coverage = 0.0;
+    let align = u32(item.data1.w);
     if stroke_width > 0.0 {
-        stroke_coverage = clamp(stroke_width * 0.5 - min_distance + 0.5, 0.0, 1.0);
+        if align == 0u || !closed {
+            stroke_coverage = clamp(stroke_width * 0.5 - min_distance + 0.5, 0.0, 1.0);
+        } else {
+            // The band of signed distance (negative inside, by winding) the
+            // stroke occupies, feathered one pixel at each edge:
+            // `stroke_coverage` in `sample.rs` is the CPU twin.
+            let d = select(min_distance, -min_distance, winding != 0);
+            var lo = -stroke_width;
+            var hi = 0.0;
+            if align == 2u {
+                lo = 0.0;
+                hi = stroke_width;
+            }
+            stroke_coverage = clamp(min(d - lo, hi - d) + 0.5, 0.0, 1.0);
+        }
     }
     return vec2<f32>(fill_coverage, stroke_coverage);
 }

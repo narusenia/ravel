@@ -1248,12 +1248,15 @@ fn drawn_bounds_at(
     inherited_width: f32,
     miter: bool,
 ) -> Option<Rect> {
-    let (local, own_width) = local_extent(geometry);
+    let (local, own_width, outside) = local_extent(geometry);
     // The **max** of the two, not "its own, else inherited". Per element
     // `rasterize` narrows the attribute over the inherited value, but the
     // bbox grows by one width for the whole geometry, so the only safe upper
-    // bound is the widest either of them asks for.
+    // bound is the widest either of them asks for. An outside-aligned stroke
+    // lies wholly outside the path, so its reach is the full width, not half:
+    // doubling the width gives `stroke_reach` that reach.
     let width = own_width.max(inherited_width);
+    let width = if outside { width * 2.0 } else { width };
     union(
         placed_ink(local, placement, width, miter),
         instance_bounds(geometry, depth, placement, width, miter),
@@ -1272,7 +1275,7 @@ fn drawn_bounds_at(
 /// (`element_style(style, instances, index)`), not onto the host's own
 /// primitives, so [`instance_bounds`] passes it down per instance instead —
 /// which is both tighter and where it actually applies.
-fn local_extent(geometry: &Geometry) -> (Option<Rect>, f32) {
+fn local_extent(geometry: &Geometry) -> (Option<Rect>, f32, bool) {
     let widest = [Domain::Detail, Domain::Primitive, Domain::Point]
         .into_iter()
         .filter_map(|domain| {
@@ -1284,9 +1287,17 @@ fn local_extent(geometry: &Geometry) -> (Option<Rect>, f32) {
                 .map(|widths| widths.iter().copied().fold(0.0_f32, f32::max))
         })
         .fold(0.0_f32, f32::max);
+    // Any outside-aligned primitive: the bound is one per geometry, like the
+    // width's, so one such element widens the reach for all of them.
+    let outside = geometry
+        .primitive_attrs()
+        .get(names::STROKE_ALIGN)
+        .and_then(|column| column.as_i32(names::STROKE_ALIGN).ok())
+        .is_some_and(|aligns| aligns.contains(&names::STROKE_ALIGN_OUTSIDE));
     (
         union(geometry.positions_bounds(), control_hull_bounds(geometry)),
         widest,
+        outside,
     )
 }
 
@@ -1414,7 +1425,7 @@ fn instance_bounds(
     // why the hot path stays `O(sources × points + instances)`; a source
     // that nests further is re-walked per instance, bounded by
     // `MAX_INSTANCE_DEPTH`.
-    let mut leaf: Vec<Option<(Option<Rect>, f32)>> = vec![None; sources.len()];
+    let mut leaf: Vec<Option<(Option<Rect>, f32, bool)>> = vec![None; sources.len()];
 
     let mut bounds = None;
     for (index, offset) in offsets.iter().enumerate() {
@@ -1430,8 +1441,15 @@ fn instance_bounds(
             // An image has no contour, so nothing strokes it.
             InstanceSource::Image(image) => placed_rect(image.rect(), next),
             InstanceSource::Geometry(source) if source.instance_count() == 0 => {
-                let (extent, own_width) = *leaf[slot].get_or_insert_with(|| local_extent(source));
-                placed_ink(extent, next, width.max(own_width), miter)
+                let (extent, own_width, outside) =
+                    *leaf[slot].get_or_insert_with(|| local_extent(source));
+                let width = width.max(own_width);
+                placed_ink(
+                    extent,
+                    next,
+                    if outside { width * 2.0 } else { width },
+                    miter,
+                )
             }
             InstanceSource::Geometry(source) => {
                 drawn_bounds_at(source, depth + 1, next, width, miter)

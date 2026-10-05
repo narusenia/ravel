@@ -146,6 +146,10 @@ Illustrator 的な「stroke を 2 本重ねて縁取り」は属性 1 名 1 値�
 > フォールバックする」という同じ形の判断を抱えているので、そちらで
 > **CPU 側の方式を決めてから**まとめて入れる。
 >
+> **→ 実装済み（`PSHADE-3`）**: `stroke_align` の宣言と CPU / GPU 実装は同じ単位で入った。
+> 内側・外側は符号付き距離の帯で、CPU も zeno を使わない（`cap` / `join` / `dash` は
+> 効かない）。以下は繰り延べ当時の記録。
+>
 > 属性そのもの（標準属性表の `stroke_align`）も宣言していない。宣言だけ先に
 > 出すと「あるのに効かない」状態になるため。
 
@@ -302,7 +306,15 @@ F32 カーブ。つまり**「赤→青のグラデーションで塗る」が�
 > ある。画素まで通すには rasterize に頂点色補間が要り、CPU（zeno は被覆
 > マスクしか返さない）と GPU の両方の方式決定を伴う。**`stroke_align` を
 > 単位 3 へ繰り延べたのと同じ構図**なので、まとめて別計画で扱う。
-> → `issues/medium/gpu-nodes.md` の `MED-GPU-08`
+> → `issues/closed/medium-gpu-nodes.md` の `MED-GPU-08`
+>
+> **→ 実装済み（`PSHADE-1`〜`3` / `5`、#587, #588）**: 上の結合テストは画素まで通るように
+> なった。`crates/ravel-nodes/tests/path_shading_golden.rs` が
+> `shape.line → attribute.curveu → field.attribute("u") → field.ramp → field.apply →
+> rasterize` を CPU / GPU で描き、始点側と終点側の色が違うことを手計算の値で pin する。
+> 方式は CPU が per-pixel 評価器 `path_sample` で最近傍セグメントと `t` を引き、
+> 被覆は zeno のまま、というもの（`path-shading-plan.md`）。上の「`rasterize` まで通した
+> ゴールデンにはできない」は実装時点の記録として残す。
 
 ## 非対象
 

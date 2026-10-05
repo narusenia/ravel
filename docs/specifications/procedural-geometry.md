@@ -124,12 +124,13 @@ CPU 経路は texel を読むので、GPU 常駐フレームで来た画像は�
 | `orient` | Instance | Vec4 | 姿勢（クォータニオン）。**3D のみ**（REQ-3D-003） |
 | `scale3` | Instance | Vec3 | スケール。**3D のみ** |
 | `N` | Point/Primitive | Vec3 | 法線。**3D のみ**（ライティングが読む） |
-| `Cd` | Point/Instance | Color | 色（＝塗り色。`style.fill` が書く） |
+| `Cd` | Point/Instance | Color | 色（＝塗り色。`style.fill` が書く）。**Point ドメインの `Cd` は、パスの頂点に書くと線の頂点色になる**（塗りには効かない。下記） |
 | `alpha` | Point/Instance | F32 | 不透明度 |
 | `pscale` | Point | F32 | ポイント描画径 |
 | `fill` | Primitive/Instance | Bool | 塗りの有無。`rasterize` の `fill` パラメータが既定（`style.fill` が書く） |
 | `stroke_width` | Primitive/Instance | F32 | 線幅（0 = 線なし）。`rasterize` の `stroke_width` パラメータが既定（`style.stroke` が書く） |
-| `stroke_color` | Primitive/Instance | Color | 線色。未設定なら `Cd`（＝塗り色）にフォールバック（`style.stroke` が書く） |
+| `stroke_color` | Primitive/Instance/Point | Color | 線色。未設定なら `Cd`（＝塗り色）にフォールバック（`style.stroke` が書く）。**Point ドメインの列はパスの頂点ごとの線色になる**（下記） |
+| `stroke_align` | Primitive | I32 | 線の位置。0=中央 / 1=内側 / 2=外側。未設定は中央。開いたパスには内側・外側が無いので常に中央（下記） |
 | `dash` | Detail | Str | 破線パターン（`"4,2"` 形式。空なら実線。`style.dash` が書く） |
 | `dash_offset` | Detail | F32 | 破線の開始位置（`style.dash` が書く） |
 | `cap` | Detail | I32 | 端点の形。0=butt / 1=round / 2=square。未設定は round（`style.stroke` が書く） |
@@ -137,6 +138,43 @@ CPU 経路は texel を読むので、GPU 常駐フレームで来た画像は�
 | `age` / `life` | Point | F32 | パーティクル経過/寿命 |
 | `velocity` | Point | Vec2 | 速度（sim） |
 | `u` | Point | F32 | パスパラメータ 0..1。**primitive ごとに正規化**する（`attribute.curveu` が書く。閉パスは閉じる区間の分だけ終点が 1 に届かない） |
+
+### パスの頂点色と線の整列
+
+`rasterize` が線を引くときの規則。実装は CPU / GPU とも同じ per-pixel 評価
+（`docs/implementation/path-shading-plan.md`）。
+
+**頂点色**（線だけ。塗りは常にプリミティブの 1 色）:
+
+- 線の色は**最近傍セグメントの両端の頂点色を、その上の位置 `t` で線形補間**したもの。
+  ベジェ（`in_tan` / `out_tan`）は平坦化後の各頂点に制御多角形上のパラメータ
+  （`i + t`）で色を振るので、曲線に沿って連続に変わる
+- 色の優先順位: **Point の `stroke_color` > Point の `Cd` > プリミティブの
+  `stroke_color` > プリミティブの `Cd` > `rasterize` の `color`**。より細かい
+  ドメインを先に引く。Point の `alpha` とプリミティブの `alpha`、囲むインスタンスの
+  色味は掛かる
+- **塗りは Point の `Cd` を無視する**（案 A）。塗りの内部には頂点色から補間する自然な
+  規則が無く、平均や先頭を採ると既存の絵が黙って変わるため。塗りの色は従来どおり
+  プリミティブの `Cd`、無ければ `rasterize` の色
+- `stroke_width = 0`（線なし）なら頂点色があっても何も描かれない
+- 頂点色を持たないパスは per-pixel 走査をしない（従来の 1 色の経路）。CPU の被覆
+  （どれだけ濃いか）は引き続き zeno が決めるので、破線・端点・角の形は頂点色でも効く
+
+**`stroke_align`**（閉じたパスの線だけ）:
+
+- 線は符号付き距離（内側が負）の帯: 中央 `-w/2..w/2`、内側 `-w..0`、外側 `0..w`
+  （`w` は線幅）。境界は 1 画素でぼかす
+- **内側・外側のとき CPU も zeno を使わず**この帯で被覆を作る（整列は被覆そのものを
+  変えるため）。したがって**`cap` / `join` / `dash` は効かず、丸端・丸角の実線**になる。
+  GPU も同じ式なので、`dash` などで CPU へ落ちても同じ絵になる
+- **開いたパスに内側・外側は無い**ので、`stroke_align` が 1 / 2 でも中央として描く
+- 複数の閉じたパスは 1 つの塊として巻き数を数える（穴は外側として扱う）
+- 外側は線幅いっぱいまで外へ出るので、`ops::drawn_bounds` の外接は
+  `stroke_align` に 2（外側）が 1 つでもあれば線幅を 2 倍にして伸ばす
+
+`ravel_core::geometry::path_sample`（弧長でパスを引く関数）と、`rasterize` の
+非公開の per-pixel `path_sample`（画素から見たポリラインの距離・巻き数・最近傍セグメント）は
+名前が同じだけの別物。
 
 ### 位置の次元（REQ-3D-003）
 

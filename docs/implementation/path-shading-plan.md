@@ -3,7 +3,31 @@
 **要件**: REQ-MOGRAPH-001（要素ごとの見た目）、REQ-RENDER-001（CPU / GPU の
 出力一致）、REQ-CORE-012（属性駆動）
 
-**関連する票**: `issues/medium/gpu-nodes.md` の `MED-GPU-08`
+**関連する票**: `issues/closed/medium-gpu-nodes.md` の `MED-GPU-08`（解決済み）
+
+## 実施状況
+
+| 単位 | 状態 | PR |
+| --- | --- | --- |
+| `PSHADE-1` per-pixel 評価器 | 実装済み | #587 |
+| `PSHADE-2` 線の頂点色補間 | 実装済み | #587 |
+| `PSHADE-3` `stroke_align` | 実装済み | #588 |
+| `PSHADE-5` ゴールデンと文書 | 実装済み（`MED-GPU-08` を閉じた） | #588 |
+| `PSHADE-6` 要素ごとのグラデーション塗り | 未着手（`FX-3` 待ち） | — |
+
+実装時に決めたこと:
+
+- 評価器は `rasterize/sample.rs` の非公開 `path_sample`。`ravel_core::geometry::path_sample`
+  （弧長サンプリング）とは別物。4 つの返り値に加えて、閉じるセグメントの終点が
+  `nearest_segment + 1` でないので `segment_end` を返す
+- 頂点色の優先順位は Point の `stroke_color` > Point の `Cd` > プリミティブの値
+- 頂点色は被覆を変えないので CPU は zeno の被覆のまま、色だけ画素ごとに引く
+- `stroke_align` の内側・外側は被覆を変えるので CPU も zeno を使わず、符号付き距離の帯で
+  作る。`cap` / `join` / `dash` は効かない。開いたパスは常に中央。外側は
+  `drawn_bounds` の線幅を 2 倍にして伸ばす
+- GPU は頂点色を `path_vertices` と並行するストレージバッファ（binding 3、画像テクスチャは
+  binding 4 へ）で送り、`DrawItem` は広げていない。`data1.z` が色の開始位置 + 1
+  （0 = 頂点色なし）、`data1.w` が整列
 
 ## 問題
 

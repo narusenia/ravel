@@ -60,6 +60,67 @@ pub(super) fn calls() -> u64 {
     CALLS.with(std::cell::Cell::get)
 }
 
+/// Where a stroke lies relative to its path (`stroke_align`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StrokeAlign {
+    Center,
+    Inside,
+    Outside,
+}
+
+impl StrokeAlign {
+    /// The attribute's value, with anything unknown read as centre — what an
+    /// unset attribute means.
+    pub(super) fn from_attribute(value: Option<i32>) -> Self {
+        match value {
+            Some(ravel_core::geometry::names::STROKE_ALIGN_INSIDE) => Self::Inside,
+            Some(ravel_core::geometry::names::STROKE_ALIGN_OUTSIDE) => Self::Outside,
+            _ => Self::Center,
+        }
+    }
+
+    /// The value the shader reads from `data1.w`.
+    pub(super) fn code(self) -> f32 {
+        match self {
+            Self::Center => 0.0,
+            Self::Inside => 1.0,
+            Self::Outside => 2.0,
+        }
+    }
+
+    /// The width whose [`stroke_reach`](ravel_core::geometry::stroke_reach)
+    /// bounds a stroke of `width` so aligned: outside it reaches the whole
+    /// width past the path rather than half.
+    pub(super) fn reach_width(self, width: f32) -> f32 {
+        match self {
+            Self::Outside => width * 2.0,
+            _ => width,
+        }
+    }
+}
+
+/// How much of a pixel the stroke covers, from the signed distance to the
+/// path (negative inside, by the winding number) as the shader computes it.
+///
+/// The stroke is the band `lo..=hi` of signed distance — centre
+/// `-w/2..w/2`, inside `-w..0`, outside `0..w` — feathered over one pixel at
+/// each edge. For the centre band this is `w/2 - |d| + 0.5`, the formula the
+/// shader has always used. A pixel on no segment (`min_distance` 1e20) is far
+/// outside every band.
+pub(super) fn stroke_coverage(found: &PathSample, width: f32, align: StrokeAlign) -> f32 {
+    let d = if found.winding != 0 {
+        -found.min_distance
+    } else {
+        found.min_distance
+    };
+    let (lo, hi) = match align {
+        StrokeAlign::Center => (-width * 0.5, width * 0.5),
+        StrokeAlign::Inside => (-width, 0.0),
+        StrokeAlign::Outside => (0.0, width),
+    };
+    ((d - lo).min(hi - d) + 0.5).clamp(0.0, 1.0)
+}
+
 /// Whether a vertex is the sentinel between two contours rather than a point.
 ///
 /// `>= 3.0e38` exactly as the shader writes it: false for a NaN, so a

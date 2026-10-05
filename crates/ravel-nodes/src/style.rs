@@ -146,10 +146,11 @@ impl NodeProcessor for StyleStrokeProcessor {
             group,
             AttributeValue::Color(UNSET_COLOR),
         )?;
+        let with_align = stroke_align_in(&with_color, domain, group, params)?;
         // Cap and join are Detail attributes: one shape for the whole
         // geometry, so neither `domain` nor `group` applies to them.
         let with_cap = attribute_set(
-            &with_color,
+            &with_align,
             Domain::Detail,
             names::CAP,
             AttributeValue::I32(cap_param(params)),
@@ -196,6 +197,49 @@ impl NodeProcessor for StyleDashProcessor {
             names::DASH_OFFSET,
             AttributeValue::F32(params.f32_or("offset", 0.0)),
         )?))
+    }
+}
+
+/// Writes `stroke_align` (Primitive only: that is the one place `rasterize`
+/// reads it). Centre is what an absent column means, so writing it where no
+/// column exists would only add a column to every existing project's output;
+/// it is skipped unless it has to overwrite an earlier alignment.
+fn stroke_align_in(
+    geometry: &Geometry,
+    domain: Domain,
+    group: &str,
+    params: &ResolvedParams,
+) -> anyhow::Result<Geometry> {
+    let align = stroke_align_param(params);
+    let has_column = geometry
+        .attribute_set(Domain::Primitive)
+        .get(names::STROKE_ALIGN)
+        .is_some();
+    if align == names::STROKE_ALIGN_CENTER && !has_column {
+        return Ok(geometry.clone());
+    }
+    if domain != Domain::Primitive {
+        anyhow::bail!(
+            "style.stroke: `stroke_align` is read from paths (the primitive domain) only; \
+             set the domain to primitive or leave the alignment at center"
+        );
+    }
+    refuse_to_seed_a_group(geometry, domain, names::STROKE_ALIGN, group, "style.stroke")?;
+    Ok(attribute_set_in_group(
+        geometry,
+        domain,
+        names::STROKE_ALIGN,
+        AttributeValue::I32(align),
+        group,
+        AttributeValue::I32(names::STROKE_ALIGN_CENTER),
+    )?)
+}
+
+fn stroke_align_param(params: &ResolvedParams) -> i32 {
+    match params.str_or("stroke_align", "") {
+        "inside" => names::STROKE_ALIGN_INSIDE,
+        "outside" => names::STROKE_ALIGN_OUTSIDE,
+        _ => names::STROKE_ALIGN_CENTER,
     }
 }
 

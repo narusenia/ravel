@@ -1360,6 +1360,7 @@ domain = "Domain to write on (point, primitive, instance)."
 group = "Bool attribute naming the elements to write; empty writes every element."
 cap = "Shape of the stroke ends (butt, round, square); a Detail attribute, so one value for the geometry."
 join = "Shape of the stroke corners (miter, round, bevel); a Detail attribute, so one value for the geometry."
+stroke_align = "Where the stroke lies relative to a closed path (center, inside, outside); an open path always strokes at the center. Writes the Primitive stroke_align attribute, so it follows domain and group."
 [node."style.stroke".group]
 stroke = "Stroke"
 target = "Target"

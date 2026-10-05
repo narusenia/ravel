@@ -12,7 +12,7 @@
   持たない）ので、ロードマップがクラスタ単位で順序を決め、個票は `issues/` に
   置く。計画書が引き受けた issue だけ、該当単位の説明に ID が出る。
 
-最終更新: 2026-09-30
+最終更新: 2026-10-05
 
 ## 凡例
 
@@ -73,6 +73,7 @@
 | 3D-4 | 三角形レンダラと `scene.render` | `3d-scene-plan.md` |
 | FRAC-2 | `geometry.cell_fracture`（2D） | `geometry-fracture-plan.md` |
 | FRAC-3 | `geometry.cell_fracture_3d`（`3D-1a` / `3D-1b` ✅ で依存が解けた） | `geometry-fracture-plan.md` |
+| FILL-1 | 予約属性の不在値の正 `geometry::absent`（ravel-core。要判断の推奨案で書く） | `absent-attribute-fill-plan.md` |
 
 FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 
@@ -503,6 +504,19 @@ hover 判定は既存ヒットテストの再利用に限り、新しいレイ�
 | IXF-4 | ✅ | #586 文書・スプレッドシートの列順・`MED-GPU-09` と計画のクローズ | IXF-1〜3 |
 
 せん断は予約属性 `shear`（F32、無ければ 0）で持つ（2026-09-30 決定）。無い列を 0 と読むので既存の書き手の意味は変わらず、`merge` のゼロ埋めもそのまま正しい。計画時、`expand_instances` は既に厳密で、描画・バウンズ・ピースだけが近似だった。IXF-1〜4 で全経路が厳密な合成になった。
+
+### 不在属性の埋め値（フェーズ A6、`absent-attribute-fill-plan.md`）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| FILL-1 | 🟡 | `geometry::absent`: 予約属性が「無い」ときの値の正、型ゼロ、行ごとの解決（`stroke_color` → `Cd`、Point の `Cd` → 所属プリミティブ）と予約名の走査テスト（ravel-core） | — |
+| FILL-2 | ❓ | `expand_instances` の `ColumnAccumulator` と `attach_piece_attributes` を不在値で埋める。`pscale` を型ゼロで固定したテストの書き換え（ravel-core） | FILL-1、要判断 1・2 |
+| FILL-3 | ❓ | `geometry.merge` の連結を不在値で埋める（`scale` で潰れる・`style` 済みと素のマージで消える、`MED-CORE-13`）。固定テストの書き換え | FILL-1、要判断 1・2 |
+| FILL-4 | ❓ | `field.apply` の `created_column` と `style` の `UNSET_*` を `absent` へ | FILL-1、要判断 3 |
+| FILL-5 | ⬜ | `rasterize` の既定値の直書き（`DEFAULT_POINT_RADIUS`、`unwrap_or(1.0)` ほか）を `absent` の定数へ（挙動不変） | FILL-1 |
+| FILL-6 | ⬜ | 仕様の予約属性表に「無いとき」列、API 地図、個票と計画のクローズ | FILL-1〜5 |
+
+連結の 3 箇所（`merge` / 展開 / ピース）は欠けた行を型ゼロで埋めるが、読み手は `scale` を `(1, 1)`、`alpha` を 1、`pscale` を 2、Instance の `Cd` を白と読む。`fill` / `stroke_width` / Primitive の `Cd` / `stroke_color` の「無い」は `rasterize` のパラメータや囲むインスタンスからの継承で、密な列では表せない — その埋め方が要判断 1・2（推奨はテンプレート既定と、同じ側の参照先の行ごとの実体化）。
 
 ### 結果の前提照合（フェーズ A6、`done/result-provenance-plan.md`）
 

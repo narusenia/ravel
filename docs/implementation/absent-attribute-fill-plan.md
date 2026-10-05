@@ -139,7 +139,10 @@ pub fn absent_column(geometry: &Geometry, domain: Domain, name: &str,
   他の列で決まる**属性があるため（下記）。連結の 3 箇所はどれも欠けた側の
   ジオメトリ（`merge` の各入力、`expand_at` の各ブロック）を手元に持つ。
   `attach_piece_attributes` のピースは Instance 行の `AttributeSet` なので、
-  その場合は `Absent::Value` だけを使う関数を呼ぶ
+  その場合は `Absent::Value` だけを使う関数を呼ぶ。**ただし Instance の
+  `stroke_color` は例外**で、欠けた行は同じ出力 Instance 行の `Cd`（それも
+  無ければ Instance の不在値の白）から解決する。既にある出力列は上書きしない
+  （`FILL-2` の完了条件に含める）
 
 ### 継承する属性（決定事項 1・2）
 
@@ -238,6 +241,9 @@ Primitive / Point の `Cd`、`fill`、`stroke_width`、`stroke_color` の「無�
   （個票の再現 4）
 - `FILL-2`: 2 ソースの片方だけ `pscale` を持ち、もう片方は**パスに属さない点** →
   展開後の `pscale` は `[2.0, …, 8.0, …]` で、`rasterize` すると両方の点が描かれる
+- `FILL-2`: `attach_piece_attributes` で、片方のピースだけ Instance `stroke_color`
+  を持ち、他方は `Cd = 赤` だけを持つ → 欠けた行の `stroke_color` は赤。`Cd` も
+  無い行は白。既にある出力列の値は変わらない
 - **固定テストの書き換え**: `sources_with_different_columns_fill_with_typed_zeros`
   は `pscale` の欠けを 2.0 に、`merge_unions_attributes_with_typed_zero_fill` は
   `pscale` の欠けを 2.0 に（`Vec3` の `Cd` は型ゼロのまま）。テスト名も規則に

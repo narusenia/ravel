@@ -2360,8 +2360,8 @@ fn expand_at(geometry: &Geometry, depth: u32) -> Result<Geometry, GeometryOpErro
         let inherited = instance.map(|index| (instances, index));
         let point_count = block.point_count();
         let start = points.len;
-        points.push(block, inherited, point_count);
-        primitive_attrs.push(block, inherited, block.primitive_count());
+        points.push(block, inherited, point_count)?;
+        primitive_attrs.push(block, inherited, block.primitive_count())?;
         point_ranges.push((start..start + point_count, *placement));
 
         let index_offset = out.extend_indices(block.indices());
@@ -2781,19 +2781,23 @@ fn instance_row(instances: &AttributeSet, index: usize) -> Result<AttributeSet, 
 /// `geometry.merge` uses. Column order follows first appearance, so the
 /// output does not depend on `HashMap` iteration order.
 ///
-/// The blocks are kept until [`into_set`](Self::into_set), because filling a
-/// column that first appears partway through needs the earlier blocks
-/// themselves (a `stroke_color` is read off that block's `Cd`, a point's `Cd`
-/// off its paths), not just their row counts.
+/// Rows are appended as each block arrives and not kept. Filling a column
+/// that first appears partway through needs the earlier blocks only through
+/// what [`absent_column`] reads: the block geometry (borrowed) and its
+/// effective `Cd` (a `stroke_color` follows it), so that is all that is
+/// remembered per block.
 struct ColumnAccumulator<'a> {
     domain: Domain,
+    columns: Vec<(AttrName, AttributeArray)>,
     blocks: Vec<AccumulatedBlock<'a>>,
     len: usize,
 }
 
 struct AccumulatedBlock<'a> {
     geometry: &'a Geometry,
-    rows: Vec<(&'a AttrName, Cow<'a, AttributeArray>)>,
+    /// The block's `Cd` rows as they end up in the output, when it has a
+    /// colour column.
+    cd: Option<Cow<'a, AttributeArray>>,
     count: usize,
 }
 
@@ -2801,6 +2805,7 @@ impl<'a> ColumnAccumulator<'a> {
     fn new(domain: Domain) -> Self {
         Self {
             domain,
+            columns: Vec::new(),
             blocks: Vec::new(),
             len: 0,
         }
@@ -2816,7 +2821,7 @@ impl<'a> ColumnAccumulator<'a> {
         block: &'a Geometry,
         inherited: Option<(&'a AttributeSet, usize)>,
         count: usize,
-    ) {
+    ) -> Result<(), GeometryError> {
         let own = block.attribute_set(self.domain);
         let mut rows: Vec<(&AttrName, Cow<'_, AttributeArray>)> = own
             .iter()
@@ -2837,59 +2842,70 @@ impl<'a> ColumnAccumulator<'a> {
                     }),
             );
         }
-        self.blocks.push(AccumulatedBlock {
+        let cd = rows
+            .iter()
+            .position(|(name, _)| name.as_str() == names::CD)
+            .filter(|at| matches!(rows[*at].1.as_ref(), AttributeArray::Color(_)))
+            .map(|at| rows[at].1.clone());
+        let info = AccumulatedBlock {
             geometry: block,
-            rows,
+            cd,
             count,
-        });
+        };
+
+        for (name, accumulated) in &mut self.columns {
+            match rows.iter().find(|(row, _)| *row == name) {
+                Some((_, column)) => append_rows(name, accumulated, column)?,
+                None => {
+                    let fill = fill_missing(self.domain, &info, name, accumulated.attr_type());
+                    append_rows(name, accumulated, &fill)?;
+                }
+            }
+        }
+        for (name, column) in &rows {
+            if self.columns.iter().any(|(seen, _)| seen == *name) {
+                continue;
+            }
+            let mut accumulated = empty_like(column);
+            // The rows accumulated before this name appeared.
+            for earlier in &self.blocks {
+                let fill = fill_missing(self.domain, earlier, name, accumulated.attr_type());
+                append_rows(name, &mut accumulated, &fill)?;
+            }
+            append_rows(name, &mut accumulated, column)?;
+            self.columns.push(((*name).clone(), accumulated));
+        }
+        self.blocks.push(info);
         self.len += count;
+        Ok(())
     }
 
     fn into_set(self) -> Result<AttributeSet, GeometryError> {
-        let mut order: Vec<(&AttrName, AttributeType)> = Vec::new();
-        for block in &self.blocks {
-            for (name, column) in &block.rows {
-                if !order.iter().any(|(seen, _)| seen == name) {
-                    order.push((name, column.attr_type()));
-                }
-            }
-        }
         let mut set = AttributeSet::new();
-        for (name, attr_type) in order {
-            let mut accumulated = broadcast_value(&AttributeValue::zero(attr_type), 0);
-            for block in &self.blocks {
-                match block.rows.iter().find(|(row, _)| *row == name) {
-                    Some((_, column)) => append_rows(name, &mut accumulated, column)?,
-                    None => {
-                        let fill = self.fill_missing(block, name, attr_type);
-                        append_rows(name, &mut accumulated, &fill)?;
-                    }
-                }
-            }
-            set.insert(name.clone(), accumulated)?;
+        for (name, column) in self.columns {
+            set.insert(name, column)?;
         }
         Ok(set)
     }
+}
 
-    /// The rows of `name` for a block that does not carry it.
-    ///
-    /// A `stroke_color` follows the fill colour the block *ends up with*, so
-    /// a `Cd` the block only has through an instance's row counts.
-    fn fill_missing(
-        &self,
-        block: &AccumulatedBlock<'_>,
-        name: &str,
-        attr_type: AttributeType,
-    ) -> AttributeArray {
-        if name == names::STROKE_COLOR
-            && attr_type == AttributeType::Color
-            && let Some((_, cd)) = block.rows.iter().find(|(row, _)| row.as_str() == names::CD)
-            && matches!(cd.as_ref(), AttributeArray::Color(_))
-        {
-            return cd.as_ref().clone();
-        }
-        absent_column(block.geometry, self.domain, name, attr_type, block.count)
+/// The rows of `name` for a block that does not carry it.
+///
+/// A `stroke_color` follows the fill colour the block *ends up with*, so a
+/// `Cd` the block only has through an instance's row counts.
+fn fill_missing(
+    domain: Domain,
+    block: &AccumulatedBlock<'_>,
+    name: &str,
+    attr_type: AttributeType,
+) -> AttributeArray {
+    if name == names::STROKE_COLOR
+        && attr_type == AttributeType::Color
+        && let Some(cd) = &block.cd
+    {
+        return cd.as_ref().clone();
     }
+    absent_column(block.geometry, domain, name, attr_type, block.count)
 }
 
 /// An empty column of the same type.

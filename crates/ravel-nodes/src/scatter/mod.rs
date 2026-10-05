@@ -1482,10 +1482,11 @@ mod tests {
     }
 
     /// Two wires whose instance domains differ: the piece that lacks a
-    /// column contributes that column's typed zero, the fill rule
+    /// column contributes that column's absent value, and the typed zero for
+    /// a name that is not reserved (`char_index` here), the fill rule
     /// `geometry.merge` uses.
     #[test]
-    fn a_piece_without_a_column_fills_with_the_typed_zero() {
+    fn a_piece_without_a_column_fills_with_its_absent_value() {
         let mut plain = Geometry::new();
         plain
             .instances_mut()

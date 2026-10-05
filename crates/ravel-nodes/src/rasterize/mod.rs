@@ -77,6 +77,8 @@ use crate::ensure_cpu;
 use crate::flatten;
 use crate::gpu_util;
 
+mod sample;
+
 const SHADER_SRC: &str = include_str!("../shaders/rasterize.wgsl");
 
 const DEFAULT_POINT_RADIUS: f32 = 2.0;
@@ -429,38 +431,46 @@ struct GpuRasterizer {
     placeholder: PooledTexture,
 }
 
+/// The draw pass's bind group layout: the uniform, the vertex and item
+/// storage, and the instance source a run of image quads samples.
+///
+/// One definition, because the probe in `sample.rs`'s tests builds a second
+/// pipeline over the same shader and has to bind what the shader declares.
+fn raster_layout() -> [BindingDesc; 4] {
+    [
+        BindingDesc::new(
+            0,
+            BindingKind::UniformBuffer,
+            ShaderVisibility::VERTEX_FRAGMENT,
+        ),
+        BindingDesc::new(
+            1,
+            BindingKind::ReadOnlyStorageBuffer,
+            ShaderVisibility::FRAGMENT,
+        ),
+        BindingDesc::new(
+            2,
+            BindingKind::ReadOnlyStorageBuffer,
+            ShaderVisibility::VERTEX_FRAGMENT,
+        ),
+        // The instance source a run of image quads samples. Rebound
+        // between runs, which is what keeps several pictures in one
+        // painter-ordered pass.
+        BindingDesc::new(3, BindingKind::InputTexture, ShaderVisibility::FRAGMENT),
+    ]
+}
+
 impl GpuRasterizer {
     fn new(ctx: GpuContext, shaders: &mut ShaderManager, pool: Arc<Mutex<TexturePool>>) -> Self {
         let shader = shaders
             .compile_source("rasterize", SHADER_SRC)
             .expect("rasterize.wgsl compilation failed");
-        let raster_layout = [
-            BindingDesc::new(
-                0,
-                BindingKind::UniformBuffer,
-                ShaderVisibility::VERTEX_FRAGMENT,
-            ),
-            BindingDesc::new(
-                1,
-                BindingKind::ReadOnlyStorageBuffer,
-                ShaderVisibility::FRAGMENT,
-            ),
-            BindingDesc::new(
-                2,
-                BindingKind::ReadOnlyStorageBuffer,
-                ShaderVisibility::VERTEX_FRAGMENT,
-            ),
-            // The instance source a run of image quads samples. Rebound
-            // between runs, which is what keeps several pictures in one
-            // painter-ordered pass.
-            BindingDesc::new(3, BindingKind::InputTexture, ShaderVisibility::FRAGMENT),
-        ];
         let raster_pipeline = RasterPipeline::new(
             &ctx,
             &shader,
             "raster_vertex",
             "raster_fragment",
-            &raster_layout,
+            &raster_layout(),
             // Must stay the format `premul_key` asks the pool for. The pass
             // blends premultiplied coverage, which the `unpremultiply` compute
             // pass below converts back to straight alpha.

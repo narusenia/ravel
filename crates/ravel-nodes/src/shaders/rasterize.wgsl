@@ -62,14 +62,17 @@ fn raster_vertex(
     return output;
 }
 
-fn segment_distance(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+/// Distance to the segment `a -> b` in `x` and the clamped parameter of the
+/// nearest point on it in `y`. A degenerate segment is the point `a` with
+/// `t = 0` (`segment_nearest` in `sample.rs` is the CPU twin).
+fn segment_nearest(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
     let ab = b - a;
     let denom = dot(ab, ab);
     if denom <= 1e-10 {
-        return distance(p, a);
+        return vec2<f32>(distance(p, a), 0.0);
     }
     let t = clamp(dot(p - a, ab) / denom, 0.0, 1.0);
-    return distance(p, a + t * ab);
+    return vec2<f32>(distance(p, a + t * ab), t);
 }
 
 /// Whether a vertex is the sentinel that separates two contours of one draw
@@ -79,24 +82,32 @@ fn is_contour_break(v: vec2<f32>) -> bool {
     return v.x >= 3.0e38;
 }
 
-/// Fill coverage in `x`, stroke coverage in `y`: the two carry different
-/// colors now, so they cannot be unioned here any more.
+/// What one fragment knows about a draw item's polyline: the CPU's
+/// `PathSample` (`sample.rs`), field for field. Segment indices are relative to
+/// the item's first vertex.
+struct PathSample {
+    min_distance: f32,
+    winding: i32,
+    nearest_segment: u32,
+    segment_end: u32,
+    t_on_segment: f32,
+}
+
+/// Distance, winding, and where the nearest segment is, at `p`.
 ///
 /// One item can hold several contours — a glyph's outer outline plus its
 /// counters — laid out back to back in `path_vertices` and separated by
 /// `CONTOUR_BREAK`. The winding number is accumulated across all of them,
 /// which is what makes the counter of an `o` a hole rather than more ink, and
 /// every contour closes onto **its own** first vertex, so no segment ever
-/// bridges two of them.
-fn path_coverage(item: DrawItem, p: vec2<f32>) -> vec2<f32> {
+/// bridges two of them. `segments` in `sample.rs` states the same rule for the
+/// CPU.
+fn path_sample(item: DrawItem, p: vec2<f32>) -> PathSample {
     let start = u32(item.data0.y);
     let count = u32(item.data0.z);
     let closed = item.data0.w > 0.5;
-    let fill = item.data1.x > 0.5 && closed;
-    let stroke_width = item.data1.y;
 
-    var winding = 0i;
-    var min_distance = 1e20;
+    var found = PathSample(1e20, 0i, 0u, 0u, 0.0);
     // Where the contour being walked began, relative to `start`.
     var contour_start = 0u;
     var i = 0u;
@@ -110,40 +121,64 @@ fn path_coverage(item: DrawItem, p: vec2<f32>) -> vec2<f32> {
             contour_start = i;
             continue;
         }
+        let seg_from = i;
         let next = i + 1u;
         // The segment leaving `a`: the next vertex, or — at the end of the
         // contour — back to its first vertex when the run is closed. An open
         // path has no such wrap, so its last vertex starts no segment.
         var b = a;
+        var seg_to = seg_from;
         var has_segment = false;
         if next < count {
             let candidate = path_vertices[start + next];
             if is_contour_break(candidate) {
                 if closed {
                     b = path_vertices[start + contour_start];
+                    seg_to = contour_start;
                     has_segment = true;
                 }
             } else {
                 b = candidate;
+                seg_to = next;
                 has_segment = true;
             }
         } else if closed {
             b = path_vertices[start + contour_start];
+            seg_to = contour_start;
             has_segment = true;
         }
         i = next;
         if !has_segment {
             continue;
         }
-        min_distance = min(min_distance, segment_distance(p, a, b));
+        let nearest = segment_nearest(p, a, b);
+        // Strictly nearer: the first of equally near segments wins.
+        if nearest.x < found.min_distance {
+            found.min_distance = nearest.x;
+            found.nearest_segment = seg_from;
+            found.segment_end = seg_to;
+            found.t_on_segment = nearest.y;
+        }
 
         let cross = (b.x - a.x) * (p.y - a.y) - (p.x - a.x) * (b.y - a.y);
         if a.y <= p.y && b.y > p.y && cross > 0.0 {
-            winding += 1;
+            found.winding += 1;
         } else if a.y > p.y && b.y <= p.y && cross < 0.0 {
-            winding -= 1;
+            found.winding -= 1;
         }
     }
+    return found;
+}
+
+/// Fill coverage in `x`, stroke coverage in `y`: the two carry different
+/// colors now, so they cannot be unioned here any more.
+fn path_coverage(item: DrawItem, p: vec2<f32>) -> vec2<f32> {
+    let closed = item.data0.w > 0.5;
+    let fill = item.data1.x > 0.5 && closed;
+    let stroke_width = item.data1.y;
+    let found = path_sample(item, p);
+    let winding = found.winding;
+    let min_distance = found.min_distance;
 
     var fill_coverage = 0.0;
     if fill {

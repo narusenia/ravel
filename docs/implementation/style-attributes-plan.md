@@ -166,6 +166,11 @@ Illustrator 的な「stroke を 2 本重ねて縁取り」は属性 1 名 1 値�
 - `group` 指定で対象外要素が変わらないテスト。
 - 2 回適用で後勝ちになるテスト。
 
+> **→ 追加済み**: `style.stroke` の `stroke_align` パラメータ（center / inside / outside、
+> 既定 center）。Primitive 列に `domain` / `group` に従って書く。中央かつ列が無いときは
+> 列を作らず、既存の出力は変わらない。インスタンスドメインで内側・外側を選ぶと
+> （`rasterize` が読まないので）エラーにする。以下は追加前の記録。
+>
 > **`align` パラメータは宣言しなかった（実装時の判断）。** `stroke_align` は
 > 属性の宣言ごと `path-shading-plan.md` の `PSHADE-3` が引き取っており、
 > ここでパラメータだけ出すと単位 1 が避けた「あるのに効かない」状態を

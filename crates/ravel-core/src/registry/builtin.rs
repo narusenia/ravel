@@ -374,6 +374,10 @@ pub const STROKE_CAPS: [&str; 3] = ["butt", "round", "square"];
 /// attribute codes (`geometry::names::JOIN_*`).
 pub const STROKE_JOINS: [&str; 3] = ["miter", "round", "bevel"];
 
+/// Stroke alignments `style.stroke` can select, ordered to match the
+/// `stroke_align` attribute codes (`geometry::names::STROKE_ALIGN_*`).
+pub const STROKE_ALIGNS: [&str; 3] = ["center", "inside", "outside"];
+
 /// Attribute types `attribute.set` can write.
 pub const ATTRIBUTE_SET_TYPES: [&str; 8] = [
     "f32", "vec2", "vec3", "vec4", "color", "i32", "bool", "string",
@@ -602,11 +606,15 @@ fn style_stroke() -> NodeTemplate {
         .with_param_options("cap", STROKE_CAPS)
         .with_param(string_parameter("join", STROKE_JOINS[1]))
         .with_param_options("join", STROKE_JOINS)
+        // Unlike cap and join, the alignment is per element (Primitive), so it
+        // answers to `group`. Only a closed path has an inside.
+        .with_param(string_parameter("stroke_align", STROKE_ALIGNS[0]))
+        .with_param_options("stroke_align", STROKE_ALIGNS)
         .with_param_range("width", 0.0..=1000.0, 0.0..=20.0)
         // Cap and join are Detail — one value for the whole geometry — while
         // width and colour are per-element, so they answer to `domain` and
         // `group` and the corner shape does not.
-        .with_param_group("stroke", ["width", "color"])
+        .with_param_group("stroke", ["width", "color", "stroke_align"])
         .with_param_group("target", ["domain", "group"])
         .with_param_group("corner", ["cap", "join"])
 }

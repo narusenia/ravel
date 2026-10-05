@@ -146,10 +146,11 @@ impl NodeProcessor for StyleStrokeProcessor {
             group,
             AttributeValue::Color(UNSET_COLOR),
         )?;
+        let with_align = stroke_align_in(&with_color, domain, group, params)?;
         // Cap and join are Detail attributes: one shape for the whole
         // geometry, so neither `domain` nor `group` applies to them.
         let with_cap = attribute_set(
-            &with_color,
+            &with_align,
             Domain::Detail,
             names::CAP,
             AttributeValue::I32(cap_param(params)),
@@ -196,6 +197,52 @@ impl NodeProcessor for StyleDashProcessor {
             names::DASH_OFFSET,
             AttributeValue::F32(params.f32_or("offset", 0.0)),
         )?))
+    }
+}
+
+/// Writes `stroke_align` (Primitive only: that is the one place `rasterize`
+/// reads it). Centre is what an absent column means, so writing it where no
+/// column exists would only add a column to every existing project's output;
+/// it is skipped unless it has to overwrite an earlier alignment.
+fn stroke_align_in(
+    geometry: &Geometry,
+    domain: Domain,
+    group: &str,
+    params: &ResolvedParams,
+) -> anyhow::Result<Geometry> {
+    let align = stroke_align_param(params);
+    let has_column = geometry
+        .attribute_set(Domain::Primitive)
+        .get(names::STROKE_ALIGN)
+        .is_some();
+    // Centre is a no-op off the primitive domain too: a centred node aimed at
+    // instances (say, for a per-instance width) must not fail because some
+    // upstream node already aligned the paths.
+    if align == names::STROKE_ALIGN_CENTER && (!has_column || domain != Domain::Primitive) {
+        return Ok(geometry.clone());
+    }
+    if domain != Domain::Primitive {
+        anyhow::bail!(
+            "style.stroke: `stroke_align` is read from paths (the primitive domain) only; \
+             set the domain to primitive or leave the alignment at center"
+        );
+    }
+    refuse_to_seed_a_group(geometry, domain, names::STROKE_ALIGN, group, "style.stroke")?;
+    Ok(attribute_set_in_group(
+        geometry,
+        domain,
+        names::STROKE_ALIGN,
+        AttributeValue::I32(align),
+        group,
+        AttributeValue::I32(names::STROKE_ALIGN_CENTER),
+    )?)
+}
+
+fn stroke_align_param(params: &ResolvedParams) -> i32 {
+    match params.str_or("stroke_align", "") {
+        "inside" => names::STROKE_ALIGN_INSIDE,
+        "outside" => names::STROKE_ALIGN_OUTSIDE,
+        _ => names::STROKE_ALIGN_CENTER,
     }
 }
 
@@ -648,5 +695,44 @@ mod tests {
             &[5.0, 5.0]
         );
         assert!(out.primitive_attrs().get(names::STROKE_WIDTH).is_none());
+    }
+
+    /// A centred `style.stroke` aimed at instances is a no-op for alignment
+    /// even when the paths already carry one: it must not fail, and the
+    /// upstream alignment survives.
+    #[test]
+    fn a_centred_instance_stroke_keeps_an_upstream_alignment() {
+        let mut aligned = two_paths();
+        let count = aligned.primitive_count();
+        aligned
+            .primitive_attrs_mut()
+            .insert(
+                names::STROKE_ALIGN,
+                AttributeArray::I32(vec![names::STROKE_ALIGN_OUTSIDE; count]),
+            )
+            .unwrap();
+        aligned
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]))
+            .unwrap();
+        aligned.set_instance_source(Some(Arc::new(two_paths())));
+        let out = run(
+            aligned,
+            vec![(
+                "style.stroke",
+                vec![
+                    ("width", ParameterValue::Float(5.0)),
+                    ("domain", ParameterValue::String("instance".into())),
+                ],
+            )],
+        );
+        assert_eq!(
+            out.primitive_attrs()
+                .get(names::STROKE_ALIGN)
+                .unwrap()
+                .as_i32(names::STROKE_ALIGN)
+                .unwrap(),
+            &vec![names::STROKE_ALIGN_OUTSIDE; count][..]
+        );
     }
 }

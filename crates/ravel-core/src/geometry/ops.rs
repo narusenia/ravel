@@ -5988,6 +5988,7 @@ mod tests {
             &expand_instances(piece_geometry(&pieces[0])).expect("the piece expands"),
             names::P,
         );
+        assert_eq!(want.len(), 4, "the fixture has four leaf points");
         assert_eq!(got.len(), want.len());
         for (g, w) in got.iter().zip(&want) {
             assert!(

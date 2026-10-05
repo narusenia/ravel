@@ -459,24 +459,32 @@ impl InstanceTransform {
     /// `sy` its length and `rot` its direction. That still represents the
     /// matrix exactly, which keeps a rank-1 placement a line instead of
     /// nothing. An all-zero matrix is scale `(0, 0)` at `hint_rot`.
+    ///
+    /// "Zero" is decided against what the `f32` fields can hold, not against a
+    /// fixed threshold: a first column so short that `sx` rounds to 0 or the
+    /// shear overflows is treated as zero, and any column the fields can carry
+    /// is kept, however small (`scale = (5e-13, 1)` is a valid placement).
     fn decompose(m: [f64; 4], hint_rot: f32, neg_x: bool, neg_y: bool) -> (f32, Vec2, f32) {
-        // Below this a column is zero: it is no longer a direction.
-        const TINY: f64 = 1e-12;
         let [a, b, c, d] = m;
         let sign = |negative: bool| if negative { -1.0 } else { 1.0 };
         let first = a.hypot(c);
-        let (rot, sx, sy, shear) = if first > TINY {
-            let sx = sign(neg_x) * first;
-            let (cos, sin) = (a / sx, c / sx);
-            (
-                sin.atan2(cos),
-                sx,
-                -b * sin + d * cos,
-                (b * cos + d * sin) / sx,
-            )
+        let general = (first > 0.0)
+            .then(|| {
+                let sx = sign(neg_x) * first;
+                let (cos, sin) = (a / sx, c / sx);
+                (
+                    sin.atan2(cos),
+                    sx,
+                    -b * sin + d * cos,
+                    (b * cos + d * sin) / sx,
+                )
+            })
+            .filter(|&(_, sx, _, shear)| sx as f32 != 0.0 && (shear as f32).is_finite());
+        let (rot, sx, sy, shear) = if let Some(general) = general {
+            general
         } else {
             let second = b.hypot(d);
-            if second > TINY {
+            if second > 0.0 {
                 let sy = sign(neg_y) * second;
                 ((-b / sy).atan2(d / sy), 0.0, sy, 0.0)
             } else {
@@ -1845,7 +1853,7 @@ mod tests {
         let mut rng = Lcg(7);
         for _ in 0..2000 {
             let (outer, inner) = (rng.transform(), rng.transform());
-            assert_composes(outer, inner, 1e-4);
+            assert_composes(outer, inner, 1e-5);
         }
     }
 
@@ -1916,6 +1924,24 @@ mod tests {
         assert_eq!(squashed.scale.0, 0.0);
         assert!((squashed.scale.1.abs() - 1.0).abs() < 1e-6);
         assert_eq!(squashed.shear, 0.0);
+    }
+
+    /// A very small but non-zero scale is a placement, not a singular one:
+    /// its column is kept, so a far point still lands where it should.
+    #[test]
+    fn a_tiny_scale_is_not_taken_for_zero() {
+        let tiny = InstanceTransform {
+            scale: Vec2(5e-13, 1.0),
+            ..InstanceTransform::IDENTITY
+        };
+        let composed = InstanceTransform::compose(InstanceTransform::IDENTITY, tiny);
+        let p = Vec2(1e12, 0.0);
+        let want = tiny.apply(p);
+        let got = composed.apply(p);
+        assert!(
+            (want.0 - got.0).abs() < 1e-5 && (want.1 - got.1).abs() < 1e-5,
+            "{want:?} != {got:?} ({composed:?})"
+        );
     }
 
     /// `shear` is applied before `scale` and `rot`: `x' = x + shear * y`.

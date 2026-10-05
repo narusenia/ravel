@@ -55,8 +55,8 @@
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::{
-    AttributeSet, Domain, Geometry, InstanceImage, InstanceSource, InstanceTransform,
-    MAX_INSTANCE_DEPTH, Primitive, names, stroke_reach,
+    AttributeSet, Domain, Geometry, InstanceColumns, InstanceImage, InstanceSource,
+    InstanceTransform, MAX_INSTANCE_DEPTH, Primitive, names, stroke_reach,
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{Color, FrameBuffer, NodeData, Vec2};
@@ -140,27 +140,21 @@ impl StrokeShape<'_> {
 /// [`InstanceTransform`] plus the multiplicative tint, which only drawing
 /// has.
 ///
-/// The transform is spread over three fields rather than nested because the
-/// draw paths read the components one at a time (the GPU quad records write
-/// `offset` / `rot` / `scale` into a uniform, the image sampler inverts
-/// them). The arithmetic is **not** duplicated here — [`Self::transform`]
-/// hands the components to the core type, which is the one definition of
-/// scale-then-rotate-then-translate, so a rasterized geometry and one
-/// flattened by `ops::expand_instances` cannot drift apart.
+/// The arithmetic is **not** duplicated here — every method hands the
+/// transform to the core type, which is the one definition of
+/// shear-scale-rotate-translate and of composing two placements, so a
+/// rasterized geometry and one flattened by `ops::expand_instances` cannot
+/// drift apart.
 #[derive(Clone, Copy)]
 struct Placement {
-    offset: Vec2,
-    rot: f32,
-    scale: Vec2,
+    transform: InstanceTransform,
     tint: Color,
 }
 
 impl Placement {
     fn identity() -> Self {
         Self {
-            offset: InstanceTransform::IDENTITY.offset,
-            rot: InstanceTransform::IDENTITY.rot,
-            scale: InstanceTransform::IDENTITY.scale,
+            transform: InstanceTransform::IDENTITY,
             tint: Color::new(1.0, 1.0, 1.0, 1.0),
         }
     }
@@ -168,27 +162,38 @@ impl Placement {
     fn for_context(ctx: &EvalContext) -> Self {
         let (scale_x, scale_y) = composition_scale(ctx);
         Self {
-            scale: Vec2(scale_x as f32, scale_y as f32),
+            transform: InstanceTransform {
+                scale: Vec2(scale_x as f32, scale_y as f32),
+                ..InstanceTransform::IDENTITY
+            },
             ..Self::identity()
         }
     }
 
-    /// The placement without its tint, as the core instance model states it.
-    fn transform(&self) -> InstanceTransform {
-        InstanceTransform {
-            offset: self.offset,
-            rot: self.rot,
-            scale: self.scale,
-            shear: 0.0,
-        }
-    }
-
     fn apply(&self, p: Vec2) -> Vec2 {
-        self.transform().apply(p)
+        self.transform.apply(p)
     }
 
     fn uniform_scale(&self) -> f32 {
-        self.transform().uniform_scale()
+        self.transform.uniform_scale()
+    }
+
+    /// The inverse of the linear part, row-major `[a, b, c, d]`, or `None`
+    /// when the placement is singular or not finite: such a placement has no
+    /// inverse and an image stamped through it covers no area.
+    fn inverse_linear(&self) -> Option<[f32; 4]> {
+        let t = &self.transform;
+        let col0 = t.apply_vector(Vec2(1.0, 0.0));
+        let col1 = t.apply_vector(Vec2(0.0, 1.0));
+        let (a, b, c, d) = (
+            f64::from(col0.0),
+            f64::from(col1.0),
+            f64::from(col0.1),
+            f64::from(col1.1),
+        );
+        let det = a * d - b * c;
+        let inverse = [d / det, -b / det, -c / det, a / det].map(|v| v as f32);
+        (det != 0.0 && inverse.iter().all(|v| v.is_finite())).then_some(inverse)
     }
 }
 
@@ -794,14 +799,11 @@ fn push_image_item<'a>(
     items: &mut Vec<DrawItem>,
     image_items: &mut ImageItems<'a>,
 ) {
-    // A collapsed or non-finite scale has no inverse and covers no area.
-    if !placement.scale.0.is_finite()
-        || !placement.scale.1.is_finite()
-        || placement.scale.0 == 0.0
-        || placement.scale.1 == 0.0
-    {
+    // A singular or non-finite placement has no inverse and covers no area.
+    let Some(inverse) = placement.inverse_linear() else {
         return;
-    }
+    };
+    let offset = placement.transform.offset;
     let (half_w, half_h) = (image.width() as f32 * 0.5, image.height() as f32 * 0.5);
     let mut bounds = [
         f32::INFINITY,
@@ -830,15 +832,11 @@ fn push_image_item<'a>(
         bounds,
         // `Cd` x `alpha` of the enclosing instances (decision 7).
         color: color_array(placement.tint),
-        // Images do not stroke; the shader never reads this slot for them.
-        stroke_color: [0.0; 4],
-        data0: [
-            IMAGE_KIND,
-            placement.offset.0,
-            placement.offset.1,
-            placement.rot,
-        ],
-        data1: [placement.scale.0, placement.scale.1, half_w, half_h],
+        // Images do not stroke, so this slot carries the inverse of the
+        // placement's linear part (row-major 2x2) for the fragment shader.
+        stroke_color: inverse,
+        data0: [IMAGE_KIND, offset.0, offset.1, 0.0],
+        data1: [0.0, 0.0, half_w, half_h],
     });
 }
 
@@ -1034,18 +1032,13 @@ fn flatten_geometry<'a>(
     else {
         return;
     };
-    let rotations = float_column(instances, names::ROT);
-    let scales = instances
-        .get(names::SCALE)
-        .and_then(|c| c.as_vec2(names::SCALE).ok());
+    let columns = InstanceColumns::lenient(instances);
     let source_indices = instances
         .get(names::SOURCE_INDEX)
         .and_then(|c| c.as_i32(names::SOURCE_INDEX).ok());
     for (index, offset) in offsets.iter().enumerate() {
         let local = Placement {
-            offset: *offset,
-            rot: rotations.as_ref().map_or(0.0, |values| values[index]),
-            scale: scales.map_or(Vec2(1.0, 1.0), |values| values[index]),
+            transform: columns.placement(index, *offset),
             // Instance tint is multiplicative: fall back to neutral white so
             // the base color applies once, at the leaf elements.
             tint: tinted(
@@ -1376,20 +1369,14 @@ fn raster_instances(
         return;
     };
     let offsets = offsets.to_vec();
-    let rots = float_column(inst, names::ROT);
-    let scales = inst
-        .get(names::SCALE)
-        .and_then(|c| c.as_vec2(names::SCALE).ok())
-        .map(<[Vec2]>::to_vec);
+    let columns = InstanceColumns::lenient(inst);
     let source_indices = inst
         .get(names::SOURCE_INDEX)
         .and_then(|c| c.as_i32(names::SOURCE_INDEX).ok());
 
     for (i, offset) in offsets.iter().enumerate() {
         let local = Placement {
-            offset: *offset,
-            rot: rots.as_ref().map_or(0.0, |r| r[i]),
-            scale: scales.as_ref().map_or(Vec2(1.0, 1.0), |s| s[i]),
+            transform: columns.placement(i, *offset),
             // Instance tint is multiplicative: fall back to neutral white so
             // the base color applies once, at the leaf elements.
             tint: tinted(
@@ -1452,16 +1439,14 @@ fn raster_image(
     placement: Placement,
     canvas: &mut Canvas<'_>,
 ) {
-    // A collapsed or non-finite scale has no inverse and covers no area.
-    if !placement.scale.0.is_finite()
-        || !placement.scale.1.is_finite()
-        || placement.scale.0 == 0.0
-        || placement.scale.1 == 0.0
-        || pixels.width == 0
-        || pixels.height == 0
-    {
+    // A singular or non-finite placement has no inverse and covers no area.
+    let Some([ia, ib, ic, id]) = placement.inverse_linear() else {
+        return;
+    };
+    if pixels.width == 0 || pixels.height == 0 {
         return;
     }
+    let offset = placement.transform.offset;
     let (half_w, half_h) = (image.width() as f32 * 0.5, image.height() as f32 * 0.5);
     let mut min = Vec2(f32::INFINITY, f32::INFINITY);
     let mut max = Vec2(f32::NEG_INFINITY, f32::NEG_INFINITY);
@@ -1476,7 +1461,6 @@ fn raster_image(
         max = Vec2(max.0.max(device.0), max.1.max(device.1));
     }
     let rect = coverage_rect((min, max), 0.0, canvas.width, canvas.height);
-    let (sin, cos) = placement.rot.sin_cos();
     // Source texels per composition unit: exactly 1 when the image is stamped
     // at its own resolution, which is what makes an unscaled copy sample texel
     // centres exactly.
@@ -1485,13 +1469,10 @@ fn raster_image(
 
     for y in rect.y0..rect.y1 {
         for x in rect.x0..rect.x1 {
-            let dx = x as f32 + 0.5 - placement.offset.0;
-            let dy = y as f32 + 0.5 - placement.offset.1;
-            // `Placement::apply` inverted: unrotate, then undo the scale.
-            let local = Vec2(
-                (dx * cos + dy * sin) / placement.scale.0,
-                (dy * cos - dx * sin) / placement.scale.1,
-            );
+            let dx = x as f32 + 0.5 - offset.0;
+            let dy = y as f32 + 0.5 - offset.1;
+            // `Placement::apply` inverted: the linear part's inverse.
+            let local = Vec2(ia * dx + ib * dy, ic * dx + id * dy);
             if local.0 < -half_w || local.0 >= half_w || local.1 < -half_h || local.1 >= half_h {
                 continue;
             }
@@ -1553,11 +1534,8 @@ fn sample_bilinear(pixels: &ImagePixels<'_>, u: f32, v: f32) -> Option<Color> {
 
 /// Composes an outer placement with an instance-local one (outer ∘ local).
 fn compose(outer: Placement, local: Placement) -> Placement {
-    let transform = InstanceTransform::compose(outer.transform(), local.transform());
     Placement {
-        offset: transform.offset,
-        rot: transform.rot,
-        scale: transform.scale,
+        transform: InstanceTransform::compose(outer.transform, local.transform),
         tint: Color::new(
             outer.tint.r * local.tint.r,
             outer.tint.g * local.tint.g,
@@ -3589,6 +3567,114 @@ mod tests {
         let cpu = run_with_ctx(true, 0.0, &bowtie, &scaled_ctx);
         let gpu_frame = run_gpu(&gpu, &pool, &bowtie, true, 0.0, &scaled_ctx);
         assert_equivalent(&cpu, &gpu_frame, "scaled composition coordinates");
+    }
+
+    /// Two instance levels whose composition shears: an outer non-uniform
+    /// scale over an inner turn. The leaf is `source`, stamped by the inner
+    /// level; nothing else is placed, so the picture is the composition alone.
+    fn sheared_nesting(source: InstanceSource) -> Geometry {
+        let mut inner = Geometry::new();
+        inner.set_sources(vec![source]);
+        inner
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(3.0, -2.0)]))
+            .unwrap();
+        inner
+            .instances_mut()
+            .insert(names::ROT, AttributeArray::F32(vec![0.9]))
+            .unwrap();
+        let mut outer = Geometry::new();
+        outer.set_instance_source(Some(Arc::new(inner)));
+        outer
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(20.0, 18.0)]))
+            .unwrap();
+        outer
+            .instances_mut()
+            .insert(names::SCALE, AttributeArray::Vec2(vec![Vec2(2.2, 0.8)]))
+            .unwrap();
+        outer
+    }
+
+    fn square_source() -> Geometry {
+        let mut square = Geometry::from_points(vec![
+            Vec2(-4.0, -3.0),
+            Vec2(4.0, -3.0),
+            Vec2(4.0, 3.0),
+            Vec2(-4.0, 3.0),
+        ]);
+        square.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        square
+    }
+
+    /// A sheared nesting draws the same pixels as the geometry flattened by
+    /// `expand_instances`, which composes exactly by baking the inner level
+    /// into points first.
+    #[test]
+    fn a_sheared_nesting_rasterizes_like_its_expansion() {
+        let nested = sheared_nesting(InstanceSource::Geometry(Arc::new(square_source())));
+        let flat = ravel_core::geometry::expand_instances(&nested).unwrap();
+        let (drawn, expanded) = (
+            run(true, 0.0, &nested, 40, 36),
+            run(true, 0.0, &flat, 40, 36),
+        );
+        let covered = drawn.as_f32().iter().skip(3).step_by(4).sum::<f32>();
+        assert!(covered > 50.0, "the shape must actually be drawn");
+        for (a, b) in drawn.as_f32().iter().zip(expanded.as_f32().iter()) {
+            assert!((a - b).abs() < 1e-3, "nested {a} vs expanded {b}");
+        }
+    }
+
+    /// A shear column is inverted by the image sampler: the pixel values come
+    /// from the placement written out by hand (`x' = x + shear * y`), not from
+    /// the code under test.
+    #[test]
+    fn an_image_instance_with_shear_samples_the_sheared_rectangle() {
+        let red = solid_image(4, 4, [1.0, 0.0, 0.0, 1.0]);
+        let mut geo = image_instances(&[&red], vec![Vec2(8.0, 8.0)]);
+        geo.instances_mut()
+            .insert(names::SHEAR, AttributeArray::F32(vec![1.0]))
+            .unwrap();
+        let fb = run(true, 0.0, &geo, 16, 16);
+        // Centre-relative (2.5, 1.5): local x = 2.5 - 1.5 = 1.0, inside.
+        assert_eq!(pixel(&fb, 10, 9)[3], 1.0);
+        // Centre-relative (-1.5, 1.5): local x = -3.0, outside.
+        assert_eq!(pixel(&fb, 6, 9)[3], 0.0);
+    }
+
+    /// An image whose placement is singular covers no area, however the
+    /// singularity came about (here a collapsed `scale.x`).
+    #[test]
+    fn a_singular_image_placement_draws_nothing() {
+        let red = solid_image(4, 4, [1.0, 0.0, 0.0, 1.0]);
+        let mut geo = image_instances(&[&red], vec![Vec2(8.0, 8.0)]);
+        geo.instances_mut()
+            .insert(names::SCALE, AttributeArray::Vec2(vec![Vec2(0.0, 1.0)]))
+            .unwrap();
+        let fb = run(true, 0.0, &geo, 16, 16);
+        assert!(fb.as_f32().iter().all(|v| *v == 0.0));
+    }
+
+    /// The image leaf of a sheared nesting: the shader inverts the full 2x2,
+    /// which `gpu_matches_cpu_for_paths_points_and_nested_instances` (a sprite
+    /// leaf, where the shear is invisible) does not exercise.
+    #[test]
+    fn gpu_matches_cpu_for_image_instances_in_a_sheared_nesting() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+
+        let source = test_image(8, 6);
+        let nested = sheared_nesting(image_source(&source));
+        let cpu = run(true, 0.0, &nested, 40, 36);
+        assert!(cpu.as_f32().iter().skip(3).step_by(4).sum::<f32>() > 50.0);
+        assert_equivalent(
+            &cpu,
+            &run_gpu(&gpu, &pool, &nested, true, 0.0, &ctx(40, 36)),
+            "an image in a sheared nesting",
+        );
     }
 
     /// Per-element style has to hold the CPU/GPU agreement the rest of the

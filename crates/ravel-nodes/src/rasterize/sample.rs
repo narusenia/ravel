@@ -45,6 +45,21 @@ pub(super) struct PathSample {
     pub t_on_segment: f32,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times the evaluator ran on this thread. The CPU rasterizer
+    /// runs on the calling thread, so a test can read it before and after a
+    /// render to prove a path took (or skipped) the per-pixel scan — the only
+    /// way "no per-pixel scan on the default route" is more than a comment.
+    static CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The number of [`path_sample`] calls made on this thread so far.
+#[cfg(test)]
+pub(super) fn calls() -> u64 {
+    CALLS.with(std::cell::Cell::get)
+}
+
 /// Whether a vertex is the sentinel between two contours rather than a point.
 ///
 /// `>= 3.0e38` exactly as the shader writes it: false for a NaN, so a
@@ -98,9 +113,9 @@ fn segment_nearest(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> (f32, f32) {
 /// `closed` applies to every contour of the run, as it does for a draw item.
 /// The winding rule is the shader's: a crossing counts when the segment
 /// straddles `p.y` and `p` lies on the matching side of it.
-// Unit 2 and 3 are the callers; until then only the tests use it.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn path_sample(vertices: &[[f32; 2]], closed: bool, p: [f32; 2]) -> PathSample {
+    #[cfg(test)]
+    CALLS.with(|calls| calls.set(calls.get() + 1));
     let mut sample = PathSample {
         min_distance: 1e20,
         winding: 0,
@@ -349,7 +364,12 @@ fn probe_fragment(
             label: "path sample probe",
             pipeline: &pipeline,
             uniform: bytemuck::bytes_of(&params),
-            storage: &[bytemuck::cast_slice(vertices), bytemuck::bytes_of(&item)],
+            storage: &[
+                bytemuck::cast_slice(vertices),
+                bytemuck::bytes_of(&item),
+                // No vertex colours here; the binding still has to exist.
+                bytemuck::cast_slice(&[[0.0f32; 4]]),
+            ],
             target: &premul_binding,
             runs: &[QuadRun {
                 texture: &placeholder_binding,

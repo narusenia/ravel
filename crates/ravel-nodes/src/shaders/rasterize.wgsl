@@ -19,7 +19,8 @@ struct DrawItem {
     //   sprite: center x, center y, radius
     //   image:  placement offset x, offset y, unused
     data0: vec4<f32>,
-    // path:  fill flag, stroke width, unused, unused
+    // path:  fill flag, stroke width, vertex colour start + 1 (0 = the stroke
+    //        is one colour), unused
     // image: unused, unused, rectangle half width, half height (the inverse
     //        of the placement's linear part rides in `stroke_color`)
     data1: vec4<f32>,
@@ -28,9 +29,14 @@ struct DrawItem {
 @group(0) @binding(0) var<uniform> params: RasterParams;
 @group(0) @binding(1) var<storage, read> path_vertices: array<vec2<f32>>;
 @group(0) @binding(2) var<storage, read> draw_items: array<DrawItem>;
+// The stroke colour of each vertex of an item that colours its stroke per
+// vertex (`data1.z`), parallel to that item's slice of `path_vertices`: entry
+// `data1.z - 1 + i` belongs to the item's vertex `i`. Items without vertex
+// colours never read it.
+@group(0) @binding(3) var<storage, read> path_colors: array<vec4<f32>>;
 // The instance source the current run of image quads samples. Rebound between
 // runs; a run of paths and sprites binds a placeholder it never reads.
-@group(0) @binding(3) var image_source: texture_2d<f32>;
+@group(0) @binding(4) var image_source: texture_2d<f32>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -172,11 +178,10 @@ fn path_sample(item: DrawItem, p: vec2<f32>) -> PathSample {
 
 /// Fill coverage in `x`, stroke coverage in `y`: the two carry different
 /// colors now, so they cannot be unioned here any more.
-fn path_coverage(item: DrawItem, p: vec2<f32>) -> vec2<f32> {
+fn path_coverage(item: DrawItem, found: PathSample) -> vec2<f32> {
     let closed = item.data0.w > 0.5;
     let fill = item.data1.x > 0.5 && closed;
     let stroke_width = item.data1.y;
-    let found = path_sample(item, p);
     let winding = found.winding;
     let min_distance = found.min_distance;
 
@@ -193,6 +198,18 @@ fn path_coverage(item: DrawItem, p: vec2<f32>) -> vec2<f32> {
         stroke_coverage = clamp(stroke_width * 0.5 - min_distance + 0.5, 0.0, 1.0);
     }
     return vec2<f32>(fill_coverage, stroke_coverage);
+}
+
+/// The stroke colour of an item that colours its stroke per vertex: the colours
+/// at both ends of the nearest segment, mixed by where on it the nearest point
+/// lies (`vertex_color_at` in `mod.rs` is the CPU twin).
+fn path_vertex_color(item: DrawItem, found: PathSample) -> vec4<f32> {
+    let base = u32(item.data1.z) - 1u;
+    return mix(
+        path_colors[base + found.nearest_segment],
+        path_colors[base + found.segment_end],
+        found.t_on_segment,
+    );
 }
 
 /// Bilinear sample of `image_source` at a source-pixel coordinate, where
@@ -280,11 +297,16 @@ fn raster_fragment(
     // The CPU path blends the fill first and the stroke over it
     // (`raster_paths`); this is that composite in premultiplied form, which
     // reduces to the old single-color union when the two colors are equal.
-    let coverage = path_coverage(item, position.xy);
+    let found = path_sample(item, position.xy);
+    let coverage = path_coverage(item, found);
+    var stroke_color = item.stroke_color;
+    if item.data1.z > 0.5 {
+        stroke_color = path_vertex_color(item, found);
+    }
     let fill_alpha = item.color.a * coverage.x;
-    let stroke_alpha = item.stroke_color.a * coverage.y;
+    let stroke_alpha = stroke_color.a * coverage.y;
     let alpha = stroke_alpha + fill_alpha * (1.0 - stroke_alpha);
-    let premultiplied = item.stroke_color.rgb * stroke_alpha
+    let premultiplied = stroke_color.rgb * stroke_alpha
         + item.color.rgb * fill_alpha * (1.0 - stroke_alpha);
     return vec4<f32>(premultiplied, alpha);
 }

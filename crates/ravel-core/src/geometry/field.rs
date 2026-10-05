@@ -1838,6 +1838,10 @@ impl<'a> FieldApply<'a> {
 /// black, and an invented `alpha` 1, or `combine = multiply` would blank the
 /// geometry the first time anybody modulated it. Anything else takes the
 /// field's own sampled type, zeroed.
+///
+/// The declared type wins only for the colour / style names and for reserved
+/// names whose absent reading is a float, vector or colour; a reserved `I32`
+/// or `Bool` reading keeps the sampled type and a typed-zero fill, as before.
 fn created_column(
     geometry: &Geometry,
     domain: Domain,
@@ -1857,11 +1861,18 @@ fn created_column(
         names::CD | names::STROKE_COLOR => AttributeType::Color,
         names::STROKE_WIDTH => AttributeType::F32,
         names::FILL => AttributeType::Bool,
-        // A reserved name with a constant reading is created in that
-        // reading's type too: a scalar field driving a missing `scale` has to
-        // start a Vec2 (1, 1), not an F32 the placement would never read.
+        // A reserved name whose constant reading is a float, vector or colour
+        // is created in that reading's type too: a scalar field driving a
+        // missing `scale` has to start a Vec2 (1, 1), not an F32 the placement
+        // would never read. An `I32` reading (`source_index`, `stroke_align`)
+        // is not modulatable, so it keeps the field's sampled type: declaring
+        // I32 would turn a graph that succeeded into a combine error.
         _ => match absent(domain, target) {
-            Some(Absent::Value(value)) => value.attr_type(),
+            Some(Absent::Value(value))
+                if !matches!(value.attr_type(), AttributeType::I32 | AttributeType::Bool) =>
+            {
+                value.attr_type()
+            }
             _ => sampled,
         },
     };
@@ -4238,6 +4249,28 @@ mod tests {
                 .unwrap()
                 .as_f32(names::PSCALE),
             Ok(&[6.0, 6.0][..])
+        );
+    }
+
+    /// `source_index` is an `I32` reading, which no field can modulate; a
+    /// scalar `Set` on a missing one keeps creating the field's own F32 column
+    /// and succeeding, as it did before absent values existed.
+    #[test]
+    fn a_scalar_set_on_a_missing_source_index_still_succeeds() {
+        let mut instances = Geometry::new();
+        instances
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0); 2]))
+            .unwrap();
+        let spec = FieldApply::new(Domain::Instance, names::SOURCE_INDEX);
+        let result = apply_field(&instances, &spec, &ConstantField(3.0), &ctx()).unwrap();
+        assert_eq!(
+            result
+                .instances()
+                .get(names::SOURCE_INDEX)
+                .unwrap()
+                .attr_type(),
+            AttributeType::F32
         );
     }
 

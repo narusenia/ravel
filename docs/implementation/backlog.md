@@ -37,7 +37,7 @@
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
 | VEC-4 | look-at・フロー場のゴールデン検証と文書（単位 1〜3・5〜8 が揃った） | `vector-field-plan.md` |
 | STYLE-4 | 変調との結合検証と文書（`MOD-1` ✅ で依存が解けた） | `style-attributes-plan.md` |
-| PSHADE-1 | パスの per-pixel 評価器（挙動不変。頂点色補間と `stroke_align` の土台） | `path-shading-plan.md` |
+| PSHADE-3 | `stroke_align`（内側 / 外側の線。`PSHADE-1` ✅ で依存が解けた） | `path-shading-plan.md` |
 | OPS-1 | `geometry.blast`（要素削除） | `geometry-ops-plan.md` |
 | KIT-2 | gpui-component フォークの棚卸し（上流 PR は出さない。記録だけ） | `gpui-kit-migration-plan.md` |
 | KIT-4 | `ravel-dock`（2191 行）と `gpui-base` の `dock`（13251 行）の比較 | `gpui-kit-migration-plan.md` |
@@ -371,9 +371,9 @@ Global に載り、層ごとに独立した書き込み API（失敗は通知）
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| PSHADE-1 | 🟡 | `path_sample()`（CPU の per-pixel 評価器）と WGSL 側の情報追加（挙動不変） | — |
-| PSHADE-2 | ⬜ | 線の頂点色補間（CPU / GPU）。`MED-GPU-08` の本体 | PSHADE-1 |
-| PSHADE-3 | ⬜ | `stroke_align`（`style-attributes-plan.md` 単位 1 からの繰り延べ） | PSHADE-1 |
+| PSHADE-1 | ✅ | #587 `path_sample()`（CPU の per-pixel 評価器）と WGSL 側の情報追加（挙動不変） | — |
+| PSHADE-2 | ✅ | #587 線の頂点色補間（CPU / GPU）。`MED-GPU-08` の本体 | PSHADE-1 |
+| PSHADE-3 | 🟡 | `stroke_align`（`style-attributes-plan.md` 単位 1 からの繰り延べ） | PSHADE-1 |
 | PSHADE-5 | ⬜ | ゴールデンの拡張と文書、`MED-GPU-08` を閉じる | PSHADE-2, PSHADE-3 |
 | PSHADE-6 | ⬜ | **要素ごとのグラデーション塗り**（位置由来。軸は Primitive の Vec2 属性、評価はジオメトリ空間） | FX-3, STYLE-2 |
 

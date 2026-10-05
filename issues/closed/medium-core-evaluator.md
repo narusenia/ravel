@@ -363,7 +363,7 @@ fn positions_bounds(&self) -> Option<Rect> {
 
 ## MED-CORE-13 | bug | 属性列の連結が欠けた側を型ゼロで埋めるので、「無い」を既定値と読む予約属性が消える・透明になる
 
-> **解決済み**: #591（`FILL-1`〜`5`）と #TBD（`FILL-6`、仕様・API 地図・クローズ）。
+> **解決済み**: #591（`FILL-1`〜`5`）と #592（`FILL-6`、仕様・API 地図・クローズ）。
 > `ravel-core` の `geometry::absent` が予約属性の「無いときの値」の正になった
 > （定数は `alpha` 1 / Instance `scale` `(1, 1)` / `pscale` 2 / Instance `Cd` 白、
 > `fill` / `stroke_width` / Primitive・Point の `Cd` / `stroke_color` は継承なので

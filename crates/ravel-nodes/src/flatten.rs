@@ -36,6 +36,28 @@ pub fn flatten_path(
     out_tans: Option<&[Vec2]>,
     closed: bool,
 ) -> Vec<Vec2> {
+    flatten_path_with_param(points, in_tans, out_tans, closed)
+        .into_iter()
+        .map(|(point, _)| point)
+        .collect()
+}
+
+/// [`flatten_path`], with each polyline vertex's position along the
+/// **control polygon**: `i + t` for the point at parameter `t` of the segment
+/// leaving control point `i`, so a control point is its own index and a
+/// subdivision point sits strictly between two. A value attached to the
+/// control points (a vertex colour) is carried onto the flattened vertices by
+/// interpolating at this parameter, which is what keeps a curve's colour
+/// continuous rather than stepping at every subdivision.
+///
+/// The parameter is the curve's own, not an arc length: de Casteljau halves it
+/// at every split, so the values are exact dyadic fractions in `f32`.
+pub fn flatten_path_with_param(
+    points: &[Vec2],
+    in_tans: Option<&[Vec2]>,
+    out_tans: Option<&[Vec2]>,
+    closed: bool,
+) -> Vec<(Vec2, f32)> {
     if points.is_empty() {
         return Vec::new();
     }
@@ -51,30 +73,39 @@ pub fn flatten_path(
         points.len() - 1
     };
     let mut out = Vec::with_capacity(points.len());
-    out.push(points[0]);
+    out.push((points[0], 0.0));
     for i in 0..segment_count {
         let j = (i + 1) % points.len();
         let (p0, p1) = (points[i], points[j]);
         let (out_tan, in_tan) = (tangent(out_tans, i), tangent(in_tans, j));
+        let (u0, u1) = (i as f32, (i + 1) as f32);
         if is_zero(out_tan) && is_zero(in_tan) {
-            out.push(p1);
+            out.push((p1, u1));
             continue;
         }
         let c1 = Vec2(p0.0 + out_tan.0, p0.1 + out_tan.1);
         let c2 = Vec2(p1.0 + in_tan.0, p1.1 + in_tan.1);
-        flatten_segment(p0, c1, c2, p1, 0, &mut out);
+        flatten_segment(p0, c1, c2, p1, (u0, u1), 0, &mut out);
     }
     // The closing segment of a closed path ends at points[0]; drop that
     // duplicate — closing stays expressed by the primitive's `closed` flag.
-    if closed && out.len() > 1 && out.last() == Some(&points[0]) {
+    if closed && out.len() > 1 && out.last().map(|(point, _)| point) == Some(&points[0]) {
         out.pop();
     }
     out
 }
 
-fn flatten_segment(p0: Vec2, c1: Vec2, c2: Vec2, p1: Vec2, depth: u32, out: &mut Vec<Vec2>) {
+fn flatten_segment(
+    p0: Vec2,
+    c1: Vec2,
+    c2: Vec2,
+    p1: Vec2,
+    (u0, u1): (f32, f32),
+    depth: u32,
+    out: &mut Vec<(Vec2, f32)>,
+) {
     if depth >= MAX_DEPTH || flat_enough(p0, c1, c2, p1) {
-        out.push(p1);
+        out.push((p1, u1));
         return;
     }
     // de Casteljau split at t = 0.5.
@@ -84,8 +115,9 @@ fn flatten_segment(p0: Vec2, c1: Vec2, c2: Vec2, p1: Vec2, depth: u32, out: &mut
     let m012 = mid(m01, m12);
     let m123 = mid(m12, m23);
     let m0123 = mid(m012, m123);
-    flatten_segment(p0, m01, m012, m0123, depth + 1, out);
-    flatten_segment(m0123, m123, m23, p1, depth + 1, out);
+    let um = (u0 + u1) * 0.5;
+    flatten_segment(p0, m01, m012, m0123, (u0, um), depth + 1, out);
+    flatten_segment(m0123, m123, m23, p1, (um, u1), depth + 1, out);
 }
 
 fn mid(a: Vec2, b: Vec2) -> Vec2 {
@@ -223,5 +255,40 @@ mod tests {
         let out_tans = [v(50.0, 0.0)];
         let flat = flatten_path(&[p0, p1], None, Some(&out_tans), false);
         assert!(flat.len() > 2);
+    }
+
+    /// The parameter a vertex colour is interpolated by: control points are
+    /// their own index, subdivision points fall strictly between, and the
+    /// positions are exactly what `flatten_path` returns.
+    #[test]
+    fn the_flattened_polyline_carries_its_control_polygon_parameter() {
+        let points = [v(0.0, 0.0), v(100.0, 0.0), v(100.0, 50.0)];
+        // Curve only on the first segment; the second is a straight corner.
+        let out_tans = [v(0.0, 80.0), v(0.0, 0.0)];
+        let in_tans = [v(0.0, 0.0), v(0.0, 80.0)];
+        let with_param = flatten_path_with_param(&points, Some(&in_tans), Some(&out_tans), false);
+        let plain = flatten_path(&points, Some(&in_tans), Some(&out_tans), false);
+        assert_eq!(
+            with_param.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
+            plain,
+            "the parameter is extra information, not a different polyline"
+        );
+        assert!(with_param.len() > 3, "the first segment is subdivided");
+        let params: Vec<f32> = with_param.iter().map(|(_, u)| *u).collect();
+        assert_eq!(params[0], 0.0);
+        assert_eq!(*params.last().unwrap(), 2.0);
+        assert!(
+            params.windows(2).all(|w| w[0] < w[1]),
+            "strictly increasing along the path: {params:?}"
+        );
+        assert!(
+            params.contains(&1.0),
+            "the control point between the segments is its own index"
+        );
+        // A subdivision point inside the first segment is a fraction of it.
+        assert!(params[1] > 0.0 && params[1] < 1.0);
+        // Closed: the closing segment's parameters run n-1..n, never reaching n.
+        let closed = flatten_path_with_param(&points, Some(&in_tans), Some(&out_tans), true);
+        assert!(closed.iter().all(|(_, u)| *u < 3.0));
     }
 }

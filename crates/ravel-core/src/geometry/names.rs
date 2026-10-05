@@ -52,6 +52,12 @@ pub const STROKE_WIDTH: &str = "stroke_width";
 /// [`CD`], which is the fill color, so an unset stroke color draws the way it
 /// did before strokes had one.
 pub const STROKE_COLOR: &str = "stroke_color";
+/// Where the stroke lies relative to the path (I32, Primitive):
+/// [`STROKE_ALIGN_CENTER`] / [`STROKE_ALIGN_INSIDE`] / [`STROKE_ALIGN_OUTSIDE`].
+/// Absent means centre, which is what the rasterizer drew before the
+/// attribute existed. Only a **closed** path has an inside; an open path
+/// strokes at the centre whatever this says.
+pub const STROKE_ALIGN: &str = "stroke_align";
 /// Dash pattern (Str, Detail): alternating on/off run lengths in composition
 /// pixels, `"4,2"` style. Empty (or absent) draws a solid stroke. Detail
 /// rather than per element: a dash costs the rasterizer an arc-length walk,
@@ -66,6 +72,14 @@ pub const CAP: &str = "cap";
 /// Stroke corner shape (I32, Detail): [`JOIN_MITER`] / [`JOIN_ROUND`] /
 /// [`JOIN_BEVEL`]. Absent means round, as for [`CAP`].
 pub const JOIN: &str = "join";
+
+/// The stroke straddles the path, half its width on each side
+/// ([`STROKE_ALIGN`]). The default.
+pub const STROKE_ALIGN_CENTER: i32 = 0;
+/// The stroke lies inside the closed path ([`STROKE_ALIGN`]).
+pub const STROKE_ALIGN_INSIDE: i32 = 1;
+/// The stroke lies outside the closed path ([`STROKE_ALIGN`]).
+pub const STROKE_ALIGN_OUTSIDE: i32 = 2;
 
 /// Flat cap, ending the stroke at the end point ([`CAP`]).
 pub const CAP_BUTT: i32 = 0;
@@ -149,6 +163,7 @@ mod tests {
                 FILL,
                 STROKE_WIDTH,
                 STROKE_COLOR,
+                STROKE_ALIGN,
                 DASH,
                 DASH_OFFSET,
                 CAP,
@@ -183,6 +198,7 @@ mod tests {
                 "fill",
                 "stroke_width",
                 "stroke_color",
+                "stroke_align",
                 "dash",
                 "dash_offset",
                 "cap",

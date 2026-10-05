@@ -215,7 +215,10 @@ fn stroke_align_in(
         .attribute_set(Domain::Primitive)
         .get(names::STROKE_ALIGN)
         .is_some();
-    if align == names::STROKE_ALIGN_CENTER && !has_column {
+    // Centre is a no-op off the primitive domain too: a centred node aimed at
+    // instances (say, for a per-instance width) must not fail because some
+    // upstream node already aligned the paths.
+    if align == names::STROKE_ALIGN_CENTER && (!has_column || domain != Domain::Primitive) {
         return Ok(geometry.clone());
     }
     if domain != Domain::Primitive {
@@ -692,5 +695,44 @@ mod tests {
             &[5.0, 5.0]
         );
         assert!(out.primitive_attrs().get(names::STROKE_WIDTH).is_none());
+    }
+
+    /// A centred `style.stroke` aimed at instances is a no-op for alignment
+    /// even when the paths already carry one: it must not fail, and the
+    /// upstream alignment survives.
+    #[test]
+    fn a_centred_instance_stroke_keeps_an_upstream_alignment() {
+        let mut aligned = two_paths();
+        let count = aligned.primitive_count();
+        aligned
+            .primitive_attrs_mut()
+            .insert(
+                names::STROKE_ALIGN,
+                AttributeArray::I32(vec![names::STROKE_ALIGN_OUTSIDE; count]),
+            )
+            .unwrap();
+        aligned
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]))
+            .unwrap();
+        aligned.set_instance_source(Some(Arc::new(two_paths())));
+        let out = run(
+            aligned,
+            vec![(
+                "style.stroke",
+                vec![
+                    ("width", ParameterValue::Float(5.0)),
+                    ("domain", ParameterValue::String("instance".into())),
+                ],
+            )],
+        );
+        assert_eq!(
+            out.primitive_attrs()
+                .get(names::STROKE_ALIGN)
+                .unwrap()
+                .as_i32(names::STROKE_ALIGN)
+                .unwrap(),
+            &vec![names::STROKE_ALIGN_OUTSIDE; count][..]
+        );
     }
 }

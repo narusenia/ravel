@@ -193,7 +193,13 @@ impl Placement {
         );
         let det = a * d - b * c;
         let inverse = [d / det, -b / det, -c / det, a / det].map(|v| v as f32);
-        (det != 0.0 && inverse.iter().all(|v| v.is_finite())).then_some(inverse)
+        // A non-finite offset would give the GPU item non-finite bounds,
+        // which WGSL does not promise to clip away.
+        (t.offset.0.is_finite()
+            && t.offset.1.is_finite()
+            && det != 0.0
+            && inverse.iter().all(|v| v.is_finite()))
+        .then_some(inverse)
     }
 }
 

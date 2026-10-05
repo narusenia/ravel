@@ -17,10 +17,11 @@ struct DrawItem {
     //           every contour of the item and the `CONTOUR_BREAK` sentinels
     //           between them
     //   sprite: center x, center y, radius
-    //   image:  placement offset x, offset y, rotation
+    //   image:  placement offset x, offset y, unused
     data0: vec4<f32>,
     // path:  fill flag, stroke width, unused, unused
-    // image: placement scale x, scale y, rectangle half width, half height
+    // image: unused, unused, rectangle half width, half height (the inverse
+    //        of the placement's linear part rides in `stroke_color`)
     data1: vec4<f32>,
 }
 

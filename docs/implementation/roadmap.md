@@ -294,7 +294,7 @@ hover 判定は**すべて既存のヒットテストの再利用**で足りる
 
 `MED-GPU-09` は 2026-09-30 に計画を起こした（`done/instance-transform-shear-plan.md`）。コア・rasterize（WGSL を含む）・`geometry.transform` の 3 層にまたがり、属性の表現を変えるので Design gate に当たる。調べると `expand_instances` は既に厳密で、描画・バウンズ・ピースと食い違っていた。`geometry.transform` にも `compose` を通らない同じ近似があり、組み込みノードだけで踏める。
 
-`MED-CORE-13` は 2026-10-05 に起票し、同日に計画を起こした（`absent-attribute-fill-plan.md`）。`MED-GPU-09` の計画が「非対象」に残した `merge` の `scale` 潰れを測ると、欠陥は `merge` だけでなく列を埋める 5 箇所（`merge`・`expand_instances`・ピース・`field.apply` の作成・`style` の `unset`）に共通で、「列が無いときの値」の正がどこにも無いことだった。コアと ravel-nodes にまたがり読み手の既定も寄せるので Design gate に当たる。`style` 済みと素のジオメトリの `merge` で素の側が消えるので、組み込みノードだけで踏める。`FILL-1` は依存なしで着手でき、`FILL-2`〜`4` は継承する属性の埋め方（要判断 1〜3）の決定を待つ。
+`MED-CORE-13` は 2026-10-05 に起票し、同日に計画を起こした（`absent-attribute-fill-plan.md`）。`MED-GPU-09` の計画が「非対象」に残した `merge` の `scale` 潰れを測ると、欠陥は `merge` だけでなく列を埋める 5 箇所（`merge`・`expand_instances`・ピース・`field.apply` の作成・`style` の `unset`）に共通で、「列が無いときの値」の正がどこにも無いことだった。コアと ravel-nodes にまたがり読み手の既定も寄せるので Design gate に当たる。`style` 済みと素のジオメトリの `merge` で素の側が消えるので、組み込みノードだけで踏める。継承する属性の埋め方など 3 点は同日にユーザー判断で決まり（計画の決定事項）、`FILL-1` は依存なしで着手でき、`FILL-2`〜`5` が `FILL-1` に続く。
 
 **`MED-APP-02` はこのフェーズを起こした時点で既に解決していた** —
 `HIGH-24`（フェーズ A4）の修正が `tick_with` の「変化なし」判定に再生状態の

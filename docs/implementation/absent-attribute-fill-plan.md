@@ -2,7 +2,7 @@
 
 > **Status**: 計画 — 2026-10-05。フェーズ A6「出力そのものの誤り」
 > （[`roadmap.md`](roadmap.md#フェーズ-a6-結果がどの前提で作られたかを持つこと)）。
-> **要判断 3 件**（下記）が決まるまで `FILL-2`〜`FILL-4` は着手しない
+> 決定事項 3 件は 2026-10-05 にユーザー判断で確定（下記）
 
 ## 背景
 
@@ -97,7 +97,7 @@
 - 予約属性について「列が無いときの値」の正を ravel-core に 1 つ置く
 - 列を埋める 5 箇所と、`rasterize` の読みがその正を使う。マージ・展開・
   ピース・作成を通っても、欠けていた側は**欠けていたときと同じに描かれる**
-  （定数で表せる属性は厳密に。継承する属性は要判断 1 の範囲で）
+  （定数で表せる属性は厳密に。継承する属性は決定事項 1 の範囲で）
 - 予約されていない列（ユーザー属性）と、予約名に予約外の型が載った列は
   型ゼロのまま
 
@@ -141,14 +141,14 @@ pub fn absent_column(geometry: &Geometry, domain: Domain, name: &str,
   `attach_piece_attributes` のピースは Instance 行の `AttributeSet` なので、
   その場合は `Absent::Value` だけを使う関数を呼ぶ
 
-### 継承する属性（要判断 1・2）
+### 継承する属性（決定事項 1・2）
 
 Primitive / Point の `Cd`、`fill`、`stroke_width`、`stroke_color` の「無い」は
 **定数ではなく、描画の文脈から継承する**という意味。マージの時点では
 `rasterize` のパラメータも、囲むインスタンスも分からない。密な列は
 「意見なし」を持てない（`style.rs:45-52` が group の種まきを拒否しているのと同じ理由）。
 
-推奨案（要判断 1 の (a)）は **`rasterize` テンプレートの既定で実体化する**:
+決定事項 1 により **`rasterize` テンプレートの既定で実体化する**:
 
 | 属性 | 埋める値 |
 |---|---|
@@ -186,8 +186,7 @@ Primitive / Point の `Cd`、`fill`、`stroke_width`、`stroke_color` の「無�
 ### 作業
 
 - `Absent`、`absent(domain, name)`、`absent_column`、`AttributeValue::zero`
-- 表の全予約名に対する `absent` の答え。要判断 1・2 の推奨案で実装し、
-  決定が違えばここだけを変える
+- 表の全予約名に対する `absent` の答え。決定事項 1・2 のとおりに実装する
 
 ### 完了条件
 
@@ -230,7 +229,7 @@ Primitive / Point の `Cd`、`fill`、`stroke_width`、`stroke_color` の「無�
   （`scale = 2`）を掛けたものを `geometry.merge` → 両方の画像が描かれ、
   未変換側の `scale` は `(1, 1)`（個票の再現 2）
 - `FILL-3`: `style.fill`（赤）のパスと素のパスの `merge` → 素のパスが
-  `rasterize` の既定色（白）で塗られる（個票の再現 1。要判断 1 の (a) の期待値）
+  `rasterize` の既定色（白）で塗られる（個票の再現 1。決定事項 1 の期待値）
 - `FILL-3`: Point に `Cd` を持つパスと素のパス（Primitive `Cd = 青`）の `merge` →
   素のパスの線が青（個票の再現 3）
 - `FILL-3`: 片側だけ `alpha = 0.5` → 他方の `alpha` は 1.0
@@ -256,7 +255,7 @@ Primitive / Point の `Cd`、`fill`、`stroke_width`、`stroke_color` の「無�
 
 ### 作業
 
-- `FILL-4`: `created_column` を `absent_column` に置き換える（要判断 3）。
+- `FILL-4`: `created_column` を `absent_column` に置き換える（決定事項 3）。
   `style.rs` の `UNSET_*` を `absent` の定数へ
 - `FILL-5`: `rasterize` の既定値の直書きを `absent` の定数へ。挙動は変えない
 
@@ -305,7 +304,7 @@ Primitive / Point の `Cd`、`fill`、`stroke_width`、`stroke_color` の「無�
   「連結後の生成順」の問題なので別に扱う
 - `field.attribute` の `default` パラメータ（既定 0）。読み手がユーザーの指定で
   既定を持つ形で、予約属性の不在値に揃えるかは別の判断
-- 列ごとの「意見なし」を持つ表現（要判断 1 の (b)）。採るなら別計画
+- 列ごとの「意見なし」を持つ表現（決定事項 1 で選ばなかった案）。採るなら別計画
 - `orient` / `scale3` / `N`（3D。読み手が無い）。3D の配置が配線された時点で
   `absent` に足す
 - `drawn_bounds` の `stroke_width`。無い列を 0 と読むのは既に
@@ -316,52 +315,36 @@ Primitive / Point の `Cd`、`fill`、`stroke_width`、`stroke_color` の「無�
 | ID | 単位 | 依存 | 規模の目安 |
 |---|---|---|---|
 | `FILL-1` | `geometry::absent`（不在値の正、型ゼロ、行ごとの解決）と予約名の走査テスト（ravel-core） | — | +300（半分はテスト） |
-| `FILL-2` | `expand_instances` の `ColumnAccumulator` と `attach_piece_attributes` を不在値で埋める。固定テストの書き換え（ravel-core） | `FILL-1`、要判断 1・2 | +150 / −40 |
-| `FILL-3` | `geometry.merge` の連結を不在値で埋める。固定テストの書き換え（ravel-nodes） | `FILL-1`、要判断 1・2 | +180 / −50 |
-| `FILL-4` | `field.apply` の `created_column` と `style` の `UNSET_*` を `absent` へ | `FILL-1`、要判断 3 | +80 / −40 |
+| `FILL-2` | `expand_instances` の `ColumnAccumulator` と `attach_piece_attributes` を不在値で埋める。固定テストの書き換え（ravel-core） | `FILL-1` | +150 / −40 |
+| `FILL-3` | `geometry.merge` の連結を不在値で埋める。固定テストの書き換え（ravel-nodes） | `FILL-1` | +180 / −50 |
+| `FILL-4` | `field.apply` の `created_column` と `style` の `UNSET_*` を `absent` へ | `FILL-1` | +80 / −40 |
 | `FILL-5` | `rasterize` の既定値の直書きを `absent` の定数へ（挙動不変） | `FILL-1` | +30 / −25 |
 | `FILL-6` | 仕様・API 地図・個票と計画のクローズ | `FILL-1`〜`5` | 文書のみ |
 
 `FILL-2`〜`FILL-5` は互いに独立（触るファイルが別）で、`FILL-1` のマージ後に
-並行できる。`FILL-1` と `FILL-5` は要判断に依存しない（`FILL-1` は推奨案で
-書き、決定が違えば `absent` の答えだけを変える）。
+並行できる。
 
-## 要判断（利用者の判断が要る）
+## 決定事項（2026-10-05、ユーザー判断）
 
 1. **継承する属性（Primitive / Point の `Cd`、`fill`、`stroke_width`、
-   `stroke_color`）の欠けをどう埋めるか**
-   - (a) `rasterize` テンプレートの既定で実体化する（`fill = true`、
-     `stroke_width = 0`、色は白）。`style` の `unset` と同じ方針。パラメータを
-     既定から変えた・`color` ピンを繋いだ・囲むインスタンスが継承元のときだけ
-     ずれる
-   - (b) 列に行ごとの「有無」を持たせる（`AttributeArray` の隣にマスク）。
-     厳密だが、行を並べ替える・選ぶ全 op（`sort` / `blast` / `promote` /
-     `field.apply` / スプレッドシート …）がマスクを運ぶ必要があり、別計画の規模
-   - (c) マージ・展開でこれらの列が片側にしか無ければエラーにする。
-     `style` 済みと素のジオメトリのマージという普通の操作が通らなくなる
-   - **推奨: (a)**。今の「消える」から「既定で描かれる」になり、ずれは
-     パラメータを変えたときだけ。(b) は要求が出たときに別計画で
+   `stroke_color`）の欠けは `rasterize` テンプレートの既定で実体化する**
+   （`fill = true`、`stroke_width = 0`、色は白）。`style` の `unset` と同じ方針。
+   パラメータを既定から変えた・`color` ピンを繋いだ・囲むインスタンスが継承元の
+   ときだけずれる。選ばなかった案: 列に行ごとの「有無」のマスクを持たせる
+   （行を並べ替える・選ぶ全 op がマスクを運ぶ必要があり別計画の規模。要求が
+   出たら別計画で）／片側にしか無ければエラーにする（`style` 済みと素の
+   ジオメトリのマージが通らなくなる）
 2. **「無い」が他の属性へのフォールバックを意味する列（`stroke_color` → `Cd`、
-   Point の `Cd` → プリミティブの線色）の埋め方**
-   - (a) 同じ側の参照先の値を行ごとに実体化する（上の表）
-   - (b) 定数（白）で埋める（今の `created_column` と同じ）
-   - **推奨: (a)**。(b) は `Cd` が白でないジオメトリの線色を変える。
-     (a) でも実体化後は下流の `Cd` の変調に追随しない（「無い」なら追随した）。
-     その差は文書に書く
-3. **`field.apply` の `create_if_missing` も同じ不在値で作るか**
-   - 作ると、列の無い `alpha` / `scale` / `pscale` への `multiply` や
-     `amount < 1` の結果が変わる（0 起点 → 1 / `(1, 1)` / 2 起点）。
-     **既存プロジェクトの出力が変わる**（ジオメトリは保存されないので
-     データは壊れない）。Point の `Cd` を頂点に作るときも白 → 所属
-     プリミティブの線色に変わる
-   - **推奨: 作る**。今の結果は「`alpha` を掛けたら消えた」で、`Cd` だけ白に
-     直した `created_column` 自身のコメント（`field.rs:1832-1836`）と同じ理由が
-     `alpha` / `scale` / `pscale` にも当たる
-
-## 決定事項
-
-（要判断の決定をここに記録する）
+   Point の `Cd` → 所属プリミティブの線色）は、埋める時点で同じ側の参照先の値を
+   行ごとに写す**（「継承する属性」の表）。既知の限界: 写した後は下流の `Cd` の
+   変調に追随しない（「無い」なら追随した）。この差は `FILL-6` で仕様に書く。
+   選ばなかった案: 定数（白）で埋める（`Cd` が白でないジオメトリの線色が変わる）
+3. **`field.apply` の `create_if_missing` も同じ不在値で列を作る**。列の無い
+   `alpha` / `scale` / `pscale` への `multiply` や `amount < 1` の結果は
+   0 起点から 1 / `(1, 1)` / 2 起点に変わり、既存プロジェクトの出力が変わる
+   （ジオメトリは保存されないのでデータは壊れない）。Point の `Cd` を頂点に
+   作るときも白から所属プリミティブの線色に変わる
 
 ## 実施状況
 
-- 2026-10-05 計画。`MED-CORE-13` 起票
+- 2026-10-05 計画。`MED-CORE-13` 起票。同日、決定事項 1〜3 をユーザー判断で確定

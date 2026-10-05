@@ -30,8 +30,8 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| IXF-2 | rasterize の CPU / GPU / WGSL を厳密な配置へ（`MED-GPU-09`、フェーズ A6） | `instance-transform-shear-plan.md` |
-| IXF-3 | `geometry.transform` の instance ドメインを `compose` 経由に（`MED-GPU-09`、フェーズ A6） | `instance-transform-shear-plan.md` |
+| IXF-2 | rasterize の CPU / GPU / WGSL を厳密な配置へ（`MED-GPU-09`、フェーズ A6） | `done/instance-transform-shear-plan.md` |
+| IXF-3 | `geometry.transform` の instance ドメインを `compose` 経由に（`MED-GPU-09`、フェーズ A6） | `done/instance-transform-shear-plan.md` |
 | SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
@@ -496,7 +496,7 @@ hover 判定は既存ヒットテストの再利用に限り、新しいレイ�
 8 ハンドルは**操作が未実装なのでカーソルを付けない** — フェーズ E で機能と
 同じ単位に入れる。
 
-### インスタンス配置の厳密な合成（フェーズ A6、`instance-transform-shear-plan.md`）
+### インスタンス配置の厳密な合成（フェーズ A6、`done/instance-transform-shear-plan.md`）
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|

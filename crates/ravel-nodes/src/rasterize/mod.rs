@@ -36,6 +36,17 @@
 //! to back in the shared vertex buffer, separated by [`CONTOUR_BREAK`], for a
 //! fragment shader that accumulates one winding number across all of them.
 //!
+//! # Vertex colours
+//!
+//! A path whose points carry a `Cd` (or `stroke_color`) column **strokes** in
+//! those colours: each pixel takes the two ends of the nearest segment, mixed
+//! by where on it the pixel's nearest point lies ([`sample::path_sample`] on the
+//! CPU, `path_sample` in `rasterize.wgsl` on the GPU). The fill is always one
+//! primitive colour, so a Point `Cd` on a fill is ignored. How dark a pixel is
+//! stays `zeno`'s call on the CPU — only the colour comes from the per-pixel
+//! evaluator — and a path with no such column never runs it
+//! (`docs/implementation/path-shading-plan.md`).
+//!
 //! Paths are filled/stroked through `zeno` with antialiased coverage; loose
 //! points (those not referenced by a `Primitive::Path`) draw as analytic-AA
 //! circle sprites. Instances expand their source geometry
@@ -76,6 +87,8 @@ use crate::composition_scale;
 use crate::ensure_cpu;
 use crate::flatten;
 use crate::gpu_util;
+
+mod sample;
 
 const SHADER_SRC: &str = include_str!("../shaders/rasterize.wgsl");
 
@@ -429,38 +442,53 @@ struct GpuRasterizer {
     placeholder: PooledTexture,
 }
 
+/// The draw pass's bind group layout: the uniform, the vertex, item and vertex
+/// colour storage, and the instance source a run of image quads samples.
+///
+/// One definition, because the probe in `sample.rs`'s tests builds a second
+/// pipeline over the same shader and has to bind what the shader declares.
+fn raster_layout() -> [BindingDesc; 5] {
+    [
+        BindingDesc::new(
+            0,
+            BindingKind::UniformBuffer,
+            ShaderVisibility::VERTEX_FRAGMENT,
+        ),
+        BindingDesc::new(
+            1,
+            BindingKind::ReadOnlyStorageBuffer,
+            ShaderVisibility::FRAGMENT,
+        ),
+        BindingDesc::new(
+            2,
+            BindingKind::ReadOnlyStorageBuffer,
+            ShaderVisibility::VERTEX_FRAGMENT,
+        ),
+        // The stroke colour of each vertex of a run that colours its stroke
+        // per vertex, parallel to that run's slice of the vertex buffer.
+        BindingDesc::new(
+            3,
+            BindingKind::ReadOnlyStorageBuffer,
+            ShaderVisibility::FRAGMENT,
+        ),
+        // The instance source a run of image quads samples. Rebound
+        // between runs, which is what keeps several pictures in one
+        // painter-ordered pass.
+        BindingDesc::new(4, BindingKind::InputTexture, ShaderVisibility::FRAGMENT),
+    ]
+}
+
 impl GpuRasterizer {
     fn new(ctx: GpuContext, shaders: &mut ShaderManager, pool: Arc<Mutex<TexturePool>>) -> Self {
         let shader = shaders
             .compile_source("rasterize", SHADER_SRC)
             .expect("rasterize.wgsl compilation failed");
-        let raster_layout = [
-            BindingDesc::new(
-                0,
-                BindingKind::UniformBuffer,
-                ShaderVisibility::VERTEX_FRAGMENT,
-            ),
-            BindingDesc::new(
-                1,
-                BindingKind::ReadOnlyStorageBuffer,
-                ShaderVisibility::FRAGMENT,
-            ),
-            BindingDesc::new(
-                2,
-                BindingKind::ReadOnlyStorageBuffer,
-                ShaderVisibility::VERTEX_FRAGMENT,
-            ),
-            // The instance source a run of image quads samples. Rebound
-            // between runs, which is what keeps several pictures in one
-            // painter-ordered pass.
-            BindingDesc::new(3, BindingKind::InputTexture, ShaderVisibility::FRAGMENT),
-        ];
         let raster_pipeline = RasterPipeline::new(
             &ctx,
             &shader,
             "raster_vertex",
             "raster_fragment",
-            &raster_layout,
+            &raster_layout(),
             // Must stay the format `premul_key` asks the pool for. The pass
             // blends premultiplied coverage, which the `unpremultiply` compute
             // pass below converts back to straight alpha.
@@ -526,7 +554,7 @@ impl GpuRasterizer {
         );
         let _guard = span.enter();
 
-        let mut vertices = Vec::new();
+        let mut buffers = VertexBuffers::default();
         let mut items = Vec::new();
         let mut image_items = Vec::new();
         {
@@ -540,7 +568,7 @@ impl GpuRasterizer {
                 Placement::for_context(ctx),
                 0,
                 style,
-                &mut vertices,
+                &mut buffers,
                 &mut items,
                 &mut image_items,
             );
@@ -555,15 +583,23 @@ impl GpuRasterizer {
             data0: [0.0; 4],
             data1: [0.0; 4],
         }];
-        let vertex_bytes: &[u8] = if vertices.is_empty() {
+        let vertex_bytes: &[u8] = if buffers.points.is_empty() {
             bytemuck::cast_slice(&dummy_vertices)
         } else {
-            bytemuck::cast_slice(&vertices)
+            bytemuck::cast_slice(&buffers.points)
         };
         let item_bytes: &[u8] = if items.is_empty() {
             bytemuck::cast_slice(&dummy_items)
         } else {
             bytemuck::cast_slice(&items)
+        };
+        // Present only so the binding is never empty: no item reads it unless
+        // it carries vertex colours, and then `buffers.colors` is not empty.
+        let dummy_colors = [[0.0f32; 4]];
+        let color_bytes: &[u8] = if buffers.colors.is_empty() {
+            bytemuck::cast_slice(&dummy_colors)
+        } else {
+            bytemuck::cast_slice(&buffers.colors)
         };
         let params = RasterParams {
             resolution: [width as f32, height as f32],
@@ -612,7 +648,7 @@ impl GpuRasterizer {
                 label: "rasterize draw data",
                 pipeline: &self.raster_pipeline,
                 uniform: bytemuck::bytes_of(&params),
-                storage: &[vertex_bytes, item_bytes],
+                storage: &[vertex_bytes, item_bytes, color_bytes],
                 target: &premul_binding,
                 runs: &runs,
             });
@@ -704,6 +740,160 @@ fn path_polyline(
         return positions[verts.clone()].to_vec();
     }
     flatten::flatten_path(&positions[verts.clone()], in_tans, out_tans, closed)
+}
+
+/// A path's draw-ready polyline together with the stroke colour of each of its
+/// vertices, when its points ask for one.
+struct Contour {
+    points: Vec<Vec2>,
+    /// One colour per entry of `points`, tinted. Only a path whose stroke is
+    /// coloured by its points carries it (`path_run_key`); every other path
+    /// leaves this `None` and takes the single-colour route.
+    colors: Option<Vec<Color>>,
+}
+
+/// [`path_polyline`], plus the colour at each flattened vertex.
+///
+/// `point_colors` are the tinted colours of the **control points** of the path
+/// (`vertex_stroke_colors`). Without tangents the polyline *is* the control
+/// polygon and they carry over one for one. With tangents each flattened
+/// vertex sits at a parameter of the control polygon
+/// ([`flatten::flatten_path_with_param`]) and takes the colour interpolated
+/// there, so a curve shades continuously — and the CPU and GPU paths, which
+/// both consume this, shade the same curve the same way.
+fn path_contour(
+    geo: &Geometry,
+    positions: &[Vec2],
+    verts: &Range<usize>,
+    closed: bool,
+    point_colors: Option<&[Color]>,
+) -> Contour {
+    let Some(point_colors) = point_colors else {
+        return Contour {
+            points: path_polyline(geo, positions, verts, closed),
+            colors: None,
+        };
+    };
+    let column = |name: &str| {
+        geo.points()
+            .get(name)
+            .and_then(|c| c.as_vec2(name).ok())
+            .and_then(|values| (verts.end <= values.len()).then(|| &values[verts.clone()]))
+    };
+    let (in_tans, out_tans) = (column(names::IN_TAN), column(names::OUT_TAN));
+    if in_tans.is_none() && out_tans.is_none() {
+        return Contour {
+            points: positions[verts.clone()].to_vec(),
+            colors: Some(point_colors.to_vec()),
+        };
+    }
+    let flat =
+        flatten::flatten_path_with_param(&positions[verts.clone()], in_tans, out_tans, closed);
+    Contour {
+        colors: Some(
+            flat.iter()
+                .map(|(_, u)| color_along(point_colors, *u, closed))
+                .collect(),
+        ),
+        points: flat.into_iter().map(|(point, _)| point).collect(),
+    }
+}
+
+/// The colour at parameter `u` of a control polygon, `i + t` for the point at
+/// `t` of the segment leaving control point `i`: the two ends of that segment,
+/// mixed by `t`. A closed path's last segment arrives at control point 0; an
+/// open path's last control point has no segment of its own, so `u` equal to
+/// its index is exactly its colour.
+fn color_along(colors: &[Color], u: f32, closed: bool) -> Color {
+    let last = colors.len() - 1;
+    let segment = (u.floor().max(0.0) as usize).min(last);
+    let t = (u - segment as f32).clamp(0.0, 1.0);
+    let next = if closed {
+        (segment + 1) % colors.len()
+    } else {
+        (segment + 1).min(last)
+    };
+    mix_color(colors[segment], colors[next], t)
+}
+
+/// `a` at `t = 0`, `b` at `t = 1`, componentwise — straight RGBA, the same
+/// mix the shader's `path_vertex_color` takes.
+fn mix_color(a: Color, b: Color, t: f32) -> Color {
+    let s = 1.0 - t;
+    Color::new(
+        a.r * s + b.r * t,
+        a.g * s + b.g * t,
+        a.b * s + b.b * t,
+        a.a * s + b.a * t,
+    )
+}
+
+/// The colours the **points** of a path ask its stroke to be drawn in, tinted
+/// like every other colour the element resolves, or `None` when its points
+/// ask for nothing.
+///
+/// A Point-domain `stroke_color` column wins over a Point-domain `Cd`, and
+/// either wins over the primitive-level `stroke_color` / `Cd` the path would
+/// otherwise stroke in: the more specific the domain, the earlier it is
+/// asked. A column shorter than the path's vertex range is not a column for
+/// this path. The Point `alpha` and the primitive's own `alpha` both
+/// multiply in, as they do for a sprite and for a primitive colour.
+fn vertex_stroke_colors(
+    geo: &Geometry,
+    verts: &Range<usize>,
+    primitive_alpha: f32,
+    tint: Color,
+) -> Option<Vec<Color>> {
+    let column = [names::STROKE_COLOR, names::CD]
+        .into_iter()
+        .find_map(|name| {
+            let colors = geo.points().get(name)?.as_color(name).ok()?;
+            (verts.end <= colors.len()).then(|| &colors[verts.clone()])
+        })?;
+    Some(
+        column
+            .iter()
+            .enumerate()
+            .map(|(offset, color)| {
+                let alpha = attr_f32(geo.points(), names::ALPHA, verts.start + offset)
+                    .unwrap_or(1.0)
+                    * primitive_alpha;
+                tinted(*color, alpha, tint)
+            })
+            .collect(),
+    )
+}
+
+/// The run key of one path primitive, and the colours of its control points
+/// when its stroke is coloured per vertex.
+///
+/// The one place both rasterizers decide it, so they group the same paths
+/// into the same runs. A path is vertex-coloured only if it **strokes**
+/// (`stroke_width > 0`): a fill never reads the colours (the fill is one
+/// primitive colour), and flagging a fill-only path would split runs and cost
+/// a scan for nothing.
+fn path_run_key(
+    geo: &Geometry,
+    element: Style,
+    prim_index: usize,
+    verts: &Range<usize>,
+    tint: Color,
+) -> (RunKey, Option<Vec<Color>>) {
+    let (color, stroke_color) = element_colors(element, geo.primitive_attrs(), prim_index, tint);
+    let point_colors = if element.stroke_width > 0.0 {
+        let alpha = element_alpha(geo.primitive_attrs(), prim_index);
+        vertex_stroke_colors(geo, verts, alpha, tint)
+    } else {
+        None
+    };
+    let key = RunKey {
+        fill: element.fill,
+        stroke_width: element.stroke_width,
+        color,
+        stroke_color,
+        vertex_colored: point_colors.is_some(),
+    };
+    (key, point_colors)
 }
 
 /// Where an image instance appears in the draw list: the index of its
@@ -872,16 +1062,28 @@ struct PathRun {
     start: usize,
     /// `uniform_scale` of the placement, applied to the stroke width.
     scale: f32,
+    /// Index of the run's first entry in the vertex colour buffer, for a run
+    /// whose stroke is coloured per vertex. That buffer is parallel to the
+    /// run's own vertices (entry `color_start + i` is vertex `start + i`), and
+    /// only such runs append to it.
+    color_start: Option<usize>,
     bounds: [f32; 4],
 }
 
 impl PathRun {
-    fn new(key: RunKey, closed: bool, start: usize, scale: f32) -> Self {
+    fn new(
+        key: RunKey,
+        closed: bool,
+        start: usize,
+        scale: f32,
+        color_start: Option<usize>,
+    ) -> Self {
         Self {
             key,
             closed,
             start,
             scale,
+            color_start,
             bounds: [
                 f32::INFINITY,
                 f32::INFINITY,
@@ -919,9 +1121,24 @@ impl PathRun {
                 (vertex_end - self.start) as f32,
                 u32::from(self.closed) as f32,
             ],
-            data1: [u32::from(self.key.fill) as f32, scaled_stroke, 0.0, 0.0],
+            data1: [
+                u32::from(self.key.fill) as f32,
+                scaled_stroke,
+                // `0` is "no vertex colours", so the start is stored plus one.
+                self.color_start.map_or(0.0, |start| (start + 1) as f32),
+                0.0,
+            ],
         });
     }
+}
+
+/// The two storage buffers a draw's paths are flattened into, which run in
+/// parallel: `colors` holds an entry per vertex of every run that colours its
+/// stroke per vertex, and nothing for the rest.
+#[derive(Default)]
+struct VertexBuffers {
+    points: Vec<[f32; 2]>,
+    colors: Vec<[f32; 4]>,
 }
 
 fn flatten_geometry<'a>(
@@ -929,7 +1146,7 @@ fn flatten_geometry<'a>(
     placement: Placement,
     depth: u32,
     style: Style,
-    vertices: &mut Vec<[f32; 2]>,
+    buffers: &mut VertexBuffers,
     items: &mut Vec<DrawItem>,
     image_items: &mut ImageItems<'a>,
 ) {
@@ -953,40 +1170,43 @@ fn flatten_geometry<'a>(
         {
             continue;
         }
-        let (color, stroke_color) =
-            element_colors(element, geo.primitive_attrs(), prim_index, placement.tint);
-        let key = RunKey {
-            fill: element.fill,
-            stroke_width: element.stroke_width,
-            color,
-            stroke_color,
-        };
+        let (key, point_colors) = path_run_key(geo, element, prim_index, verts, placement.tint);
 
         let joins = run
             .as_ref()
             .is_some_and(|current| *closed && current.closed && current.key == key);
         if joins {
-            vertices.push(CONTOUR_BREAK);
+            buffers.points.push(CONTOUR_BREAK);
+            if key.vertex_colored {
+                // The colour buffer runs parallel to the run's vertices, so
+                // the break has a slot too; the shader never reads it.
+                buffers.colors.push([0.0; 4]);
+            }
         } else {
             if let Some(previous) = run.take() {
-                previous.push_item(vertices.len(), items);
+                previous.push_item(buffers.points.len(), items);
             }
             run = Some(PathRun::new(
                 key,
                 *closed,
-                vertices.len(),
+                buffers.points.len(),
                 placement.uniform_scale(),
+                key.vertex_colored.then_some(buffers.colors.len()),
             ));
         }
         let current = run.as_mut().expect("a run exists for the current path");
-        for position in &path_polyline(geo, positions, verts, *closed) {
+        let contour = path_contour(geo, positions, verts, *closed, point_colors.as_deref());
+        for (index, position) in contour.points.iter().enumerate() {
             let point = placement.apply(*position);
-            vertices.push([point.0, point.1]);
+            buffers.points.push([point.0, point.1]);
+            if let Some(contour_colors) = &contour.colors {
+                buffers.colors.push(color_array(contour_colors[index]));
+            }
             current.grow(point);
         }
     }
     if let Some(previous) = run.take() {
-        previous.push_item(vertices.len(), items);
+        previous.push_item(buffers.points.len(), items);
     }
 
     let radii = float_column(geo.points(), names::PSCALE);
@@ -1059,7 +1279,7 @@ fn flatten_geometry<'a>(
                 compose(placement, local),
                 depth + 1,
                 element_style(style, instances, index),
-                vertices,
+                buffers,
                 items,
                 image_items,
             ),
@@ -1131,14 +1351,22 @@ impl Canvas<'_> {
     /// own size instead of the frame's: a scatter of a hundred small shapes
     /// used to walk the whole canvas a hundred times.
     fn blend_coverage(&mut self, rect: Rect, color: Color) {
+        self.blend_coverage_by(rect, |_, _| color);
+    }
+
+    /// [`Self::blend_coverage`] with the colour decided per pixel. Called only
+    /// for pixels the mask covers, so a colour that costs a scan of the path
+    /// ([`path_sample`](sample::path_sample)) is paid where ink lands.
+    fn blend_coverage_by(&mut self, rect: Rect, mut color_at: impl FnMut(u32, u32) -> Color) {
         for y in rect.y0..rect.y1 {
             let row = (y * self.width) as usize;
-            for i in row + rect.x0 as usize..row + rect.x1 as usize {
+            for x in rect.x0..rect.x1 {
+                let i = row + x as usize;
                 let cov = std::mem::take(&mut self.coverage[i]);
                 if cov != 0 {
                     blend_pixel(
                         &mut self.pixels[i * 4..i * 4 + 4],
-                        color,
+                        color_at(x, y),
                         cov as f32 / 255.0,
                     );
                 }
@@ -1199,6 +1427,10 @@ struct RunKey {
     stroke_width: f32,
     color: Color,
     stroke_color: Color,
+    /// The stroke takes its colour from the path's own points. Part of the
+    /// key because both rasterizers keep per-vertex data beside the polyline
+    /// of such a run, and a run holds either all of its paths' colours or none.
+    vertex_colored: bool,
 }
 
 /// A run of consecutive same-style closed paths, drawn as **one** shape.
@@ -1217,6 +1449,12 @@ struct FillRun<'a> {
     /// `uniform_scale` of the placement, applied to the stroke width at draw.
     scale: f32,
     commands: Vec<Command>,
+    /// The run's contours in device space, `CONTOUR_BREAK` between them — the
+    /// layout the shader reads and [`sample::path_sample`] walks. Kept only
+    /// for a run whose stroke is read per pixel (`vertex_colored`).
+    device: Vec<[f32; 2]>,
+    /// The stroke colour of each `device` entry, break slots included.
+    colors: Vec<Color>,
     min: Vec2,
     max: Vec2,
 }
@@ -1229,6 +1467,8 @@ impl<'a> FillRun<'a> {
             shape,
             scale,
             commands: Vec::new(),
+            device: Vec::new(),
+            colors: Vec::new(),
             min: Vec2(f32::INFINITY, f32::INFINITY),
             max: Vec2(f32::NEG_INFINITY, f32::NEG_INFINITY),
         }
@@ -1237,11 +1477,19 @@ impl<'a> FillRun<'a> {
     /// Append one contour, already in device space. Each keeps its own
     /// `MoveTo`, and a closed one its own `Close`, so zeno sees separate
     /// subpaths of one shape rather than a polyline that jumps between them.
-    fn push_contour(&mut self, polyline: &[Vec2], placement: Placement) {
-        for (i, p) in polyline.iter().enumerate() {
+    fn push_contour(&mut self, contour: &Contour, placement: Placement) {
+        if self.key.vertex_colored && !self.device.is_empty() {
+            self.device.push(CONTOUR_BREAK);
+            self.colors.push(Color::new(0.0, 0.0, 0.0, 0.0));
+        }
+        for (i, p) in contour.points.iter().enumerate() {
             let v = placement.apply(*p);
             self.min = Vec2(self.min.0.min(v.0), self.min.1.min(v.1));
             self.max = Vec2(self.max.0.max(v.0), self.max.1.max(v.1));
+            if let Some(colors) = &contour.colors {
+                self.device.push([v.0, v.1]);
+                self.colors.push(colors[i]);
+            }
             let v = Vector::new(v.0, v.1);
             self.commands.push(if i == 0 {
                 Command::MoveTo(v)
@@ -1252,6 +1500,19 @@ impl<'a> FillRun<'a> {
         if self.closed {
             self.commands.push(Command::Close);
         }
+    }
+
+    /// The stroke colour at the centre of pixel `(x, y)`: the colours at both
+    /// ends of the nearest segment, mixed by where on it the pixel's nearest
+    /// point lies.
+    fn vertex_color_at(&self, x: u32, y: u32) -> Color {
+        let found =
+            sample::path_sample(&self.device, self.closed, [x as f32 + 0.5, y as f32 + 0.5]);
+        mix_color(
+            self.colors[found.nearest_segment as usize],
+            self.colors[found.segment_end as usize],
+            found.t_on_segment,
+        )
     }
 
     fn render(&self, canvas: &mut Canvas<'_>) {
@@ -1288,18 +1549,24 @@ impl<'a> FillRun<'a> {
             // a cap or a miter spike reaches further still. The rectangle has
             // to bound every pixel zeno wrote, or the leftovers become the
             // next primitive's coverage.
-            canvas.blend_coverage(
-                coverage_rect(
-                    (self.min, self.max),
-                    // The core's reach, not a second copy of it: the bbox
-                    // `ops::drawn_bounds` reports has to contain the pixels
-                    // zeno writes here, and it cannot if the two disagree.
-                    stroke_reach(stroke_width, self.shape.join == Join::Miter),
-                    width,
-                    height,
-                ),
-                self.key.stroke_color,
+            let rect = coverage_rect(
+                (self.min, self.max),
+                // The core's reach, not a second copy of it: the bbox
+                // `ops::drawn_bounds` reports has to contain the pixels
+                // zeno writes here, and it cannot if the two disagree.
+                stroke_reach(stroke_width, self.shape.join == Join::Miter),
+                width,
+                height,
             );
+            if self.key.vertex_colored {
+                // How dark a pixel is stays zeno's call (so a dash, a cap or
+                // a miter still shape the stroke); only the colour comes from
+                // the per-pixel evaluator, as on the GPU, where it is the
+                // nearest segment's two ends mixed by `t`.
+                canvas.blend_coverage_by(rect, |x, y| self.vertex_color_at(x, y));
+            } else {
+                canvas.blend_coverage(rect, self.key.stroke_color);
+            }
         }
     }
 }
@@ -1322,14 +1589,7 @@ fn raster_paths(
         }
 
         let element = element_style(style, geo.primitive_attrs(), prim_index);
-        let (color, stroke_color) =
-            element_colors(element, geo.primitive_attrs(), prim_index, placement.tint);
-        let key = RunKey {
-            fill: element.fill,
-            stroke_width: element.stroke_width,
-            color,
-            stroke_color,
-        };
+        let (key, point_colors) = path_run_key(geo, element, prim_index, verts, placement.tint);
 
         let joins = run
             .as_ref()
@@ -1346,8 +1606,8 @@ fn raster_paths(
             ));
         }
         let current = run.as_mut().expect("a run exists for the current path");
-        let polyline = path_polyline(geo, positions, verts, *closed);
-        current.push_contour(&polyline, placement);
+        let contour = path_contour(geo, positions, verts, *closed, point_colors.as_deref());
+        current.push_contour(&contour, placement);
     }
     if let Some(previous) = run.take() {
         previous.render(canvas);
@@ -4406,5 +4666,486 @@ mod tests {
             out.downcast_ref::<GpuFrameBuffer>().is_some(),
             "an unstyled stroke stays on the GPU"
         );
+    }
+
+    // ---- vertex colours (stroke) ------------------------------------------
+
+    const RED: Color = Color::new(1.0, 0.0, 0.0, 1.0);
+    const GREEN: Color = Color::new(0.0, 1.0, 0.0, 1.0);
+    const BLUE: Color = Color::new(0.0, 0.0, 1.0, 1.0);
+
+    /// An open path from (4, 16) to (28, 16) with one point per colour, evenly
+    /// spaced, carrying the colours as the Point `Cd`.
+    fn line_with_colors(colors: &[Color]) -> Geometry {
+        let last = (colors.len() - 1) as f32;
+        let points = (0..colors.len())
+            .map(|i| Vec2(4.0 + 24.0 * i as f32 / last, 16.0))
+            .collect();
+        let mut geo = Geometry::from_points(points);
+        geo.push_primitive(Primitive::Path {
+            verts: 0..colors.len(),
+            closed: false,
+        });
+        geo.points_mut()
+            .insert(names::CD, AttributeArray::Color(colors.to_vec()))
+            .unwrap();
+        geo
+    }
+
+    /// Colour parity apart from antialiasing: wherever **both** pictures are
+    /// opaque (so no edge feather is involved) they must agree on the colour.
+    /// The overall match ratio alone cannot tell a wrong colour from a wrong
+    /// edge, and a thin gradient stroke is mostly edge. Requires a minimum
+    /// count of such pixels so the check cannot pass over an empty set.
+    fn assert_opaque_colours_match(
+        cpu: &FrameBuffer,
+        gpu: &FrameBuffer,
+        minimum: usize,
+        label: &str,
+    ) {
+        let mut compared = 0;
+        for (index, (c, g)) in cpu
+            .as_f32()
+            .chunks_exact(4)
+            .zip(gpu.as_f32().chunks_exact(4))
+            .enumerate()
+        {
+            if c[3] > 0.99 && g[3] > 0.99 {
+                compared += 1;
+                for channel in 0..3 {
+                    assert!(
+                        (c[channel] - g[channel]).abs() < 0.02,
+                        "{label}: pixel {index} channel {channel}: CPU {c:?} GPU {g:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            compared >= minimum,
+            "{label}: only {compared} opaque pixels to compare"
+        );
+    }
+
+    fn assert_rgb(actual: [f32; 4], expected: [f32; 3], tolerance: f32, label: &str) {
+        for (channel, (a, e)) in actual.iter().zip(expected).enumerate() {
+            assert!(
+                (a - e).abs() <= tolerance,
+                "{label}: channel {channel} is {a}, expected {e} (pixel {actual:?})"
+            );
+        }
+    }
+
+    /// The stroke takes the two ends of the nearest segment, mixed by where
+    /// the pixel's nearest point lies on it. Every expected value is the
+    /// hand-worked `t = (x + 0.5 - x0) / length`; none comes from a render.
+    #[test]
+    fn a_stroke_mixes_the_colours_of_its_nearest_segment() {
+        let two = run(false, 4.0, &line_with_colors(&[RED, BLUE]), 32, 32);
+        // t = (5.5 - 4) / 24, (16.5 - 4) / 24, (26.5 - 4) / 24.
+        assert_rgb(
+            pixel(&two, 5, 16),
+            [0.9375, 0.0, 0.0625],
+            1e-4,
+            "near the start",
+        );
+        assert_rgb(
+            pixel(&two, 16, 16),
+            [0.479_166_7, 0.0, 0.520_833_3],
+            1e-4,
+            "midway",
+        );
+        assert_rgb(
+            pixel(&two, 26, 16),
+            [0.0625, 0.0, 0.9375],
+            1e-4,
+            "near the end",
+        );
+        assert_eq!(pixel(&two, 16, 16)[3], 1.0);
+
+        // Three vertices: each half mixes its own pair, not the whole line.
+        let three = run(false, 4.0, &line_with_colors(&[RED, GREEN, BLUE]), 32, 32);
+        // t = (10.5 - 4) / 12 on the first segment, (22.5 - 16) / 12 on the second.
+        assert_rgb(
+            pixel(&three, 10, 16),
+            [0.458_333_3, 0.541_666_7, 0.0],
+            1e-4,
+            "red to green",
+        );
+        assert_rgb(
+            pixel(&three, 22, 16),
+            [0.0, 0.458_333_3, 0.541_666_7],
+            1e-4,
+            "green to blue",
+        );
+    }
+
+    /// Point colours reach the screen only through the stroke: a width of
+    /// zero draws nothing however the points are coloured.
+    #[test]
+    fn vertex_colours_do_not_draw_without_a_stroke() {
+        let geo = line_with_colors(&[RED, BLUE]);
+        let fb = run(false, 0.0, &geo, 32, 32);
+        assert!(
+            fb.as_f32().iter().all(|v| *v == 0.0),
+            "a zero-width stroke with vertex colours drew something"
+        );
+    }
+
+    /// The point of the plan's second binding rule: a path with no per-vertex
+    /// colour never runs the per-pixel evaluator. Counted, not timed — the
+    /// evaluator is `path_sample`, and it records each call on this thread.
+    #[test]
+    fn a_path_without_vertex_colours_takes_the_single_colour_route() {
+        let mut plain = line_with_colors(&[RED, BLUE]);
+        // The same geometry with the colours taken off its points and put on
+        // the primitive: nothing but where the colour lives differs.
+        plain.points_mut().remove(names::CD);
+        plain
+            .primitive_attrs_mut()
+            .insert(names::STROKE_COLOR, AttributeArray::Color(vec![GREEN]))
+            .unwrap();
+
+        let before = sample::calls();
+        let fb = run(false, 4.0, &plain, 32, 32);
+        assert_eq!(
+            sample::calls(),
+            before,
+            "the default route scanned the path per pixel"
+        );
+        assert_rgb(
+            pixel(&fb, 16, 16),
+            [0.0, 1.0, 0.0],
+            1e-6,
+            "primitive stroke_color",
+        );
+
+        // The counter is not vacuous: the coloured twin does scan.
+        let before = sample::calls();
+        run(false, 4.0, &line_with_colors(&[RED, BLUE]), 32, 32);
+        assert!(
+            sample::calls() > before,
+            "a vertex-coloured stroke never reached the evaluator"
+        );
+    }
+
+    /// Where the vertex colours are all one colour the two routes have to
+    /// agree: the per-pixel route is a different way to arrive at the same
+    /// picture, not a different picture.
+    #[test]
+    fn uniform_vertex_colours_draw_what_the_single_colour_route_draws() {
+        let mut sloped = line_with_colors(&[GREEN, GREEN, GREEN]);
+        sloped.points_mut().remove(names::CD);
+        sloped
+            .primitive_attrs_mut()
+            .insert(names::STROKE_COLOR, AttributeArray::Color(vec![GREEN]))
+            .unwrap();
+        let single = run(false, 5.0, &sloped, 32, 32);
+        let coloured = run(
+            false,
+            5.0,
+            &line_with_colors(&[GREEN, GREEN, GREEN]),
+            32,
+            32,
+        );
+        for (a, b) in single.as_f32().iter().zip(coloured.as_f32().iter()) {
+            assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+        }
+    }
+
+    /// Point `stroke_color` beats Point `Cd`, which beats the primitive's own
+    /// `stroke_color`; the more specific domain is asked first.
+    #[test]
+    fn the_stroke_asks_the_point_stroke_color_before_the_point_cd() {
+        let mut geo = line_with_colors(&[RED, RED]);
+        geo.primitive_attrs_mut()
+            .insert(names::STROKE_COLOR, AttributeArray::Color(vec![BLUE]))
+            .unwrap();
+        let middle = |geo: &Geometry| pixel(&run(false, 4.0, geo, 32, 32), 16, 16);
+        assert_rgb(
+            middle(&geo),
+            [1.0, 0.0, 0.0],
+            1e-6,
+            "Point Cd over primitive stroke_color",
+        );
+        geo.points_mut()
+            .insert(
+                names::STROKE_COLOR,
+                AttributeArray::Color(vec![GREEN, GREEN]),
+            )
+            .unwrap();
+        assert_rgb(
+            middle(&geo),
+            [0.0, 1.0, 0.0],
+            1e-6,
+            "Point stroke_color over Point Cd",
+        );
+    }
+
+    /// Fills stay one primitive colour: a Point `Cd` on a closed path colours
+    /// its stroke and leaves the fill alone.
+    #[test]
+    fn a_fill_ignores_the_point_colours() {
+        let mut square = Geometry::from_points(vec![
+            Vec2(6.0, 6.0),
+            Vec2(26.0, 6.0),
+            Vec2(26.0, 26.0),
+            Vec2(6.0, 26.0),
+        ]);
+        square.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        square
+            .points_mut()
+            .insert(names::CD, AttributeArray::Color(vec![RED, RED, BLUE, BLUE]))
+            .unwrap();
+        let filled = run(true, 0.0, &square, 32, 32);
+        assert_rgb(
+            pixel(&filled, 16, 16),
+            [1.0, 1.0, 1.0],
+            1e-6,
+            "fill is the node colour",
+        );
+
+        let both = run(true, 2.0, &square, 32, 32);
+        assert_rgb(
+            pixel(&both, 16, 16),
+            [1.0, 1.0, 1.0],
+            1e-6,
+            "fill under a coloured stroke",
+        );
+        // The left edge runs from the last vertex (blue) back to the first
+        // (red); halfway up it, the stroke is the mix.
+        assert_rgb(
+            pixel(&both, 6, 16),
+            [0.5, 0.0, 0.5],
+            0.06,
+            "stroke on the left edge",
+        );
+    }
+
+    /// Along a curve the colour follows the curve's own parameter. The expected
+    /// value comes from brute force on the exact cubic — nearest of 2000
+    /// samples to the pixel centre — which no flattening is involved in, and
+    /// the parameter runs nothing like linearly with x on this strongly
+    /// bulging curve, so a colour that follows x or the vertex index fails.
+    #[test]
+    fn a_curved_strokes_colour_follows_the_curve_parameter() {
+        let (p0, c1, c2, p1) = (
+            Vec2(4.0, 20.0),
+            Vec2(4.0, 6.0),
+            Vec2(28.0, 6.0),
+            Vec2(28.0, 20.0),
+        );
+        let cubic = |u: f32| {
+            let m = 1.0 - u;
+            Vec2(
+                m * m * m * p0.0
+                    + 3.0 * m * m * u * c1.0
+                    + 3.0 * m * u * u * c2.0
+                    + u * u * u * p1.0,
+                m * m * m * p0.1
+                    + 3.0 * m * m * u * c1.1
+                    + 3.0 * m * u * u * c2.1
+                    + u * u * u * p1.1,
+            )
+        };
+        let mut geo = Geometry::from_points(vec![p0, p1]);
+        geo.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        geo.points_mut()
+            .insert(names::CD, AttributeArray::Color(vec![RED, BLUE]))
+            .unwrap();
+        geo.points_mut()
+            .insert(
+                names::OUT_TAN,
+                AttributeArray::Vec2(vec![Vec2(0.0, -14.0), Vec2(0.0, 0.0)]),
+            )
+            .unwrap();
+        geo.points_mut()
+            .insert(
+                names::IN_TAN,
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(0.0, -14.0)]),
+            )
+            .unwrap();
+        let fb = run(false, 6.0, &geo, 32, 32);
+        for sample_u in [0.08, 0.2, 0.35, 0.5, 0.65, 0.8, 0.92] {
+            let on_curve = cubic(sample_u);
+            let (x, y) = (on_curve.0.floor() as u32, on_curve.1.floor() as u32);
+            let centre = Vec2(x as f32 + 0.5, y as f32 + 0.5);
+            let nearest_u = (0..=2000)
+                .map(|i| i as f32 / 2000.0)
+                .min_by(|a, b| {
+                    let (da, db) = (cubic(*a), cubic(*b));
+                    let dist = |q: Vec2| (q.0 - centre.0).hypot(q.1 - centre.1);
+                    dist(da).total_cmp(&dist(db))
+                })
+                .unwrap();
+            assert_rgb(
+                pixel(&fb, x, y),
+                [1.0 - nearest_u, 0.0, nearest_u],
+                0.04,
+                &format!("pixel ({x},{y}) at curve parameter {nearest_u}"),
+            );
+        }
+    }
+
+    /// The scenes the GPU has to shade the same way: a straight run, a curve,
+    /// a closed coloured outline over a fill, and two coloured contours that
+    /// share one draw item.
+    #[test]
+    fn gpu_matches_cpu_for_vertex_coloured_strokes() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+
+        let straight = line_with_colors(&[RED, GREEN, BLUE]);
+        let cpu = run(false, 4.0, &straight, 32, 32);
+        let gpu_frame = run_gpu(&gpu, &pool, &straight, false, 4.0, &ctx(32, 32));
+        assert_equivalent(&cpu, &gpu_frame, "coloured line");
+        assert_opaque_colours_match(&cpu, &gpu_frame, 80, "coloured line");
+        // The CPU numbers are hand-derived above; the GPU must land on them
+        // too, within the half-float attachment's rounding.
+        assert_rgb(
+            pixel(&gpu_frame, 10, 16),
+            [0.458_333_3, 0.541_666_7, 0.0],
+            0.01,
+            "GPU red to green",
+        );
+        assert_rgb(
+            pixel(&gpu_frame, 22, 16),
+            [0.0, 0.458_333_3, 0.541_666_7],
+            0.01,
+            "GPU green to blue",
+        );
+
+        let mut curved = Geometry::from_points(vec![Vec2(4.0, 20.0), Vec2(28.0, 20.0)]);
+        curved.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        curved
+            .points_mut()
+            .insert(names::CD, AttributeArray::Color(vec![RED, BLUE]))
+            .unwrap();
+        curved
+            .points_mut()
+            .insert(
+                names::OUT_TAN,
+                AttributeArray::Vec2(vec![Vec2(0.0, -14.0), Vec2(0.0, 0.0)]),
+            )
+            .unwrap();
+        curved
+            .points_mut()
+            .insert(
+                names::IN_TAN,
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(0.0, -14.0)]),
+            )
+            .unwrap();
+        let cpu = run(false, 6.0, &curved, 64, 40);
+        let gpu_frame = run_gpu(&gpu, &pool, &curved, false, 6.0, &ctx(64, 40));
+        assert_equivalent(&cpu, &gpu_frame, "coloured curve");
+        assert_opaque_colours_match(&cpu, &gpu_frame, 80, "coloured curve");
+
+        let mut outline = Geometry::from_points(vec![
+            Vec2(8.0, 8.0),
+            Vec2(52.0, 8.0),
+            Vec2(52.0, 52.0),
+            Vec2(8.0, 52.0),
+        ]);
+        outline.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        outline
+            .points_mut()
+            .insert(
+                names::CD,
+                AttributeArray::Color(vec![RED, GREEN, BLUE, GREEN]),
+            )
+            .unwrap();
+        let cpu = run(true, 4.0, &outline, 60, 60);
+        let gpu_frame = run_gpu(&gpu, &pool, &outline, true, 4.0, &ctx(60, 60));
+        assert_equivalent(&cpu, &gpu_frame, "coloured outline over a fill");
+        assert_opaque_colours_match(&cpu, &gpu_frame, 1500, "coloured outline over a fill");
+
+        // Two closed paths of one style form one draw item; both carry colours.
+        let mut pair = Geometry::from_points(vec![
+            Vec2(6.0, 6.0),
+            Vec2(30.0, 6.0),
+            Vec2(30.0, 30.0),
+            Vec2(6.0, 30.0),
+            Vec2(36.0, 6.0),
+            Vec2(58.0, 6.0),
+            Vec2(58.0, 30.0),
+            Vec2(36.0, 30.0),
+        ]);
+        for verts in [0..4, 4..8] {
+            pair.push_primitive(Primitive::Path {
+                verts,
+                closed: true,
+            });
+        }
+        pair.points_mut()
+            .insert(
+                names::CD,
+                AttributeArray::Color(vec![RED, RED, GREEN, GREEN, BLUE, BLUE, RED, RED]),
+            )
+            .unwrap();
+        let cpu = run(false, 4.0, &pair, 64, 36);
+        let gpu_frame = run_gpu(&gpu, &pool, &pair, false, 4.0, &ctx(64, 36));
+        assert_equivalent(&cpu, &gpu_frame, "two coloured contours in one item");
+        assert_opaque_colours_match(&cpu, &gpu_frame, 600, "two coloured contours in one item");
+    }
+
+    /// Vertex colours survive an instance: the tint of the enclosing instance
+    /// multiplies each vertex colour on both paths.
+    #[test]
+    fn gpu_matches_cpu_for_vertex_colours_under_instances() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 64 * 1024 * 1024)));
+
+        let mut source = Geometry::from_points(vec![Vec2(-8.0, 0.0), Vec2(8.0, 0.0)]);
+        source.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        source
+            .points_mut()
+            .insert(names::CD, AttributeArray::Color(vec![RED, BLUE]))
+            .unwrap();
+        let mut geo = Geometry::new();
+        geo.set_instance_source(Some(Arc::new(source)));
+        geo.instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(12.0, 8.0), Vec2(20.0, 22.0)]),
+            )
+            .unwrap();
+        geo.instances_mut()
+            .insert(
+                names::CD,
+                AttributeArray::Color(vec![
+                    Color::new(1.0, 1.0, 1.0, 1.0),
+                    Color::new(0.5, 1.0, 1.0, 1.0),
+                ]),
+            )
+            .unwrap();
+        geo.instances_mut()
+            .insert(names::ROT, AttributeArray::F32(vec![0.0, 0.4]))
+            .unwrap();
+        let cpu = run(false, 3.0, &geo, 64, 40);
+        // Hand-derived: the first instance's red end is untinted red, the
+        // second's is halved. (12 - 8 + 0.5 = 4.5 is just inside the cap.)
+        assert_rgb(
+            pixel(&cpu, 5, 8),
+            [1.0, 0.0, 0.0],
+            0.15,
+            "first instance, red end",
+        );
+        let gpu_frame = run_gpu(&gpu, &pool, &geo, false, 3.0, &ctx(64, 40));
+        assert_equivalent(&cpu, &gpu_frame, "vertex colours under instances");
+        assert_opaque_colours_match(&cpu, &gpu_frame, 40, "vertex colours under instances");
     }
 }

@@ -113,31 +113,64 @@ CPU 経路は texel を読むので、GPU 常駐フレームで来た画像は�
 
 ### 標準属性名（予約）
 
-| 名前 | ドメイン | 型 | 意味 |
-|------|---------|-----|------|
-| `P` | Point/Instance | **Vec2 または Vec3** | 位置（必須）。下記「位置の次元」参照 |
-| `index` | Point/Instance | I32 | 生成順の安定インデックス |
-| `id` | Point/Instance | I32 | 寿命を通じ安定な識別子（sim 用） |
-| `rot` | Instance | F32 | 回転（rad）。**2D のみ** |
-| `scale` | Instance | Vec2 | スケール。**2D のみ** |
-| `shear` | Instance | F32 | 水平せん断（`x' = x + shear · y`、スケール前の形に対する係数）。**2D のみ**。**無ければ 0**。`rot` / `scale` と合わせて線形部分 `R(rot) · S(scale) · H(shear)` を表す。入れ子の合成が書く（下記）ので、組み込みノードは普段は作らず、列があるとき・非 0 のときだけ書かれる |
-| `orient` | Instance | Vec4 | 姿勢（クォータニオン）。**3D のみ**（REQ-3D-003） |
-| `scale3` | Instance | Vec3 | スケール。**3D のみ** |
-| `N` | Point/Primitive | Vec3 | 法線。**3D のみ**（ライティングが読む） |
-| `Cd` | Point/Instance | Color | 色（＝塗り色。`style.fill` が書く）。**Point ドメインの `Cd` は、パスの頂点に書くと線の頂点色になる**（塗りには効かない。下記） |
-| `alpha` | Point/Instance | F32 | 不透明度 |
-| `pscale` | Point | F32 | ポイント描画径 |
-| `fill` | Primitive/Instance | Bool | 塗りの有無。`rasterize` の `fill` パラメータが既定（`style.fill` が書く） |
-| `stroke_width` | Primitive/Instance | F32 | 線幅（0 = 線なし）。`rasterize` の `stroke_width` パラメータが既定（`style.stroke` が書く） |
-| `stroke_color` | Primitive/Instance/Point | Color | 線色。未設定なら `Cd`（＝塗り色）にフォールバック（`style.stroke` が書く）。**Point ドメインの列はパスの頂点ごとの線色になる**（下記） |
-| `stroke_align` | Primitive | I32 | 線の位置。0=中央 / 1=内側 / 2=外側。未設定は中央。開いたパスには内側・外側が無いので常に中央（下記）。`style.stroke` の `stroke_align` パラメータ（center / inside / outside）が書く。中央かつ列が無いときは列を作らない |
-| `dash` | Detail | Str | 破線パターン（`"4,2"` 形式。空なら実線。`style.dash` が書く） |
-| `dash_offset` | Detail | F32 | 破線の開始位置（`style.dash` が書く） |
-| `cap` | Detail | I32 | 端点の形。0=butt / 1=round / 2=square。未設定は round（`style.stroke` が書く） |
-| `join` | Detail | I32 | 角の形。0=miter / 1=round / 2=bevel。未設定は round（`style.stroke` が書く） |
-| `age` / `life` | Point | F32 | パーティクル経過/寿命 |
-| `velocity` | Point | Vec2 | 速度（sim） |
-| `u` | Point | F32 | パスパラメータ 0..1。**primitive ごとに正規化**する（`attribute.curveu` が書く。閉パスは閉じる区間の分だけ終点が 1 に届かない） |
+| 名前 | ドメイン | 型 | 意味 | 無いとき |
+|------|---------|-----|------|------|
+| `P` | Point/Instance | **Vec2 または Vec3** | 位置（必須）。下記「位置の次元」参照 | —（要素があれば必須） |
+| `index` | Point/Instance | I32 | 生成順の安定インデックス | —（`sort` / 展開が振り直す） |
+| `id` | Point/Instance | I32 | 寿命を通じ安定な識別子（sim 用） | — |
+| `rot` | Instance | F32 | 回転（rad）。**2D のみ** | 0 |
+| `scale` | Instance | Vec2 | スケール。**2D のみ** | `(1, 1)` |
+| `shear` | Instance | F32 | 水平せん断（`x' = x + shear · y`、スケール前の形に対する係数）。**2D のみ**。**無ければ 0**。`rot` / `scale` と合わせて線形部分 `R(rot) · S(scale) · H(shear)` を表す。入れ子の合成が書く（下記）ので、組み込みノードは普段は作らず、列があるとき・非 0 のときだけ書かれる | 0 |
+| `orient` | Instance | Vec4 | 姿勢（クォータニオン）。**3D のみ**（REQ-3D-003） | —（3D は未配線） |
+| `scale3` | Instance | Vec3 | スケール。**3D のみ** | —（同上） |
+| `N` | Point/Primitive | Vec3 | 法線。**3D のみ**（ライティングが読む） | —（同上） |
+| `Cd` | Point/Instance | Color | 色（＝塗り色。`style.fill` が書く）。**Point ドメインの `Cd` は、パスの頂点に書くと線の頂点色になる**（塗りには効かない。下記） | Instance: 白（色味）。Primitive: `rasterize` の `color`。Point: パスの頂点なら所属プリミティブの線色、それ以外は `color` |
+| `alpha` | Point/Instance | F32 | 不透明度 | 1 |
+| `pscale` | Point | F32 | ポイント描画径 | 2（`DEFAULT_PSCALE`） |
+| `fill` | Primitive/Instance | Bool | 塗りの有無。`rasterize` の `fill` パラメータが既定（`style.fill` が書く） | `rasterize` の `fill`（囲むインスタンスの `fill`） |
+| `stroke_width` | Primitive/Instance | F32 | 線幅（0 = 線なし）。`rasterize` の `stroke_width` パラメータが既定（`style.stroke` が書く） | `rasterize` の `stroke_width`（囲むインスタンスの値） |
+| `stroke_color` | Primitive/Instance/Point | Color | 線色。未設定なら `Cd`（＝塗り色）にフォールバック（`style.stroke` が書く）。**Point ドメインの列はパスの頂点ごとの線色になる**（下記） | 囲むインスタンスの `stroke_color`、無ければ自分の塗り色。Point: Point の `Cd`、無ければ所属プリミティブの線色 |
+| `stroke_align` | Primitive | I32 | 線の位置。0=中央 / 1=内側 / 2=外側。未設定は中央。開いたパスには内側・外側が無いので常に中央（下記）。`style.stroke` の `stroke_align` パラメータ（center / inside / outside）が書く。中央かつ列が無いときは列を作らない | 0（中央） |
+| `dash` | Detail | Str | 破線パターン（`"4,2"` 形式。空なら実線。`style.dash` が書く） | —（Detail。連結しない） |
+| `dash_offset` | Detail | F32 | 破線の開始位置（`style.dash` が書く） | —（同上） |
+| `cap` | Detail | I32 | 端点の形。0=butt / 1=round / 2=square。未設定は round（`style.stroke` が書く） | round（Detail。連結しない） |
+| `join` | Detail | I32 | 角の形。0=miter / 1=round / 2=bevel。未設定は round（`style.stroke` が書く） | round（同上） |
+| `age` / `life` | Point | F32 | パーティクル経過/寿命 | —（`field.attribute` の `default`） |
+| `velocity` | Point | Vec2 | 速度（sim） | —（同上） |
+| `u` | Point | F32 | パスパラメータ 0..1。**primitive ごとに正規化**する（`attribute.curveu` が書く。閉パスは閉じる区間の分だけ終点が 1 に届かない） | —（同上） |
+
+### 欠けた列の埋め方（無いときの値）
+
+予約属性の列が**無い**ことを、読み手は型のゼロと別の値として読む（上の表の
+「無いとき」列）。`ravel_core::geometry::absent`（`absent` / `absent_column`）が
+その**正**で、列を埋める箇所は型ゼロでなくここから値を取る。
+
+- 埋める箇所は、`geometry.merge`（Point / Primitive / Instance）、`expand_instances`
+  （ホストと各インスタンスのソースのブロック）、`attach_piece_attributes`（ピースの
+  行をインスタンスへ配る）、`field.apply` の `create_if_missing`（対象列が無いとき作る
+  列）、`style.*` の group 外の行（`style.rs` の既定は `absent` の `DEFAULT_*`）。
+  `rasterize` の既定（`alpha` 1、点の半径 2、色味の白）も同じ定数を読む
+- **予約されていない列と、予約名に予約外の型が載った列（`Cd` が `Vec3` など）は
+  型ゼロのまま**。`absent` は予約型と一致する列にだけ予約の意味を当てる
+- **定数で表せる属性**（`alpha` 1、Instance の `scale` `(1, 1)`、`pscale` 2、
+  Instance の `Cd` 白、`rot` / `shear` / `source_index` / `stroke_align` / `in_tan` /
+  `out_tan` の 0）は厳密に埋める。欠けていた側は欠けていたときと同じに描かれる
+- **継承する属性**（`fill`、`stroke_width`、Primitive / Point の `Cd`、`stroke_color`）の
+  「無い」は、`rasterize` のパラメータや囲むインスタンスから継承するという意味で、
+  密な列は「意見なし」を持てない。そこで**`rasterize` テンプレートの既定で実体化する**
+  （`fill = true`、`stroke_width = 0`、色は白）。`style` の group 外の行と同じ方針
+- **他の属性へのフォールバック**は、埋める時点で**同じ側**の参照先の値を行ごとに
+  写す。Primitive / Instance の `stroke_color` はその側の `Cd`（無ければ白）、Point の
+  `Cd` / `stroke_color` はパスの頂点なら所属プリミティブの線色（Primitive の
+  `stroke_color` > Primitive の `Cd` > 白）、パスに属さない点は白（`stroke_color` は
+  先に Point 自身の `Cd`）。`attach_piece_attributes` は、欠けた Instance の
+  `stroke_color` を同じ出力行の `Cd` から解決し、既にある出力列は上書きしない
+- **既知の限界**: 写した後の値は、下流で `Cd` を変調しても追随しない（「無い」なら
+  追随した）。`rasterize` のパラメータを既定から変えた・`color` ピンを繋いだ・囲む
+  インスタンスが `fill` / `stroke_*` を持つときも、埋めた側はテンプレート既定で描かれる。
+  「消える」よりは常に近い
+- `index` は対象外（`geometry.merge` は両側の `index` をそのまま連結し、片側が欠ければ 0。
+  `sort` / 展開は振り直す）。Detail は連結しない（A の勝ち）
 
 ### パスの頂点色と線の整列
 
@@ -442,6 +475,15 @@ result = existing + (combine(existing, sampled) - existing) * amount
 対象列が無い場合は既定で作る（`create_if_missing`）。`stroke_color` /
 `stroke_width` のように誰かが変調するまで存在しない属性を、前段に
 `attribute.set` を挟まずに変調できるようにするため。
+
+作る列の中身は、上の「欠けた列の埋め方」の**不在値**（`geometry::absent`）で、
+`alpha` への `multiply` は 1 起点、`scale` は `(1, 1)`、`pscale` は 2 起点で始まる。
+型は、`Cd` / `stroke_color` が Color、`stroke_width` が F32、`fill` が Bool
+（宣言の型で作るので数値合成はエラーになる）、不在値が float・ベクタ・色の予約名は
+その型（スカラーフィールドが `scale` を作れば Vec2）。**不在値が I32 / Bool の予約名**
+（`source_index` / `stroke_align`）と予約外の名前は、フィールドのサンプル型で作って
+型ゼロで埋める（宣言の型にすると、これまで通っていたグラフが拒否されるため）。
+Point の `Cd` をパスの頂点に作るときは、所属プリミティブの線色から始まる。
 
 どの要素に作用するかは group が決める（下記「要素スコープ」）。`amount` は
 soft な重み付け、`group` は hard な適用可否で直交する。

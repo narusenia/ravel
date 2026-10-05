@@ -358,3 +358,94 @@ fn positions_bounds(&self) -> Option<Rect> {
 **severity の根拠**: bug（誤った入力が無言で別の意味になる）。low でないのは
 永続化された値が黙って別解釈されるため、high でないのは誤りが 1 ノードに
 閉じ、データが壊れないため。
+
+---
+
+## MED-CORE-13 | bug | 属性列の連結が欠けた側を型ゼロで埋めるので、「無い」を既定値と読む予約属性が消える・透明になる
+
+> **解決済み**: #591（`FILL-1`〜`5`）と #TBD（`FILL-6`、仕様・API 地図・クローズ）。
+> `ravel-core` の `geometry::absent` が予約属性の「無いときの値」の正になった
+> （定数は `alpha` 1 / Instance `scale` `(1, 1)` / `pscale` 2 / Instance `Cd` 白、
+> `fill` / `stroke_width` / Primitive・Point の `Cd` / `stroke_color` は継承なので
+> `rasterize` テンプレートの既定で実体化し、`stroke_color` は同じ側の `Cd`、Point の
+> `Cd` は所属プリミティブの線色から行ごとに写す）。`geometry.merge` / `expand_instances` /
+> `attach_piece_attributes` / `field.apply` の作成は欠けた行をこれで埋め、予約されていない
+> 列と予約名に予約外の型が載った列は型ゼロのまま。`style` の `UNSET_*` と `rasterize` の既定の
+> 直書きは `absent` の定数を参照する（挙動は変えない）。`field.apply` の作成は、不在値が
+> float・ベクタ・色の予約名を宣言の型で作り、I32 / Bool（`source_index` / `stroke_align`）は
+> 従来どおりフィールドの型で作る。`sources_with_different_columns_fill_with_typed_zeros` と
+> `merge_unions_attributes_with_typed_zero_fill` の `pscale` の期待値は 2.0 に直した。
+> 既知の限界: 写した `stroke_color` は、下流で `Cd` を変調しても追随しない
+> （「無い」なら追随した）。
+
+**該当**: `crates/ravel-nodes/src/geometry.rs:397-466`（`geometry.merge` の
+`concat_attribute_sets` / `concat_columns`）、`crates/ravel-core/src/geometry/ops.rs:2759-2884`
+（`expand_instances` の `ColumnAccumulator` / `append_rows`）、同 `:2604-2653`
+（`attach_piece_attributes`）、`crates/ravel-core/src/geometry/field.rs:1840-1865`
+（`field.apply` の `created_column`）
+
+列の連結で片側に列が無いとき、その行を**列の型のゼロ**（`0.0`、`(0, 0)`、
+`Color::TRANSPARENT`、`false`）で埋める。一方で読み手（主に `rasterize`）は、
+予約属性の列が**無い**ことを別の値として読む。
+
+| 属性 | 無いときの読み | ゼロ埋めの結果 |
+|---|---|---|
+| `scale`（Instance） | `(1, 1)`（`InstanceColumns::placement`、`container.rs:575-590`） | `(0, 0)` でインスタンスが潰れる |
+| `alpha` | `1.0`（`rasterize/mod.rs:2056-2058`、`:859-860`） | `0.0` で透明 |
+| `Cd`（Instance） | 白（掛け算の色味。`rasterize/mod.rs:1282-1287`） | 透明で消える |
+| `Cd`（Point / Primitive） | `rasterize` の `color`（`element_color`、`:2052-2054`） | 透明で消える |
+| `pscale` | `DEFAULT_POINT_RADIUS = 2.0`（`:96`、`:1234`、`:1905`） | 半径 0 で描かれない |
+| `fill` | `rasterize` の `fill`（既定 `true`。`element_style`、`:2063-2072`） | `false` で塗られない |
+| `stroke_color` | 自分の塗り色（`Cd`）へフォールバック（`:2077-2083`） | 透明な線 |
+
+**再現**（コードで追った経路。いずれも組み込みノードだけで作れる）:
+
+1. `style.fill`（赤）を掛けたパス A と、何も掛けていないパス B を
+   `geometry.merge` → `rasterize`。B の Primitive 行は `fill = false`、
+   `Cd = (0, 0, 0, 0)` で埋まり、**B が描かれない**（期待: `rasterize` の
+   `fill` / `color` で塗られる）
+2. `geometry.from_image` の出力を、そのままの枝と `geometry.transform`
+   （`scale = 2`）を掛けた枝に分けて `geometry.merge`。ソースは同じ `Arc` なので
+   マージは通り、変換した側だけが `scale` 列を持つ（`geometry.rs:212-226` は値が
+   変わるときだけ書く）。**変換していない側の画像が `scale = (0, 0)` で消える**
+3. パス A の Point ドメインに `field.ramp` で `Cd` を書き（線の頂点色）、
+   素のパス B と `geometry.merge`。B の頂点は `Cd = 透明` の頂点色を持つので
+   **B の線が透明になる**（期待: B のプリミティブの色の線）
+4. 図形 + 文字を `geometry.merge` し、文字のインスタンスに `field.apply` で
+   `alpha` / `Cd` を書いてから `text.to_path`。インスタンス列は展開で各グリフの
+   Point / Primitive へ降りるが、ホスト自身の図形のブロックは列を持たないので
+   **ホストの図形が `alpha = 0` / `Cd = 透明`で消える**
+5. `field.apply` を `alpha` に `combine = multiply` で掛ける（列が無いので
+   `create_if_missing` が作る）。作られる列は `0.0` なので、掛けた結果も 0 で
+   **ジオメトリが透明になる**。`Cd` だけは `created_column` が白で作るよう
+   直してあるが、`alpha` / `scale` / `pscale` は型ゼロのまま
+
+**テストが欠陥を固定している**: `sources_with_different_columns_fill_with_typed_zeros`
+（`ops.rs:5584`）は `pscale` の欠けを `0.0` と、`merge_unions_attributes_with_typed_zero_fill`
+（`geometry.rs:1821`）は `[.., 0.0, 0.0]` と期待値に書いている。どちらの
+フィクスチャも `pscale` を持たない点がパスの頂点で、`rasterize` はパスの頂点を
+スプライトとして描かない（`path_vertex_mask`）ので**絵には出ない**。同じ規則を
+パスに属さない点に当てると半径 2.0 の点が消える。`a_piece_without_a_column_fills_with_the_typed_zero`
+（`scatter/mod.rs:1488`）も規則そのものを固定している（列は `char_index` で、こちらは
+予約属性の既定値を持たないので結果は正しい）。
+
+**原因**: 「列が無いときの値」の正が無い。`rasterize` の `unwrap_or`、
+`InstanceColumns` の恒等配置、`style.rs:26-33` の `UNSET_*`、`field.rs` の
+`created_column` がそれぞれ自前で持ち、連結の 3 箇所は型ゼロしか知らない。
+しかも `fill` / `stroke_width` / Point・Primitive の `Cd` / `stroke_color` の
+「無い」は定数ではなく**`rasterize` のパラメータや囲むインスタンスから継承する**
+という意味で、密な列はその「意見なし」を持てない（`style.rs:45-52` が同じ理由で
+group の種まきを拒否している）。
+
+**影響**: スタイル済みと未スタイルのジオメトリ、変換済みと未変換のインスタンスを
+マージするという普通の操作で、片側が黙って消える。エラーも警告も出ない。
+永続化されるのはノードのパラメータだけ（ジオメトリは直列化されない）ので、
+修正で壊れるデータは無い。
+
+**修正方針**: 予約属性について「列が無いときの値」を ravel-core に 1 つ置き、
+連結の 3 箇所・`field.apply` の作成・`style` の `unset`・`rasterize` の読みを
+すべてそこへ寄せる。予約されていない列は型ゼロのまま。継承する属性の扱いは
+利用者の判断が要る。計画は `docs/implementation/done/absent-attribute-fill-plan.md`。
+
+**severity の根拠**: bug（出力そのものが誤り、かつ無言）。high に近いが、
+片側に列が無いマージ・展開という条件を踏んだときだけで、データは壊れないので medium。

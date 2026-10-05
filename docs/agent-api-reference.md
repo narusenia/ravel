@@ -1372,7 +1372,30 @@ Positions::{D2(&[Vec2]), D3(&[Vec3])}   // P at the dimension a domain carries
 geometry::names // reserved attribute names: P (Vec2|Vec3), INDEX, ID, ROT,
                 // SCALE, CD, ALPHA, PSCALE, AGE, LIFE, VELOCITY, IN_TAN,
                 // OUT_TAN, ANCHOR, SOURCE_INDEX, and 3D-only ORIENT (Vec4
-                // quaternion), SCALE3 (Vec3), N (Vec3 normal)
+                // quaternion), SCALE3 (Vec3), N (Vec3 normal); ALL lists every
+                // reserved name
+
+geometry::absent // what a reserved attribute reads as when its column is absent
+                 // (the one source every row-filling site and rasterize's
+                 // defaults use; spec: procedural-geometry.md "欠けた列の埋め方")
+Absent::{Value(AttributeValue), Inherited}
+absent(Domain, name) -> Option<Absent>
+    // None = no reading of its own (unreserved, other domain, P / index / id /
+    // 3D / Detail names). Value = a constant (alpha 1, Instance scale (1, 1),
+    // pscale 2, Instance Cd white, rot / shear / source_index / stroke_align /
+    // in_tan / out_tan 0). Inherited = fill / stroke_width / Primitive|Point Cd /
+    // stroke_color, which have no constant
+absent_value(Domain, name, AttributeType) -> AttributeValue
+    // one row, no geometry needed: the constant, the rasterize template default
+    // for an Inherited name (fill true, stroke_width 0, colours white), else the
+    // typed zero (also when the type is not the reserved one)
+absent_column(&Geometry, Domain, name, AttributeType, len) -> AttributeArray
+    // the column the geometry would resolve `name` to if it carried one; reads
+    // the geometry for the fallbacks (stroke_color <- the same domain's Cd, a
+    // Point Cd <- its path's stroke colour). Typed zero for unreserved names
+DEFAULT_ALPHA / DEFAULT_PSCALE / DEFAULT_FILL / DEFAULT_STROKE_WIDTH /
+DEFAULT_COLOR     // the constants rasterize, style and the fills share
+AttributeValue::zero(AttributeType) / .attr_type()
 
 geometry::rotation   // owns rotation math: radians, ZYX euler (Rx * Ry * Rz,
                      // so Z applies first), right-handed, no 4x4 type here
@@ -1418,9 +1441,11 @@ apply_field(&geo, &FieldApply, &field, &ctx) -> Result<Geometry>
     // the xy projection of P and P itself is only rewritten when it is target.
     // A target the domain does not carry is created first (unless
     // create_if_missing is off, which restores the AttributeNotFound error):
-    // reserved names take their declared type and semantic default (Cd /
-    // stroke_color => opaque white, stroke_width => 0), anything else takes
-    // the sampled type, zeroed
+    // from geometry::absent: Cd / stroke_color / stroke_width / fill take their
+    // declared type; reserved names whose absent reading is float / vector /
+    // colour (alpha, scale, pscale, ...) take that type and start at it (alpha
+    // 1, scale (1, 1), pscale 2); I32 / Bool readings (source_index,
+    // stroke_align) and unreserved names take the sampled type, zeroed
 
 geometry::ops
 attribute_set / promote_attribute / attribute_transfer -> Result<Geometry>
@@ -1498,7 +1523,9 @@ attach_piece_attributes(&mut geo, &[InstancePiece]) -> Result<()>
     // column the output already carries is left alone** — that one rule is
     // what protects `index` / `P` / `rot` / `scale` / `shear` / `source_index`, which
     // are the scatter's own answers. A piece missing a column contributes
-    // that column's typed zero. This is what lets a stagger read
+    // that column's absent value (geometry::absent; a missing Instance
+    // stroke_color follows the same row's Cd), the typed zero for unreserved
+    // names. This is what lets a stagger read
     // `char_progress` after the characters have been dealt out
     // (REQ-MOGRAPH-004).
 stroke_reach(width, miter) -> f32
@@ -2501,7 +2528,7 @@ processor runs, and **§P** means the section's `translate` also carries
 | `text.layout` § | CPU | `FontRef` + `text` / `size` / `tracking` / `leading` / `align` / `wrap_width` / `anchor` / `writing_mode` / `position` → Geometry of one instance per grapheme cluster, glyph outlines in `instance_sources` (one per distinct cluster, addressed by `source_index`) — the same output shape `scatter.*` produces, so the existing instance path in `rasterize` draws it. Writes `index` / `P` / `rot` / `scale` plus `char_index` (per line) / `word_index` / `line_index` / `char_progress` (0..1) / `advance`; per-character animation is `field.attribute` → `field.curve_remap` → `field.apply`, not a parameter here. An unconnected `font` input resolves `DEFAULT_FAMILY` rather than failing. `writing_mode = vertical` is `vertical-rl`: it shapes with the `vert` / `vrt2` alternates, takes the column width from `vhea` and the step down the column from `vmtx` (a face with neither gets a column one em wide and rustybuzz's own `ascender - descender` step, so the two stay in proportion), and **swaps the axes** — `advance` becomes a Y step, `align` acts down the column, `anchor` across the columns leftwards, `wrap_width` limits a column's length. Line breaking pushes out (追い出し) at a cut that would begin a line with `。』」` or end one with `「（`, giving up rather than emptying a line; no hanging punctuation, no 縦中横. `position` (`ParamRole::Position`) offsets the instance `P` column after shaping, which is what makes a text block grabbable in the Viewer without a `geometry.transform` (REQ-UI-011's movement semantics): `layout_text` itself stays a pure shaping function whose origin is the origin, and `anchor` / `align` decide how the block sits against the point — hence `position` rather than `center`. **`text.on_path` rebuilds `P` from the path, so `position` has no effect downstream of it**; `text.to_path` bakes it in with the rest of the placement and keeps it |
 | `geometry.transform` | CPU | scale→rotate→translate around a pivot (`use_centroid` default on = bbox center, else the `pivot` Channel3); `translate` / `scale` / `pivot` are Channel3 and `rotation` is a Channel3 of Euler degrees; a `Vec2` `P` uses only the xy/Z components (the rest are inert, identity fast path included), a `Vec3` `P` uses all three with the fixed ZYX Euler order; transforms point `P` and instance placement (`P`, then the node's linear part composed EXACTLY with each instance's own through `InstanceTransform::compose`, so a non-uniform scale over a turned instance writes a `shear` column; `rot` / `scale` / `shear` are written only when already present or changed); CoW columns |
 | `geometry.from_image` §P | CPU | FrameBuffer → Geometry carrying it as one instance source: exactly one instance at `P = (0,0)` with `index = 0`, no points and no primitives. No parameters — the rectangle is the source's own pixel resolution centred on the origin, and placing or resizing a copy is the instance attributes the geometry operators already write. The frame is wrapped in whichever representation it arrived in, so a GPU-resident frame stays resident |
-| `geometry.merge` §P | CPU | concatenates A then B: points, primitives (vertex ranges re-based; meshes also re-base their index ranges and the index buffers are concatenated), instances; attribute union + typed-zero fill; same-name type conflict and distinct instance sources are errors; empty/unconnected side passes the other through |
+| `geometry.merge` §P | CPU | concatenates A then B: points, primitives (vertex ranges re-based; meshes also re-base their index ranges and the index buffers are concatenated), instances; attribute union, a missing column filled with its absent value (`geometry::absent`) and the typed zero for unreserved names; same-name type conflict and distinct instance sources are errors; empty/unconnected side passes the other through |
 | `scene.add` | CPU | places one value in a `Scene` with a `Transform3D`. `object` accepts GEOMETRY / SCENE — a scene on that port is the **nesting** case, which is how a transform hierarchy is built; `scene` is the scene to add into and may be unconnected, so a chain accumulates. A frame buffer is **not** placeable: an image reaches a scene as a geometry carrying it, and the processor fails with an error pointing at `geometry.from_image`. `translate` / `rotation` / `scale` / `pivot` are Channel3, same keys as `geometry.transform`; `rotation` is Euler degrees, extrinsic ZYX. Never touches `P` — projection is `scene.render`'s |
 | `scene.merge` | CPU | union of two scenes, objects and cameras alike; a missing side passes the other through |
 | `scene.camera` | CPU | source node emitting a `Scene` with exactly one `Camera` and no objects, so `scene.merge` combines cameras and objects with one node. `position` / `target` are Channel3, `projection` is a `perspective`/`orthographic` enum, `fov` / `ortho_height` / `near` / `far` are Floats (an unknown `projection` falls back to perspective rather than failing). The aspect ratio is **not** baked in here — it is read from `comp_resolution` when a projection matrix is asked for |

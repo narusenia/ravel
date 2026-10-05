@@ -1,7 +1,7 @@
 # 不在属性の埋め値を 1 箇所にする計画（`MED-CORE-13`）
 
-> **Status**: 計画 — 2026-10-05。フェーズ A6「出力そのものの誤り」
-> （[`roadmap.md`](roadmap.md#フェーズ-a6-結果がどの前提で作られたかを持つこと)）。
+> **Status**: 完了 — 2026-10-05 計画、`FILL-1`〜`FILL-6` ✅（#591 と閉じる PR）。フェーズ A6「出力そのものの誤り」
+> （[`roadmap.md`](../roadmap.md#フェーズ-a6-結果がどの前提で作られたかを持つこと)）。
 > 決定事項 3 件は 2026-10-05 にユーザー判断で確定（下記）
 
 ## 背景
@@ -9,7 +9,7 @@
 属性列を連結する処理は、片側に列が無いとき、その行を**列の型のゼロ**で埋める。
 読み手は予約属性の列が**無い**ことを別の値として読む。両者が食い違うので、
 マージや展開を通すと片側が黙って消える・透明になる
-（[`MED-CORE-13`](../../issues/medium/core-evaluator.md)）。
+（[`MED-CORE-13`](../../../issues/closed/medium-core-evaluator.md)）。
 
 2026-10-05 に main（`5f773c05`）で実測した。
 
@@ -354,3 +354,9 @@ Primitive / Point の `Cd`、`fill`、`stroke_width`、`stroke_color` の「無�
 ## 実施状況
 
 - 2026-10-05 計画。`MED-CORE-13` 起票。同日、決定事項 1〜3 をユーザー判断で確定
+- `FILL-1` ✅ #591。`geometry::absent`（`Absent` / `absent` / `absent_value` / `absent_column` / `AttributeValue::zero`）と、予約名の一覧 `names::ALL` を走査するテスト。定数（`DEFAULT_ALPHA` ほか）は `absent.rs` に置いた。Point の `Cd` の例は、プリミティブの列が密なので 1 つのジオメトリに「`stroke_color` だけ」と「`Cd` だけ」のパスを同居させられず、`stroke_color` が `Cd` に勝つ形と `Cd` だけの形の 2 つに分けた
+- `FILL-2` ✅ #591。`ColumnAccumulator` はブロックの行を溜めず、ブロックごとに追記する。後から現れた列の前方埋めに要るのはブロックのジオメトリ（借用）・行数・実効の `Cd` だけなので、それだけを覚える。`attach_piece_attributes` は `stroke_color` を最後に処理し、同じ出力行の `Cd` から解決する
+- `FILL-3` ✅ #591。`geometry.merge` は各側のジオメトリから `absent_column` で埋める。画素で確かめたのは `scale`（画像）、`style.fill` 済みと素のパス、Point の `Cd`
+- `FILL-4` ✅ #591。`created_column` は `absent_column` で作る。型は、`Cd` / `stroke_color` / `stroke_width` / `fill` は宣言の型、不在値が float・ベクタ・色の予約名（`alpha` / `scale` / `pscale` ほか）はその型、**I32 / Bool の予約名（`source_index` / `stroke_align`）はスカラーフィールドの型のまま型ゼロ**（宣言の型にすると、成功していたグラフが数値合成のエラーになるため）。`style` の `UNSET_*` は `absent::DEFAULT_*` になった
+- `FILL-5` ✅ #591。`rasterize` の `DEFAULT_POINT_RADIUS` / `unwrap_or(1.0)` / 白の直書きを `absent` の定数へ。`StrokeAlign` と Detail の `cap` / `join` の既定は Detail・Primitive の名前で `absent` に答えが無く、すでに `names::` の定数を読んでいるので触らなかった
+- `FILL-6` ✅。`procedural-geometry.md` の予約属性表に「無いとき」列と「欠けた列の埋め方」節、`agent-api-reference.md`、`MED-CORE-13` の個票（`issues/closed/`）、この計画の `done/` への移動

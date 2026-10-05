@@ -1576,7 +1576,7 @@ fn positions(geometry: &Geometry, domain: Domain) -> Result<Positions<'_>, Geome
         })??)
 }
 
-fn broadcast_value(value: &AttributeValue, count: usize) -> AttributeArray {
+pub(super) fn broadcast_value(value: &AttributeValue, count: usize) -> AttributeArray {
     match value {
         AttributeValue::F32(value) => AttributeArray::F32(vec![*value; count]),
         AttributeValue::Vec2(value) => AttributeArray::Vec2(vec![*value; count]),

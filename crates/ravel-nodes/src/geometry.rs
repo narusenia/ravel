@@ -165,6 +165,7 @@ pub fn apply_transform<'a>(
         offset: Vec2(0.0, 0.0),
         rot: rotation,
         scale,
+        shear: 0.0,
     };
     if !planar_identity {
         for name in [names::IN_TAN, names::OUT_TAN] {

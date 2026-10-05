@@ -179,6 +179,7 @@ impl Placement {
             offset: self.offset,
             rot: self.rot,
             scale: self.scale,
+            shear: 0.0,
         }
     }
 

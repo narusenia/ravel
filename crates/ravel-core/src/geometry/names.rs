@@ -21,6 +21,10 @@ pub const ID: &str = "id";
 pub const ROT: &str = "rot";
 /// Scale (Vec2, Instance). 2D only; the 3D counterpart is [`SCALE3`].
 pub const SCALE: &str = "scale";
+/// Horizontal shear factor (F32, Instance), absent meaning 0. 2D only. The
+/// placement is `R(rot) · S(scale) · H(shear)` with `H = [[1, shear], [0, 1]]`,
+/// so a composition of placements is exact (see `InstanceTransform`).
+pub const SHEAR: &str = "shear";
 /// Orientation quaternion (Vec4, Instance), 3D only (REQ-3D-003). Component
 /// order is `(x, y, z, w)` — see `geometry::rotation`, which owns the
 /// conversions. Not a keyframe target: the unified animation channel
@@ -135,6 +139,7 @@ mod tests {
                 ID,
                 ROT,
                 SCALE,
+                SHEAR,
                 ORIENT,
                 SCALE3,
                 N,
@@ -168,6 +173,7 @@ mod tests {
                 "id",
                 "rot",
                 "scale",
+                "shear",
                 "orient",
                 "scale3",
                 "N",

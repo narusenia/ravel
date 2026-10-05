@@ -3,7 +3,7 @@
 **要件**: REQ-MOGRAPH-001（要素ごとの見た目）、REQ-RENDER-001（CPU / GPU の
 出力一致）、REQ-CORE-012（属性駆動）
 
-**関連する票**: `issues/medium/gpu-nodes.md` の `MED-GPU-08`
+**関連する票**: `issues/closed/medium-gpu-nodes.md` の `MED-GPU-08`（解決済み）
 
 ## 実施状況
 

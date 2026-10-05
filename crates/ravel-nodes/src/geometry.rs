@@ -1420,6 +1420,24 @@ mod tests {
         assert_eq!(scale, Vec2(4.0, 6.0));
     }
 
+    /// A turned, non-uniform transform over unturned instances is shear-free,
+    /// so it must not grow a `shear` column (a rounding residue would).
+    #[test]
+    fn a_shear_free_transform_adds_no_shear_column() {
+        let mut geo = Geometry::new();
+        geo.set_instance_source(Some(Arc::new(Geometry::from_points(vec![Vec2(1.0, 0.0)]))));
+        geo.instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]))
+            .unwrap();
+        let params = [
+            ("rotation", ParameterValue::vec3(0.0, 0.0, 45.0)),
+            ("scale", ParameterValue::vec3(3.0, 2.0, 1.0)),
+        ];
+        let out = transformed(&params, geo);
+        assert!(out.instances().get(names::ROT).is_some());
+        assert!(out.instances().get(names::SHEAR).is_none());
+    }
+
     /// What `text.on_path` hands over: instances turned to follow a curve. A
     /// non-uniform transform over them shears, which no per-column product can
     /// hold; the reference is flattening first and transforming the points.

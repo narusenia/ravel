@@ -344,7 +344,7 @@ GPU が効くとすれば、文字単位変調（`done/per-instance-modulation-p
   であって、`scatter.*` の出力もそのまま展開できる。インスタンスを
   持たないジオメトリは素通しなので冪等
 - **配置の定義を 1 箇所にまとめた。** `rasterize` が持っていた
-  scale → rotate → translate の式を
+  shear → scale → rotate → translate の式を
   `ravel_core::geometry::InstanceTransform` に出し、`rasterize` の
   `Placement` はそれに委譲する形にした。展開した絵とラスタライズした絵が
   一致することは「同じ関数を呼ぶ」で担保する（式を 2 つ持たない）。

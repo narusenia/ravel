@@ -1428,6 +1428,22 @@ attribute_delete(&geo, Domain, name) -> Result<Geometry>
     // drops one column; a name the domain does not carry is a no-op, not an
     // error. `P` on Point/Instance is refused (RequiredAttribute): validate
     // demands it, and it may be the column holding the element count
+InstanceTransform { offset, rot, scale, shear }   // geometry::container
+    // one instance's placement; linear part = R(rot) * S(scale) * H(shear),
+    // H = [[1, shear], [0, 1]]. apply / apply_vector are that product exactly.
+    // compose(outer, inner) is the EXACT composition (2x2 product, then ONE
+    // decomposition back into rot / scale / shear), so
+    // compose(o, i).apply(p) == o.apply(i.apply(p)) for every pair, singular
+    // ones included. Where the old per-field formula was exact (outer scale
+    // uniform or inner rot 0, no shear) the same rot / scale come back.
+    // uniform_scale() is the stroke-width / sprite-radius mean and is NOT a
+    // shear-aware measure
+InstanceColumns::of(&AttributeSet) / ::lenient(&AttributeSet)
+    // the ONE reader of the rot / scale / shear columns (`of` fails on a wrong
+    // type, `lenient` reads it as absent); .placement(index, offset) builds the
+    // InstanceTransform. `P` stays the caller's. Absent column = identity, so a
+    // geometry without `shear` reads shear 0. A writer sets `shear` only when
+    // the column exists or a value is non-zero
 bounds_center(&geo) -> Option<Vec3>          // points, else instances; z = 0 in 2D
     // a PIVOT, not an extent: scatter / field / geometry read it as a centre,
     // so it does NOT include the ink drawn_bounds measures
@@ -1442,8 +1458,9 @@ drawn_bounds(&geo) -> Option<Rect>
     // delegate here — do not write a third walk.
     // The walk is `rasterize::flatten_geometry`'s, and carries what it
     // carries or it bounds less than the picture:
-    //   - placement via InstanceTransform::compose, NOT the exact affine
-    //     product (compose drops the shear on purpose; drawing does too)
+    //   - placement via InstanceTransform::compose, the EXACT affine product
+    //     (2x2 product + one decomposition into rot / scale / shear), the
+    //     same placement expand_instances and rasterize use
     //   - the inherited stroke_width, scaled by uniform_scale() at the level
     //     it strokes, widest-wins per level
     //   - the ROOT's `join` only; a source's own Detail join is not read
@@ -1465,8 +1482,8 @@ instance_pieces(&geo) -> Result<Vec<InstancePiece>>
     // splitting it collapses "aa" into one piece and loses the order).
     // InstancePiece { source: InstanceSource, attributes: AttributeSet } —
     // the attributes are the originating instance's row, one element per
-    // column, minus the placement. Each piece carries its instance's `rot`
-    // and `scale` BAKED IN and its `P` dropped: the caller is replacing the
+    // column, minus the placement. Each piece carries its instance's `rot`,
+    // `scale` and `shear` BAKED IN and its `P` dropped: the caller is replacing the
     // layout, which is the point. A source with instances of its own keeps
     // them, with the outer placement composed onto each (inner applies
     // first), so a split adds no level and MAX_INSTANCE_DEPTH means the same
@@ -1479,7 +1496,7 @@ attach_piece_attributes(&mut geo, &[InstancePiece]) -> Result<()>
     // broadcasts each piece's row onto the output instances that stamp it,
     // selected by `source_index` with the rasterizer's clamping rule. **A
     // column the output already carries is left alone** — that one rule is
-    // what protects `index` / `P` / `rot` / `scale` / `source_index`, which
+    // what protects `index` / `P` / `rot` / `scale` / `shear` / `source_index`, which
     // are the scatter's own answers. A piece missing a column contributes
     // that column's typed zero. This is what lets a stagger read
     // `char_progress` after the characters have been dealt out
@@ -2482,7 +2499,7 @@ processor runs, and **§P** means the section's `translate` also carries
 | `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |
 | `text.font` | CPU | `family` / `weight` / `style` → `FontRef` (`DataTypeId::FONT`), through `ravel_core::text::shared()`. **Never fails**: a family this machine does not have yields the built-in face with `is_fallback` set plus one warning, so a project authored elsewhere renders in the wrong font rather than erroring. Stateless — the library owns the index and both caches |
 | `text.layout` § | CPU | `FontRef` + `text` / `size` / `tracking` / `leading` / `align` / `wrap_width` / `anchor` / `writing_mode` / `position` → Geometry of one instance per grapheme cluster, glyph outlines in `instance_sources` (one per distinct cluster, addressed by `source_index`) — the same output shape `scatter.*` produces, so the existing instance path in `rasterize` draws it. Writes `index` / `P` / `rot` / `scale` plus `char_index` (per line) / `word_index` / `line_index` / `char_progress` (0..1) / `advance`; per-character animation is `field.attribute` → `field.curve_remap` → `field.apply`, not a parameter here. An unconnected `font` input resolves `DEFAULT_FAMILY` rather than failing. `writing_mode = vertical` is `vertical-rl`: it shapes with the `vert` / `vrt2` alternates, takes the column width from `vhea` and the step down the column from `vmtx` (a face with neither gets a column one em wide and rustybuzz's own `ascender - descender` step, so the two stay in proportion), and **swaps the axes** — `advance` becomes a Y step, `align` acts down the column, `anchor` across the columns leftwards, `wrap_width` limits a column's length. Line breaking pushes out (追い出し) at a cut that would begin a line with `。』」` or end one with `「（`, giving up rather than emptying a line; no hanging punctuation, no 縦中横. `position` (`ParamRole::Position`) offsets the instance `P` column after shaping, which is what makes a text block grabbable in the Viewer without a `geometry.transform` (REQ-UI-011's movement semantics): `layout_text` itself stays a pure shaping function whose origin is the origin, and `anchor` / `align` decide how the block sits against the point — hence `position` rather than `center`. **`text.on_path` rebuilds `P` from the path, so `position` has no effect downstream of it**; `text.to_path` bakes it in with the rest of the placement and keeps it |
-| `geometry.transform` | CPU | scale→rotate→translate around a pivot (`use_centroid` default on = bbox center, else the `pivot` Channel3); `translate` / `scale` / `pivot` are Channel3 and `rotation` is a Channel3 of Euler degrees; a `Vec2` `P` uses only the xy/Z components (the rest are inert, identity fast path included), a `Vec3` `P` uses all three with the fixed ZYX Euler order; transforms point `P` and instance placement (`P` + `rot` offset + component-wise `scale`); CoW columns |
+| `geometry.transform` | CPU | scale→rotate→translate around a pivot (`use_centroid` default on = bbox center, else the `pivot` Channel3); `translate` / `scale` / `pivot` are Channel3 and `rotation` is a Channel3 of Euler degrees; a `Vec2` `P` uses only the xy/Z components (the rest are inert, identity fast path included), a `Vec3` `P` uses all three with the fixed ZYX Euler order; transforms point `P` and instance placement (`P`, then the node's linear part composed EXACTLY with each instance's own through `InstanceTransform::compose`, so a non-uniform scale over a turned instance writes a `shear` column; `rot` / `scale` / `shear` are written only when already present or changed); CoW columns |
 | `geometry.from_image` §P | CPU | FrameBuffer → Geometry carrying it as one instance source: exactly one instance at `P = (0,0)` with `index = 0`, no points and no primitives. No parameters — the rectangle is the source's own pixel resolution centred on the origin, and placing or resizing a copy is the instance attributes the geometry operators already write. The frame is wrapped in whichever representation it arrived in, so a GPU-resident frame stays resident |
 | `geometry.merge` §P | CPU | concatenates A then B: points, primitives (vertex ranges re-based; meshes also re-base their index ranges and the index buffers are concatenated), instances; attribute union + typed-zero fill; same-name type conflict and distinct instance sources are errors; empty/unconnected side passes the other through |
 | `scene.add` | CPU | places one value in a `Scene` with a `Transform3D`. `object` accepts GEOMETRY / SCENE — a scene on that port is the **nesting** case, which is how a transform hierarchy is built; `scene` is the scene to add into and may be unconnected, so a chain accumulates. A frame buffer is **not** placeable: an image reaches a scene as a geometry carrying it, and the processor fails with an error pointing at `geometry.from_image`. `translate` / `rotation` / `scale` / `pivot` are Channel3, same keys as `geometry.transform`; `rotation` is Euler degrees, extrinsic ZYX. Never touches `P` — projection is `scene.render`'s |

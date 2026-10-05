@@ -265,7 +265,7 @@ hover 判定は**すべて既存のヒットテストの再利用**で足りる
 | クラスタ | 内容 |
 |---|---|
 | 結果と前提の対応付け | `MED-APP-37`（評価結果が届いた時点のコンプと対で扱われ、切替中の結果を別コンプの寸法で解釈する）、`MED-APP-38`（表示設定の切り替えが「飛んでいる評価」を締め出さず、古い設定のフレームがキャッシュに戻る）、`MED-APP-39`（プレビュー解像度を切り替えてもキャッシュ帯が前の係数のまま残る）、`MED-MED-08`（共有デコードキャッシュのキーに素材の版が無く、同一パスの上書き後も古いフレームを返し続ける） |
-| 出力そのものの誤り | ~~`MED-GPU-09`~~（✅ #585 / #586 インスタンス配置を予約属性 `shear` 込みの厳密な合成にした。個票は `issues/closed/medium-gpu-nodes.md`）、~~`MED-CORE-12`~~（✅ `attribute.promote` と `field.apply` のドメインに選択肢を宣言。個票は `issues/closed/medium-core-evaluator.md`）、~~`MED-MED-09`~~（✅ EXR / PNG のヘッダの色宣言を読むようにした。個票は `issues/closed/medium-media-audio.md`） |
+| 出力そのものの誤り | ~~`MED-GPU-09`~~（✅ #585 / #586 インスタンス配置を予約属性 `shear` 込みの厳密な合成にした。個票は `issues/closed/medium-gpu-nodes.md`）、~~`MED-CORE-12`~~（✅ `attribute.promote` と `field.apply` のドメインに選択肢を宣言。個票は `issues/closed/medium-core-evaluator.md`）、~~`MED-MED-09`~~（✅ EXR / PNG のヘッダの色宣言を読むようにした。個票は `issues/closed/medium-media-audio.md`）、`MED-CORE-13`（属性列の連結が欠けた側を型ゼロで埋め、`scale` で潰れる・`alpha` / `Cd` / `fill` で透明になる。`absent-attribute-fill-plan.md`） |
 | 消える | ~~`MED-MED-06`~~（✅ 上書き拒否のときは最終配置を `hard_link` で行い、置換しない。個票は `issues/closed/medium-media-audio.md`） |
 
 **基準 0 に該当するので、本来は A 系と同じ高さにある。** ここに独立した
@@ -293,6 +293,8 @@ hover 判定は**すべて既存のヒットテストの再利用**で足りる
 計画は 2026-09-30 に起こした。受け入れ地点ごとに識別子を照合する形で、`PROV-1`（Viewer の fence）・`PROV-2`（帯の鍵）・`PROV-3`（insert epoch）・`PROV-4`（素材の版）は独立に着手でき、`PROV-5`（監視）が `PROV-4` に続く。起こす際に 4 件と残り 4 件（`MED-GPU-09` / `MED-CORE-12` / `MED-MED-06` / `MED-MED-09`）が main で未修正であることを現物で確認した。`MED-CORE-12` の個票が挙げる `attribute.curveu` にはドメインパラメータが無く、直す対象は `attribute.promote` の 2 パラメータと、個票に漏れていた `field.apply` の `domain`。
 
 `MED-GPU-09` は 2026-09-30 に計画を起こした（`done/instance-transform-shear-plan.md`）。コア・rasterize（WGSL を含む）・`geometry.transform` の 3 層にまたがり、属性の表現を変えるので Design gate に当たる。調べると `expand_instances` は既に厳密で、描画・バウンズ・ピースと食い違っていた。`geometry.transform` にも `compose` を通らない同じ近似があり、組み込みノードだけで踏める。
+
+`MED-CORE-13` は 2026-10-05 に起票し、同日に計画を起こした（`absent-attribute-fill-plan.md`）。`MED-GPU-09` の計画が「非対象」に残した `merge` の `scale` 潰れを測ると、欠陥は `merge` だけでなく列を埋める 5 箇所（`merge`・`expand_instances`・ピース・`field.apply` の作成・`style` の `unset`）に共通で、「列が無いときの値」の正がどこにも無いことだった。コアと ravel-nodes にまたがり読み手の既定も寄せるので Design gate に当たる。`style` 済みと素のジオメトリの `merge` で素の側が消えるので、組み込みノードだけで踏める。継承する属性の埋め方など 3 点は同日にユーザー判断で決まり（計画の決定事項）、`FILL-1` は依存なしで着手でき、`FILL-2`〜`5` が `FILL-1` に続く。
 
 **`MED-APP-02` はこのフェーズを起こした時点で既に解決していた** —
 `HIGH-24`（フェーズ A4）の修正が `tick_with` の「変化なし」判定に再生状態の

@@ -891,7 +891,8 @@ REQ-RENDER-001 / 002 / 003 と REQ-RENDER-005 の未実装が解消した。
 > CPU（zeno は被覆マスクしか返さない）と GPU の両方で線を補間する方式は、
 > `path-shading-plan.md` の案 A（塗りは従来どおりプリミティブ値 1 色）に確定した。
 > `stroke_align` を `style-attributes-plan.md` 単位 3 へ繰り延べたのと同じ構図で、
-> **まとめて別計画で扱う**。→ `issues/medium/gpu-nodes.md` の `MED-GPU-08`
+> **まとめて別計画で扱う**。→ `issues/closed/medium-gpu-nodes.md` の `MED-GPU-08`
+> （`path-shading-plan.md` の `PSHADE-1`〜`3` / `5` で解決、#587, #TBD）
 
 ## フェーズ E: 見て、触れる
 

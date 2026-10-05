@@ -5,6 +5,30 @@
 
 **関連する票**: `issues/medium/gpu-nodes.md` の `MED-GPU-08`
 
+## 実施状況
+
+| 単位 | 状態 | PR |
+| --- | --- | --- |
+| `PSHADE-1` per-pixel 評価器 | 実装済み | #587 |
+| `PSHADE-2` 線の頂点色補間 | 実装済み | #587 |
+| `PSHADE-3` `stroke_align` | 実装済み | #TBD |
+| `PSHADE-5` ゴールデンと文書 | 実装済み（`MED-GPU-08` を閉じた） | #TBD |
+| `PSHADE-6` 要素ごとのグラデーション塗り | 未着手（`FX-3` 待ち） | — |
+
+実装時に決めたこと:
+
+- 評価器は `rasterize/sample.rs` の非公開 `path_sample`。`ravel_core::geometry::path_sample`
+  （弧長サンプリング）とは別物。4 つの返り値に加えて、閉じるセグメントの終点が
+  `nearest_segment + 1` でないので `segment_end` を返す
+- 頂点色の優先順位は Point の `stroke_color` > Point の `Cd` > プリミティブの値
+- 頂点色は被覆を変えないので CPU は zeno の被覆のまま、色だけ画素ごとに引く
+- `stroke_align` の内側・外側は被覆を変えるので CPU も zeno を使わず、符号付き距離の帯で
+  作る。`cap` / `join` / `dash` は効かない。開いたパスは常に中央。外側は
+  `drawn_bounds` の線幅を 2 倍にして伸ばす
+- GPU は頂点色を `path_vertices` と並行するストレージバッファ（binding 3、画像テクスチャは
+  binding 4 へ）で送り、`DrawItem` は広げていない。`data1.z` が色の開始位置 + 1
+  （0 = 頂点色なし）、`data1.w` が整列
+
 ## 問題
 
 `rasterize` の CPU 経路と GPU 経路が**per-pixel の幾何情報を持っているか**で

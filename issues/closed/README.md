@@ -64,7 +64,7 @@
 | [HIGH-34](HIGH-34-offline-media-renders-silently-transparent.md) | オフラインの素材がレンダー結果を黙って透明にする（機械可読な警告が無い） | `WARN-2`（`media-offline` / `media-unreadable`） |
 | [HIGH-35](HIGH-35-identifier-parameters-can-be-driven-by-a-wire.md) | 参照 ID のパラメータをフレームごとに動かせ、ID の予約が外れる | `WARN-1`（読み口を `ParameterValue::identifier` へ集約） |
 
-## medium（70件）
+## medium（71件）
 
 - [medium-app-shell.md](medium-app-shell.md) — `MED-APP-01` `02` `03` `04` `05` `06` `07` `08` `12` `15` `16` `17` `18` `19` `20` `21` `22` `23` `24` `25` `26` `27` `28` `29` `30` `31` `32` `33` `34` `35` `36` `37` `38` `39` `44` `45` `46`（`MED-APP-44` は起票時 `MED-APP-30` で、`30` と衝突していたので振り直した）
 - [medium-core-evaluator.md](medium-core-evaluator.md) — `MED-CORE-01` `02` `03` `05` `06` `07` `09` `10` `11` `12`
@@ -75,7 +75,7 @@
 - [medium-ui-rendering.md](medium-ui-rendering.md) — `MED-UI-01` `02` `03` `04` `05` `06` `07`
   （起票分すべて解決。[`../medium/ui-rendering.md`](../medium/ui-rendering.md) は
   「問題なしと確認した箇所」だけが残る）
-- [medium-media-audio.md](medium-media-audio.md) — `MED-MED-03` `04` `05` `07` `08` `09` / `MED-AUD-01` `02` `03`
+- [medium-media-audio.md](medium-media-audio.md) — `MED-MED-03` `04` `05` `06` `07` `08` `09` / `MED-AUD-01` `02` `03`
 
 ## low（13件）
 

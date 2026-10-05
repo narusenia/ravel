@@ -10,13 +10,14 @@
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
+use ravel_core::geometry::absent::absent_column;
 use ravel_core::geometry::{
     AttributeArray, AttributeSet, ConnectInterpolation, ConnectMode, Domain, Geometry,
     InstanceColumns, InstanceImage, InstanceSource, InstanceTransform, SortMode, bounds_center,
     connect, names, sort,
 };
 use ravel_core::graph::Node;
-use ravel_core::types::{Color, NodeData, Vec2, Vec3, Vec4};
+use ravel_core::types::{NodeData, Vec2, Vec3};
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -273,7 +274,10 @@ fn transform_positions(
 /// Points, primitives (vertex ranges re-based onto the combined point
 /// list), and instances are appended A-then-B. Attribute columns are the
 /// **union** of both sides; a column missing on one side is filled with
-/// the typed zero for that side's rows (Houdini semantics). A same-name
+/// what a reader sees without that column for that side's rows
+/// (`ravel_core::geometry::absent`: `alpha` 1, an instance's `scale`
+/// (1, 1), a point's `pscale` 2, ...), and the typed zero for a name that is
+/// not reserved (Houdini semantics). A same-name
 /// type conflict is an error. Detail attributes take A wholesale (B's
 /// detail only when A has none), and merging two distinct instance
 /// sources is unsupported. An unconnected or empty input passes the
@@ -326,24 +330,9 @@ impl NodeProcessor for GeometryMergeProcessor {
         // Fill lengths come from the domain's element count, not the
         // attribute set's column length — a side may have primitives (or
         // points/instances) without any attribute columns on that domain.
-        *out.points_mut() = concat_attribute_sets(
-            a.points(),
-            b.points(),
-            (a.point_count(), b.point_count()),
-            Domain::Point,
-        )?;
-        *out.primitive_attrs_mut() = concat_attribute_sets(
-            a.primitive_attrs(),
-            b.primitive_attrs(),
-            (a.primitive_count(), b.primitive_count()),
-            Domain::Primitive,
-        )?;
-        *out.instances_mut() = concat_attribute_sets(
-            a.instances(),
-            b.instances(),
-            (a.instance_count(), b.instance_count()),
-            Domain::Instance,
-        )?;
+        *out.points_mut() = concat_attribute_sets(a, b, Domain::Point)?;
+        *out.primitive_attrs_mut() = concat_attribute_sets(a, b, Domain::Primitive)?;
+        *out.instances_mut() = concat_attribute_sets(a, b, Domain::Instance)?;
         // Detail is not a concatenable domain: A wins wholesale.
         *out.detail_mut() = if a.detail().element_count() > 0 {
             a.detail().clone()
@@ -393,77 +382,70 @@ impl NodeProcessor for GeometryMergeProcessor {
 }
 
 /// Concatenates the union of both sides' columns; rows missing on one side
-/// are filled with that column type's zero value.
+/// are filled with what a reader sees without the column
+/// ([`absent_column`], read off that side), the typed zero for a name that is
+/// not reserved.
 fn concat_attribute_sets(
-    a: &AttributeSet,
-    b: &AttributeSet,
-    (len_a, len_b): (usize, usize),
+    a: &Geometry,
+    b: &Geometry,
     domain: Domain,
 ) -> anyhow::Result<AttributeSet> {
+    let (set_a, set_b) = (a.attribute_set(domain), b.attribute_set(domain));
+    let count = |geometry: &Geometry| match domain {
+        Domain::Point => geometry.point_count(),
+        Domain::Primitive => geometry.primitive_count(),
+        Domain::Instance => geometry.instance_count(),
+        Domain::Detail => geometry.detail().element_count(),
+    };
+    // Fill lengths come from the domain's element count, not the attribute
+    // set's column length — a side may have primitives (or points/instances)
+    // without any attribute columns on that domain.
+    let (len_a, len_b) = (count(a), count(b));
     let mut out = AttributeSet::new();
-    let names: Vec<&str> = a
+    let names: Vec<&str> = set_a
         .iter()
         .map(|(name, _)| name.as_str())
         .chain(
-            b.iter()
-                .filter(|(name, _)| a.get(name).is_none())
+            set_b
+                .iter()
+                .filter(|(name, _)| set_a.get(name).is_none())
                 .map(|(name, _)| name.as_str()),
         )
         .collect();
     for name in names {
-        let column = match (a.get(name), b.get(name)) {
+        let attr_type = match (set_a.get(name), set_b.get(name)) {
             (Some(ca), Some(cb)) if ca.attr_type() != cb.attr_type() => anyhow::bail!(
                 "geometry.merge: {domain:?} attribute {name:?} type mismatch ({} vs {})",
                 ca.attr_type(),
                 cb.attr_type()
             ),
-            (ca, cb) => {
-                let proto = ca.or(cb).expect("name came from one side");
-                concat_columns(
-                    ca.map(Arc::as_ref),
-                    cb.map(Arc::as_ref),
-                    proto,
-                    len_a,
-                    len_b,
-                )
-            }
+            (ca, cb) => ca.or(cb).expect("name came from one side").attr_type(),
         };
+        let side = |geometry: &Geometry, set: &AttributeSet, len| match set.get(name) {
+            Some(column) => column.as_ref().clone(),
+            None => absent_column(geometry, domain, name, attr_type, len),
+        };
+        let column = concat_columns(side(a, set_a, len_a), &side(b, set_b, len_b))
+            .ok_or_else(|| anyhow::anyhow!("geometry.merge: {name:?} columns disagree in type"))?;
         out.insert(name.to_owned(), column)?;
     }
     Ok(out)
 }
 
-/// `a ++ b` with typed-zero fill for a missing side.
-fn concat_columns(
-    a: Option<&AttributeArray>,
-    b: Option<&AttributeArray>,
-    proto: &AttributeArray,
-    len_a: usize,
-    len_b: usize,
-) -> AttributeArray {
-    macro_rules! concat_as {
-        ($variant:ident, $zero:expr) => {{
-            let mut merged = match a {
-                Some(AttributeArray::$variant(v)) => v.clone(),
-                _ => vec![$zero; len_a],
-            };
-            match b {
-                Some(AttributeArray::$variant(v)) => merged.extend(v.iter().cloned()),
-                _ => merged.extend(std::iter::repeat_n($zero, len_b)),
+/// `a ++ b`; `None` when the two are not the same type.
+fn concat_columns(mut a: AttributeArray, b: &AttributeArray) -> Option<AttributeArray> {
+    macro_rules! extend {
+        ($($variant:ident),*) => {
+            match (&mut a, b) {
+                $((AttributeArray::$variant(a), AttributeArray::$variant(b)) => {
+                    a.extend(b.iter().cloned())
+                })*
+                _ => return None,
             }
-            AttributeArray::$variant(merged)
-        }};
+        };
     }
-    match proto {
-        AttributeArray::F32(_) => concat_as!(F32, 0.0),
-        AttributeArray::Vec2(_) => concat_as!(Vec2, Vec2(0.0, 0.0)),
-        AttributeArray::Vec3(_) => concat_as!(Vec3, Vec3(0.0, 0.0, 0.0)),
-        AttributeArray::Vec4(_) => concat_as!(Vec4, Vec4(0.0, 0.0, 0.0, 0.0)),
-        AttributeArray::Color(_) => concat_as!(Color, Color::TRANSPARENT),
-        AttributeArray::I32(_) => concat_as!(I32, 0),
-        AttributeArray::Bool(_) => concat_as!(Bool, false),
-        AttributeArray::Str(_) => concat_as!(Str, String::new()),
-    }
+    extend!(F32, Vec2, Vec3, Vec4, Color, I32, Bool, Str);
+    Some(a)
 }
 
 /// `geometry.connect`: run one path through the points without adding any.
@@ -623,7 +605,7 @@ mod tests {
     use ravel_core::geometry::Primitive;
     use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
-    use ravel_core::types::{FrameBuffer, FrameRate};
+    use ravel_core::types::{Color, FrameBuffer, FrameRate};
 
     fn ctx() -> EvalContext {
         EvalContext::new(0, FrameRate::new(30, 1), (64, 64))
@@ -1818,7 +1800,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_unions_attributes_with_typed_zero_fill() {
+    fn merge_unions_attributes_filling_each_side_with_its_absent_value() {
         let out = eval_merge(Some(Arc::new(geo_a())), Some(Arc::new(geo_b())));
         let geo = out.downcast_ref::<Geometry>().unwrap();
         let pscale = geo
@@ -1827,7 +1809,11 @@ mod tests {
             .unwrap()
             .as_f32(names::PSCALE)
             .unwrap();
-        assert_eq!(pscale, [1.0, 2.0, 3.0, 4.0, 0.0, 0.0]);
+        // B's points carry no `pscale`, which a reader takes as radius 2 (not
+        // 0, which would draw them with no radius).
+        assert_eq!(pscale, [1.0, 2.0, 3.0, 4.0, 2.0, 2.0]);
+        // `Cd` is reserved but this column is a `Vec3`, not the colour the
+        // name means, so the typed zero is still the right fill.
         let cd = geo
             .points()
             .get(names::CD)
@@ -1905,6 +1891,174 @@ mod tests {
             .as_i32("mat")
             .unwrap();
         assert_eq!(mat, [0, 7], "A's row zero-filled, B's row appended");
+    }
+
+    /// `rasterize` (fill, no stroke unless asked) of `geo` on the test canvas.
+    fn rasterized(geo: &Geometry, fill: bool, stroke_width: f32) -> FrameBuffer {
+        let node = Node::new(NodeId::new(2), "rasterize")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_output("frame", DataTypeId::FRAME_BUFFER)
+            .with_param("fill", ParameterValue::Bool(fill))
+            .with_param("stroke_width", ParameterValue::Float(stroke_width));
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "test.source")
+                    .with_output("output", DataTypeId::GEOMETRY),
+            )
+            .unwrap()
+            .add_node(node.clone())
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(Fixed(Arc::new(geo.clone()))));
+        ev.register(
+            NodeId::new(2),
+            Arc::new(crate::rasterize::RasterizeProcessor::from_node(&node)),
+        );
+        let out = ev.evaluate(&graph, NodeId::new(2), &ctx()).unwrap();
+        out.downcast_ref::<FrameBuffer>()
+            .expect("a frame buffer")
+            .clone()
+    }
+
+    fn pixel(fb: &FrameBuffer, x: u32, y: u32) -> [f32; 4] {
+        let at = ((y * fb.width + x) * 4) as usize;
+        fb.as_f32()[at..at + 4].try_into().unwrap()
+    }
+
+    /// A rectangle path `x..x + 8`, `y..y + 8`.
+    fn square_at(x: f32, y: f32) -> Geometry {
+        let mut geo = Geometry::from_points(vec![
+            Vec2(x, y),
+            Vec2(x + 8.0, y),
+            Vec2(x + 8.0, y + 8.0),
+            Vec2(x, y + 8.0),
+        ]);
+        geo.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        geo
+    }
+
+    /// An image next to the same image scaled by 2: the side that was never
+    /// transformed has no `scale` column, which reads as (1, 1), so its image
+    /// keeps its size instead of collapsing to a point.
+    #[test]
+    fn merging_with_a_scaled_image_keeps_the_unscaled_one_at_full_size() {
+        let frame: Arc<dyn NodeData> =
+            Arc::new(FrameBuffer::from_f32(8, 8, [1.0, 0.0, 0.0, 1.0].repeat(64)));
+        let from = || as_geometry(&from_image(Some(frame.clone())).unwrap()).clone();
+        let mut plain = from();
+        plain
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(12.0, 10.0)]))
+            .unwrap();
+        let mut moved = from();
+        moved
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(40.0, 10.0)]))
+            .unwrap();
+        let scaled = transformed(&[("scale", ParameterValue::vec3(2.0, 2.0, 1.0))], moved);
+
+        let out = eval_merge(Some(Arc::new(plain)), Some(Arc::new(scaled)));
+        let merged = as_geometry(&out);
+        let scale = merged
+            .instances()
+            .get(names::SCALE)
+            .unwrap()
+            .as_vec2(names::SCALE)
+            .unwrap();
+        assert_eq!(scale, [Vec2(1.0, 1.0), Vec2(2.0, 2.0)]);
+
+        let fb = rasterized(merged, true, 0.0);
+        // 8 px wide at (12, 10): spans 8..16.
+        assert!(pixel(&fb, 12, 10)[3] > 0.9 && pixel(&fb, 9, 10)[3] > 0.9);
+        assert!(pixel(&fb, 17, 10)[3] < 1e-6, "not larger than 8 px");
+        // 16 px wide at (40, 10): spans 32..48.
+        assert!(pixel(&fb, 40, 10)[3] > 0.9 && pixel(&fb, 46, 10)[3] > 0.9);
+    }
+
+    /// A styled path next to a bare one: the bare one is drawn the way
+    /// `rasterize` draws a path with no colour (white, filled), where a typed
+    /// zero would make its `Cd` transparent and the path vanish.
+    #[test]
+    fn a_bare_path_merged_with_a_styled_one_is_still_drawn_in_the_default_colour() {
+        let red = Color::new(1.0, 0.0, 0.0, 1.0);
+        let mut styled = square_at(2.0, 2.0);
+        // What `style.fill` writes on the primitive domain.
+        styled
+            .primitive_attrs_mut()
+            .insert(names::FILL, AttributeArray::Bool(vec![true]))
+            .unwrap();
+        styled
+            .primitive_attrs_mut()
+            .insert(names::CD, AttributeArray::Color(vec![red]))
+            .unwrap();
+        let out = eval_merge(Some(Arc::new(styled)), Some(Arc::new(square_at(20.0, 2.0))));
+        let fb = rasterized(as_geometry(&out), true, 0.0);
+        assert_eq!(pixel(&fb, 5, 5), [1.0, 0.0, 0.0, 1.0], "the styled path");
+        assert_eq!(pixel(&fb, 23, 5), [1.0, 1.0, 1.0, 1.0], "the bare path");
+    }
+
+    /// A line whose points carry `Cd`, beside a line coloured only through its
+    /// primitive: the second line's points read as its primitive's colour, so
+    /// its stroke stays blue rather than turning transparent.
+    #[test]
+    fn a_line_without_point_colours_keeps_its_primitive_colour_when_merged() {
+        let line = |y: f32| {
+            let mut geo = Geometry::from_points(vec![Vec2(4.0, y), Vec2(28.0, y)]);
+            geo.push_primitive(Primitive::Path {
+                verts: 0..2,
+                closed: false,
+            });
+            geo
+        };
+        let red = Color::new(1.0, 0.0, 0.0, 1.0);
+        let blue = Color::new(0.0, 0.0, 1.0, 1.0);
+        let mut points_coloured = line(10.0);
+        points_coloured
+            .points_mut()
+            .insert(names::CD, AttributeArray::Color(vec![red; 2]))
+            .unwrap();
+        let mut primitive_coloured = line(40.0);
+        primitive_coloured
+            .primitive_attrs_mut()
+            .insert(names::CD, AttributeArray::Color(vec![blue]))
+            .unwrap();
+        let out = eval_merge(
+            Some(Arc::new(points_coloured)),
+            Some(Arc::new(primitive_coloured)),
+        );
+        let fb = rasterized(as_geometry(&out), false, 4.0);
+        assert_eq!(pixel(&fb, 16, 10), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(pixel(&fb, 16, 40), [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    /// One side's `alpha` is the only one on the page: the other reads as
+    /// opaque, not as 0.
+    #[test]
+    fn a_side_without_alpha_merges_as_opaque() {
+        let mut half = geo_b();
+        half.points_mut()
+            .insert(names::ALPHA, AttributeArray::F32(vec![0.5, 0.5]))
+            .unwrap();
+        let out = eval_merge(Some(Arc::new(geo_a())), Some(Arc::new(half)));
+        let alpha = as_geometry(&out)
+            .points()
+            .get(names::ALPHA)
+            .unwrap()
+            .as_f32(names::ALPHA)
+            .unwrap()
+            .to_vec();
+        assert_eq!(alpha, [1.0, 1.0, 1.0, 1.0, 0.5, 0.5]);
     }
 
     #[test]

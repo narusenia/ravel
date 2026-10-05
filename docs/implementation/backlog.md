@@ -73,7 +73,6 @@
 | 3D-4 | 三角形レンダラと `scene.render` | `3d-scene-plan.md` |
 | FRAC-2 | `geometry.cell_fracture`（2D） | `geometry-fracture-plan.md` |
 | FRAC-3 | `geometry.cell_fracture_3d`（`3D-1a` / `3D-1b` ✅ で依存が解けた） | `geometry-fracture-plan.md` |
-| FILL-6 | 仕様の予約属性表に「無いとき」列、API 地図、`MED-CORE-13` と計画のクローズ | `done/absent-attribute-fill-plan.md` |
 
 FX-1〜4 と OPS-1〜5 は互いに独立で、並列委譲しやすい。
 
@@ -514,7 +513,7 @@ hover 判定は既存ヒットテストの再利用に限り、新しいレイ�
 | FILL-3 | ✅ | #591 `geometry.merge` の連結を不在値で埋める（`scale` で潰れる・`style` 済みと素のマージで消える、`MED-CORE-13`）。固定テストの書き換え | FILL-1 |
 | FILL-4 | ✅ | #591 `field.apply` の `created_column` と `style` の `UNSET_*` を `absent` へ | FILL-1 |
 | FILL-5 | ✅ | #591 `rasterize` の既定値の直書き（`DEFAULT_POINT_RADIUS`、`unwrap_or(1.0)` ほか）を `absent` の定数へ（挙動不変） | FILL-1 |
-| FILL-6 | 🟡 | 仕様の予約属性表に「無いとき」列、API 地図、個票と計画のクローズ | FILL-1〜5 |
+| FILL-6 | ✅ | #592 仕様の予約属性表に「無いとき」列、API 地図、個票と計画のクローズ | FILL-1〜5 |
 
 連結の 3 箇所（`merge` / 展開 / ピース）は欠けた行を型ゼロで埋めていたが、読み手は `scale` を `(1, 1)`、`alpha` を 1、`pscale` を 2、Instance の `Cd` を白と読む。`fill` / `stroke_width` / Primitive の `Cd` / `stroke_color` の「無い」は `rasterize` のパラメータや囲むインスタンスからの継承で、密な列では表せない — テンプレート既定で埋め、他の属性へのフォールバックは同じ側の参照先を行ごとに写す。`field.apply` の作成も同じ不在値を使う（2026-10-05 決定）。
 

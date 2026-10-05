@@ -17,10 +17,11 @@ struct DrawItem {
     //           every contour of the item and the `CONTOUR_BREAK` sentinels
     //           between them
     //   sprite: center x, center y, radius
-    //   image:  placement offset x, offset y, rotation
+    //   image:  placement offset x, offset y, unused
     data0: vec4<f32>,
     // path:  fill flag, stroke width, unused, unused
-    // image: placement scale x, scale y, rectangle half width, half height
+    // image: unused, unused, rectangle half width, half height (the inverse
+    //        of the placement's linear part rides in `stroke_color`)
     data1: vec4<f32>,
 }
 
@@ -199,15 +200,13 @@ fn sample_image_source(uv: vec2<f32>, dimensions: vec2<i32>) -> vec4<f32> {
 /// along the edge they share.
 fn image_color(item: DrawItem, position: vec2<f32>) -> vec4<f32> {
     let half_size = item.data1.zw;
-    let scale = item.data1.xy;
     let delta = position - item.data0.yz;
-    let angle = item.data0.w;
-    let sine = sin(angle);
-    let cosine = cos(angle);
-    // `Placement::apply` inverted: unrotate, then undo the scale.
+    // `Placement::apply` inverted: `stroke_color` carries the inverse of the
+    // placement's linear part, row-major `(a, b, c, d)`.
+    let inverse = item.stroke_color;
     let local = vec2<f32>(
-        (delta.x * cosine + delta.y * sine) / scale.x,
-        (delta.y * cosine - delta.x * sine) / scale.y,
+        inverse.x * delta.x + inverse.y * delta.y,
+        inverse.z * delta.x + inverse.w * delta.y,
     );
     if local.x < -half_size.x || local.x >= half_size.x
         || local.y < -half_size.y || local.y >= half_size.y {

@@ -34,7 +34,7 @@ Geometry
 │     Primitive = Path { verts: Range, closed }
 │               | Mesh { verts: Range, indices: Range }
 ├── instances:   AttributeSet   (domain = Instance)   — source: GeometryRef,
-│                                                       P / rot / scale / index
+│                                                       P / rot / scale / shear / index
 └── detail:      AttributeSet   (domain = Detail)     — ジオメトリ全体で1値
 ```
 
@@ -89,19 +89,23 @@ CPU 経路は texel を読むので、GPU 常駐フレームで来た画像は�
 
 規約:
 
-- **ピースは `rot` / `scale` を焼き込み、`P` を捨てる。** 配置を決め直すのが
+- **ピースは `rot` / `scale` / `shear` を焼き込み、`P` を捨てる。** 配置を決め直すのが
   分解する側の目的なので、レイアウト位置は持ち越さない。式は
   `InstanceTransform` の 1 本だけで、平行移動を外した形で使う
 - **ピースは自分の出自（元のインスタンス行の非配置属性）を持つ。**
   `char_index` / `char_progress` / ユーザーが付けた任意の列が、配り先の
   出力インスタンスへ `source_index` の対応で配られる
   （`ops::attach_piece_attributes`）。**出力が既に持っている列は上書きしない** —
-  `index` / `P` / `rot` / `scale` / `source_index` は配る側の答えである
+  `index` / `P` / `rot` / `scale` / `shear` / `source_index` は配る側の答えである
 - **画像インスタンスもピースになる。** ここは `expand_instances` と意図的に
   違う（あちらは輪郭に変換できないので落とす）。ただし絵には何も焼き込めない
   ので、画像ピースは元のインスタンスの向きと大きさを持たない
-- **入れ子は内側の配置が先。** 外側の配置を各行へ合成する
-  （`InstanceTransform::compose`）ので**深さは増えず**、
+- **入れ子は内側の配置が先。** 外側の配置を各行へ**厳密に**合成する
+  （`InstanceTransform::compose`。線形部分は 2×2 の積で、`rot` / `scale` /
+  `shear` へ戻す分解は 1 箇所）。外側が非一様スケールで内側が回転していれば
+  結果はせん断を含み、`rot` / `scale` の 2 列だけでは表せないので `shear` が
+  それを持つ。`expand_instances`・`rasterize`・`drawn_bounds`・`geometry.transform`
+  は同じ配置を使い、**深さは増えず**、
   `MAX_INSTANCE_DEPTH` の意味は分解の前後で変わらない
 
 利用側は `scatter.*` の `piece_mode`（`whole` / `instances`）で、
@@ -116,6 +120,7 @@ CPU 経路は texel を読むので、GPU 常駐フレームで来た画像は�
 | `id` | Point/Instance | I32 | 寿命を通じ安定な識別子（sim 用） |
 | `rot` | Instance | F32 | 回転（rad）。**2D のみ** |
 | `scale` | Instance | Vec2 | スケール。**2D のみ** |
+| `shear` | Instance | F32 | 水平せん断（`x' = x + shear · y`、スケール前の形に対する係数）。**2D のみ**。**無ければ 0**。`rot` / `scale` と合わせて線形部分 `R(rot) · S(scale) · H(shear)` を表す。入れ子の合成が書く（下記）ので、組み込みノードは普段は作らず、列があるとき・非 0 のときだけ書かれる |
 | `orient` | Instance | Vec4 | 姿勢（クォータニオン）。**3D のみ**（REQ-3D-003） |
 | `scale3` | Instance | Vec3 | スケール。**3D のみ** |
 | `N` | Point/Primitive | Vec3 | 法線。**3D のみ**（ライティングが読む） |
@@ -180,7 +185,7 @@ positions: `P` is Vec3 …`）。「この操作は 2D の `P` を要求する�
 | `geometry/ops.rs` `positions`（`attribute.transfer` が使う） | 3D 対応 | 3 成分距離。2D は z = 0 なので算術が一致する |
 | 同上（`path_sample` が使う） | 明示エラー | 弧長は 3D で未定義 |
 | `nodes/geometry.rs` transform: point `P` | 3D 対応 | Vec3 は 3 成分（スケール → ZYX オイラー → 平行移動） |
-| `nodes/geometry.rs` transform: instance `P` | 3D 対応 | 同上。`rot` / `scale` は 2D 専用属性のまま |
+| `nodes/geometry.rs` transform: instance `P` | 3D 対応 | 同上。`rot` / `scale` / `shear` は 2D 専用属性のまま。node の変換は各インスタンスの配置へ `InstanceTransform::compose` で厳密に合成する |
 | `geometry/field.rs` `apply_field` | 次元非依存 | `P` は書き換えない。フィールドのサンプル位置は xy 射影（3D フィールドは将来拡張） |
 | `nodes/rasterize/mod.rs` × 4（GPU flatten / CPU raster、各 point + instance） | 明示エラー | 入口で検証し、インスタンスソースも再帰的に見る |
 | `nodes/scatter/mod.rs` `instance_source`（`center_input`） | 明示エラー | `anchor` が Vec2 のみのため 3D の基準点を表現できない |

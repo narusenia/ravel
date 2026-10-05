@@ -280,3 +280,76 @@ low でないのは、ペンツールで描いた曲線という**ユーザー�
 平行移動の 3 つを解析値で固定し、「接線の変換を落とす」と「`apply_vector` の
 代わりに `apply` を使う」の変異でどちらも落ちることを確認済み。
 
+---
+
+## MED-GPU-09 | bug | `Placement::compose` が非一様スケールと回転の合成で誤った変換を作る
+
+> **解決済み**: IXF-1〜4（#585 ほか）。`InstanceTransform` が `rot` / `scale` に予約属性
+> `shear` を加えた `R · S · H` を持ち、`compose` は線形部分を 2×2 の積で求めて 1 箇所の分解で
+> 戻す（厳密な合成）。列の読み取りは `InstanceColumns` に一本化した。`rasterize` は CPU / GPU とも
+> 同じ配置を使い、画像インスタンスは逆行列を `stroke_color` に詰めて WGSL が掛ける
+> （`DrawItem` は広げていない）。`geometry.transform` も各インスタンスの配置へ `compose` で
+> 合成する。最上位のコンポ → キャンバスのスケールが丸めで僅かに非一様になる件も、同じ
+> 厳密な合成で消えた。詳細は `docs/implementation/done/instance-transform-shear-plan.md`。
+
+**該当**: `crates/ravel-nodes/src/rasterize/mod.rs` の `compose()` と
+`Placement`（`offset` / `rot` / `scale` の分解表現）
+
+`rasterize` はインスタンスの配置を **回転角とスケール成分に分解した**
+`Placement` で持ち、入れ子を `compose(outer, local)` で畳む。畳み方が
+
+```
+rot   = outer.rot + local.rot
+scale = outer.scale * local.scale   （成分ごと）
+```
+
+なので、実際の合成 `R_o S_o R_l S_l` を `R_(o+l) S_o S_l = R_o R_l S_o S_l`
+として扱っている。**これが一致するのは `S_o` が `R_l` と可換なとき**、
+つまり**外側のスケールが一様**か**内側の回転が 0** のときだけである。
+
+`offset` の合成（`outer.apply(local.offset)`）は正しい。ずれるのは
+**線形部分だけ**。
+
+**再現**（外側 `scale = (2, 1)`、内側 `rot = 90°`、点 `p = (1, 0)`）:
+
+| 計算 | 結果 |
+| --- | --- |
+| 正しい `outer.apply(local.apply(p))` | `(0, 1)` |
+| 現在の `compose(outer, local).apply(p)` | `(0, 2)` |
+
+**影響範囲**:
+
+- **ジオメトリのネストインスタンス**（`scatter` の中の `scatter` など）で、
+  外側が非一様スケール・内側が回転を持つと形が崩れる
+- **画像インスタンス**（`IMG-4`）も同じ `Placement` を通るので同じだけずれる。
+  ただし `raster_image` の逆変換は `Placement::apply` の**厳密な逆**であり、
+  画像経路とジオメトリ経路は互いに一貫している。**`IMG-4` が入れた退行では
+  ない**
+- 最上位の `Placement::for_context` はコンポ → キャンバスのスケールを持つ。
+  これは `resolution / comp_resolution` の軸ごとの比なので、**丸めによって
+  わずかに非一様になりうる**（例: 1920x1081 を Half で 960x540 に落とすと
+  `(0.5, 0.4995…)`）。この場合、回転したインスタンスが微妙にずれる
+
+**修正の方向**: `Placement` の線形部分を `rot` / `scale` の分解ではなく
+**2×2 行列**で持ち、`compose` を行列積、`raster_image` の標本化を逆行列に
+する。`offset` はそのまま。
+
+**修正の障壁**（着手前に読むこと）:
+
+- **GPU 経路にも波及する。** `flatten_geometry` が同じ `compose` を通り、
+  `DrawItem` の `data0` / `data1` に配置を詰めて WGSL 側で使う。行列表現に
+  変えるなら詰め方とシェーダの両方が変わる
+- **`Placement::uniform_scale()` の利用側**（`dash_pattern` と
+  `stroke_width` のスケーリング）が分解表現に依存している。行列からどう
+  「代表スケール」を出すかを決める必要がある
+- **既存ゴールデンが動く可能性がある。** 一様スケールのケースは数値的に
+  同じはずだが、浮動小数の演算順序が変わるので許容誤差の確認が要る
+- CPU と GPU の一致ゴールデン（`RESP3-12` 以降）が両側を同時に見るので、
+  **片側だけ直すと一致が壊れる**
+
+**関連**: `done/image-instancing-plan.md`（`IMG-4` / `IMG-5`）、`MED-GPU-08`
+
+**2026-09-04 に `TYPE-5`（PR #511）の実装で独立に再発見された。** そちらは
+配置の式を `InstanceTransform` としてコアに集約し、`rasterize::Placement` を
+そこへ委譲したので、**この近似は今 1 箇所（`InstanceTransform::compose`）に
+閉じている** — 直す場所が 1 つになった。型の doc にも天井として明記済み。

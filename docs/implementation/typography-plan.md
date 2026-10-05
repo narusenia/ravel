@@ -323,7 +323,7 @@ GPU が効くとすれば、文字単位変調（`done/per-instance-modulation-p
 ### 単位 5: `text.to_path`（ジオメトリ化）とフィールド被変調
 
 - インスタンスを展開して 1 枚のジオメトリにする。
-  各インスタンスの `P` / `rot` / `scale` を輪郭点に焼き込み、
+  各インスタンスの `P` / `rot` / `scale` / `shear` を輪郭点に焼き込み、
   per-character 属性を Point ドメインへ伝播する。
 - これで文字の**輪郭点**がフィールドの影響を受ける。
 
@@ -344,7 +344,7 @@ GPU が効くとすれば、文字単位変調（`done/per-instance-modulation-p
   であって、`scatter.*` の出力もそのまま展開できる。インスタンスを
   持たないジオメトリは素通しなので冪等
 - **配置の定義を 1 箇所にまとめた。** `rasterize` が持っていた
-  scale → rotate → translate の式を
+  shear → scale → rotate → translate の式を
   `ravel_core::geometry::InstanceTransform` に出し、`rasterize` の
   `Placement` はそれに委譲する形にした。展開した絵とラスタライズした絵が
   一致することは「同じ関数を呼ぶ」で担保する（式を 2 つ持たない）。

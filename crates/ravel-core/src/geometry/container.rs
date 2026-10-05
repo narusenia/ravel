@@ -405,6 +405,21 @@ impl InstanceTransform {
     /// that is uniform or an inner turn of zero, with no shear on either
     /// side — the same `rot` and `scale` come back and `shear` is zero.
     pub fn compose(outer: Self, inner: Self) -> Self {
+        // Where the per-field formula is already exact, use it: the matrix
+        // round trip would leave a rounding residue in `shear` (around 1e-17,
+        // which `f32` holds), and a shear-free composition must stay exactly
+        // shear-free so no `shear` column appears in its output.
+        if outer.shear == 0.0
+            && inner.shear == 0.0
+            && (outer.scale.0 == outer.scale.1 || inner.rot == 0.0)
+        {
+            return Self {
+                offset: outer.apply(inner.offset),
+                rot: outer.rot + inner.rot,
+                scale: Vec2(outer.scale.0 * inner.scale.0, outer.scale.1 * inner.scale.1),
+                shear: 0.0,
+            };
+        }
         let (o, i) = (outer.matrix(), inner.matrix());
         let product = [
             o[0] * i[0] + o[1] * i[2],
@@ -1845,6 +1860,21 @@ mod tests {
         let got = InstanceTransform::compose(outer, inner).apply(Vec2(1.0, 0.0));
         assert!(got.0.abs() < 1e-6 && (got.1 - 1.0).abs() < 1e-6, "{got:?}");
         assert_composes(outer, inner, 1e-6);
+    }
+
+    /// A shear-free composition the per-field formula gets right comes back
+    /// with exactly that formula's values and a shear of exactly zero — not a
+    /// rounding residue, which would grow a `shear` column downstream.
+    #[test]
+    fn a_shear_free_composition_has_exactly_zero_shear() {
+        let turned = InstanceTransform {
+            rot: std::f32::consts::FRAC_PI_4,
+            scale: Vec2(3.0, 2.0),
+            ..InstanceTransform::IDENTITY
+        };
+        let composed = InstanceTransform::compose(turned, InstanceTransform::IDENTITY);
+        assert_eq!(composed.shear, 0.0);
+        assert_eq!((composed.rot, composed.scale), (turned.rot, turned.scale));
     }
 
     /// Random rot / scale / shear, mirrors included, compose exactly.

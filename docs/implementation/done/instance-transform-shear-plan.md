@@ -1,7 +1,7 @@
 # インスタンス配置の厳密な合成計画（`MED-GPU-09`）
 
-> **Status**: 実施中 — 2026-09-30 計画、`IXF-1` ✅（#585）。`IXF-1`〜`IXF-4`。フェーズ A6 の残り
-> （[`roadmap.md`](roadmap.md#フェーズ-a6-結果がどの前提で作られたかを持つこと)）
+> **Status**: 完了 — 2026-09-30 計画、`IXF-1`〜`IXF-4` ✅（#585 ほか）。フェーズ A6 の残り
+> （[`roadmap.md`](../roadmap.md#フェーズ-a6-結果がどの前提で作られたかを持つこと)）
 
 ## 背景
 
@@ -18,7 +18,7 @@ scale = outer.scale * inner.scale   （成分ごと）
 で、正しい合成 `R_o S_o R_i S_i` を `R_o R_i S_o S_i` として扱っている。一致するのは
 **外側のスケールが一様か、内側の回転が 0 のときだけ**。それ以外の真の合成は
 せん断を含み、`rot` / `scale` の 2 つでは表せない
-（[`MED-GPU-09`](../../issues/medium/gpu-nodes.md)。再現: 外側 `scale = (2, 1)`、
+（[`MED-GPU-09`](../../../issues/closed/medium-gpu-nodes.md)。再現: 外側 `scale = (2, 1)`、
 内側 `rot = 90°`、`p = (1, 0)` → 正 `(0, 1)`、現状 `(0, 2)`）。
 
 2026-09-30 に main（`1f9e9ca2`）で影響範囲を実測した。個票が挙げていない
@@ -273,3 +273,6 @@ rasterize/mod.rs:1036、1378）。`shear` を足すと 6 箇所に同じ読み�
 ## 実施状況
 
 - `IXF-1` ✅ #585。分解の「0」は固定閾値でなく f32 の欄で表せるかで決める（`(5e-13, 1)` の列を捨てないため）。列の読み取りは `geometry::InstanceColumns`
+- `IXF-2` ✅。`Placement` は `InstanceTransform` と色味だけの型になり、CPU / GPU の列の読み取りは `InstanceColumns::lenient`。画像は逆 2×2 を `stroke_color` に詰め（`DrawItem` は不変）、WGSL `image_color` と CPU `raster_image` が同じ逆行列を掛ける。特異・非有限な配置は逆行列が無いので何も描かない（行列式ガード）。せん断の入れ子の画像は CPU / GPU 一致、パスは `expand_instances` → `rasterize` と一致を固定した
+- `IXF-3` ✅。`apply_transform` はノードの線形部分を外側として `InstanceTransform::compose` で各インスタンスの配置に合成する。`P` は従来どおり `transform_positions`（ピボット・平行移動込み）が書き、`rot` / `scale` / `shear` は列が既にあるか値が変わるときだけ書く
+- `IXF-4` ✅。`procedural-geometry.md` の予約属性表と入れ子の説明、スプレッドシートの `STANDARD_ORDER`（`scale` の次に `shear`）、`agent-api-reference.md`、`MED-GPU-09` の個票（`issues/closed/`）

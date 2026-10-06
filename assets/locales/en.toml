@@ -1159,6 +1159,16 @@ description = "Rotates an image's hue and scales its saturation. Alpha is kept."
 hue = "Hue rotation in degrees about the gray axis (120 turns red into green)."
 saturation = "Scales the distance from luminance (1 is unchanged, 0 is gray)."
 
+[node."comp.levels"]
+label = "Levels"
+description = "Remaps an image's tones: an input range, a gamma, and an output range. Alpha is kept."
+[node."comp.levels".params]
+in_black = "Input value that maps to the output black (below it clips)."
+in_white = "Input value that maps to the output white (above it clips). At or below the black point it is a hard threshold."
+gamma = "Midtone curve; above 1 brightens, below 1 darkens (1 is unchanged)."
+out_black = "Output value the input black point becomes."
+out_white = "Output value the input white point becomes."
+
 [node."color.ramp"]
 label = "Color Ramp"
 description = "Maps a value to a color through a gradient, so a number drives a hue rather than a brightness."

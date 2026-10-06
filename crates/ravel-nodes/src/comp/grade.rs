@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! The colour-adjustment and grading nodes: `comp.brightness_contrast`,
-//! `comp.hue_saturation`.
+//! `comp.hue_saturation`,
+//! `comp.levels`.
 //!
 //! One processor, one shader (`comp_grade.wgsl`), one uniform. [`GradeKind`]
 //! says which node a [`CompGradeProcessor`] is, and [`GradeKind::fill`] is the
@@ -33,6 +34,7 @@ const SHADER_SRC: &str = include_str!("../shaders/comp_grade.wgsl");
 pub enum GradeKind {
     BrightnessContrast = 0,
     HueSaturation = 1,
+    Levels = 2,
 }
 
 #[repr(C)]
@@ -49,6 +51,7 @@ impl GradeKind {
         match self {
             Self::BrightnessContrast => "comp.brightness_contrast",
             Self::HueSaturation => "comp.hue_saturation",
+            Self::Levels => "comp.levels",
         }
     }
 
@@ -78,6 +81,22 @@ impl GradeKind {
                 let side = sin / 3.0_f32.sqrt();
                 out.a = [cos + third, third - side, third + side, 0.0];
                 out.b = [p.f32_or("saturation", 1.0), 0.0, 0.0, 0.0];
+            }
+            // a = (in_black, in_white, gamma), b = (out_black, out_white).
+            // Gamma above 1 brightens the midtones (0.25 -> 0.5 at gamma 2).
+            Self::Levels => {
+                out.a = [
+                    p.f32_or("in_black", 0.0),
+                    p.f32_or("in_white", 1.0),
+                    p.f32_or("gamma", 1.0),
+                    0.0,
+                ];
+                out.b = [
+                    p.f32_or("out_black", 0.0),
+                    p.f32_or("out_white", 1.0),
+                    0.0,
+                    0.0,
+                ];
             }
         }
         out
@@ -288,7 +307,11 @@ mod tests {
     fn defaults_are_the_identity() {
         let Some(gpu) = gpu_or_skip() else { return };
         let input = ramp(9, 5);
-        for kind in [GradeKind::BrightnessContrast, GradeKind::HueSaturation] {
+        for kind in [
+            GradeKind::BrightnessContrast,
+            GradeKind::HueSaturation,
+            GradeKind::Levels,
+        ] {
             let out = run(&gpu, kind, &[], &input);
             assert_matches(&out, &input, 1e-6, |rgb| rgb);
         }
@@ -337,6 +360,63 @@ mod tests {
         });
         let out = run(&gpu, GradeKind::HueSaturation, &[("hue", f(360.0))], &input);
         assert_matches(&out, &input, 1e-5, |rgb| rgb);
+    }
+
+    #[test]
+    fn levels_golden_pixels() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let input = frame(
+            4,
+            1,
+            &[
+                [0.125, 0.25, 0.5, 1.0],
+                [0.0, 0.75, 1.0, 0.25],
+                [0.25, 0.25, 0.25, 0.0],
+                [0.5, 0.5, 0.5, 1.0],
+            ],
+        );
+        // Input range 0.25..0.75 normalises to 0..1 (clamped), then gamma 2,
+        // then out range 0.5..1.5.
+        let out = run(
+            &gpu,
+            GradeKind::Levels,
+            &[
+                ("in_black", f(0.25)),
+                ("in_white", f(0.75)),
+                ("gamma", f(2.0)),
+                ("out_black", f(0.5)),
+                ("out_white", f(1.5)),
+            ],
+            &input,
+        );
+        // t = [0, 0, 0.5], [0, 1, 1], [0, 0, 0], [0.5; 3]; sqrt(0.5) twice.
+        let h = 0.5_f32.sqrt();
+        let want = [
+            [0.5, 0.5, 0.5 + h],
+            [0.5, 1.5, 1.5],
+            [0.5, 0.5, 0.5],
+            [0.5 + h; 3],
+        ];
+        for (px, want) in out.as_f32().chunks_exact(4).zip(want) {
+            for ch in 0..3 {
+                assert!((px[ch] - want[ch]).abs() < 1e-5, "{px:?} vs {want:?}");
+            }
+        }
+        assert_eq!(out.as_f32()[7], 0.25, "alpha is kept");
+    }
+
+    #[test]
+    fn levels_with_an_empty_input_range_is_a_threshold_not_nan() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let input = frame(2, 1, &[[0.25; 4], [0.75; 4]]);
+        let out = run(
+            &gpu,
+            GradeKind::Levels,
+            &[("in_black", f(0.5)), ("in_white", f(0.5))],
+            &input,
+        );
+        assert_eq!(out.as_f32()[..3], [0.0; 3]);
+        assert_eq!(out.as_f32()[4..7], [1.0; 3]);
     }
 
     #[test]

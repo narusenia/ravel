@@ -41,6 +41,16 @@ fn hue_saturation(rgb: vec3<f32>) -> vec3<f32> {
     return mix(vec3<f32>(lum), rotated, params.b.x);
 }
 
+// a = (in_black, in_white, gamma), b.xy = (out_black, out_white). The input
+// range is clamped to [0, 1] after normalising, so `in_white <= in_black`
+// degenerates to a hard threshold at `in_black` rather than dividing by zero.
+fn levels(rgb: vec3<f32>) -> vec3<f32> {
+    let span = max(params.a.y - params.a.x, 1e-6);
+    let t = clamp((rgb - vec3<f32>(params.a.x)) / span, vec3<f32>(0.0), vec3<f32>(1.0));
+    let curved = pow(t, vec3<f32>(1.0 / max(params.a.z, 1e-3)));
+    return vec3<f32>(params.b.x) + curved * (params.b.y - params.b.x);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = textureDimensions(input_tex);
@@ -54,6 +64,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     switch params.mode.x {
         case 0u: { rgb = brightness_contrast(rgb); }
         case 1u: { rgb = hue_saturation(rgb); }
+        case 2u: { rgb = levels(rgb); }
         default: {}
     }
     textureStore(output_tex, coord, vec4<f32>(rgb, src.a));

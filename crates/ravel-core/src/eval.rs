@@ -72,6 +72,18 @@ use thiserror::Error;
 /// keeps malformed or adversarial graphs from overflowing the process stack.
 pub const MAX_EVALUATION_DEPTH: usize = 256;
 
+/// Stack size of every thread that runs an [`Evaluator`] in production
+/// (`EvalService` and `RenderQueue` workers).
+///
+/// [`MAX_EVALUATION_DEPTH`] only bounds the recursion; whether that bound fits
+/// depends on the stack under it. A pull costs roughly 1–2 KiB of stack per
+/// level with a trivial processor (measured: 256 levels overflow 256 KiB and
+/// fit 512 KiB, debug and release alike), so the platform's 2 MiB default
+/// leaves little room for processors with large frames. The size is a
+/// reservation — pages are committed as they are touched on every platform
+/// Rust supports — so a generous figure costs address space, not memory.
+pub const EVAL_THREAD_STACK_SIZE: usize = 16 * 1024 * 1024;
+
 #[derive(Clone, Copy)]
 struct ResolveBudget {
     owner: NodeId,
@@ -4548,6 +4560,50 @@ mod tests {
         ev.evaluate(&g, NodeId::new(1), &ctx_at(0)).unwrap();
         assert_eq!(c1.load(Ordering::Relaxed), 1);
         assert_eq!(c2.load(Ordering::Relaxed), 0);
+    }
+
+    /// The deepest evaluation the budget admits fits a sixteenth of the
+    /// worker stack, leaving the rest for processors with large frames.
+    ///
+    /// Breaks on: raising [`MAX_EVALUATION_DEPTH`] or growing the per-level
+    /// pull frame without growing [`EVAL_THREAD_STACK_SIZE`] (this test then
+    /// aborts with a stack overflow instead of failing an assertion).
+    #[test]
+    fn the_deepest_admitted_evaluation_fits_a_sixteenth_of_the_worker_stack() {
+        std::thread::Builder::new()
+            .stack_size(EVAL_THREAD_STACK_SIZE / 16)
+            .spawn(|| {
+                let node_count = MAX_EVALUATION_DEPTH as u64;
+                let mut graph = Graph::new();
+                let calls = Arc::new(AtomicUsize::new(0));
+                let mut evaluator = Evaluator::new();
+                for raw in 1..=node_count {
+                    graph = graph.add_node(scalar_node(raw)).unwrap();
+                    evaluator.register(
+                        NodeId::new(raw),
+                        Arc::new(CountingSum {
+                            calls: calls.clone(),
+                        }),
+                    );
+                    if raw > 1 {
+                        graph = graph
+                            .add_edge(
+                                EdgeId::new(raw - 1),
+                                NodeId::new(raw - 1),
+                                OutputPortIndex(0),
+                                NodeId::new(raw),
+                                InputPortIndex(0),
+                            )
+                            .unwrap();
+                    }
+                }
+                evaluator
+                    .evaluate(&graph, NodeId::new(node_count), &ctx_at(0))
+                    .unwrap();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

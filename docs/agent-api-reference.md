@@ -468,7 +468,10 @@ CancelCheck = Arc<dyn Fn() -> bool + Send + Sync>
 ```
 
 Evaluation rejects a pull branch deeper than `MAX_EVALUATION_DEPTH` (256) with
-`EvalError::DepthLimitExceeded`; persisted documents reject subnet nesting
+`EvalError::DepthLimitExceeded`. A thread that runs an `Evaluator` must be
+spawned with `EVAL_THREAD_STACK_SIZE` (16 MiB; the `EvalService` and
+`RenderQueue` workers are) — the depth limit only holds if that depth fits
+the stack. Persisted documents reject subnet nesting
 deeper than `MAX_SUBNET_DEPTH` (16) — on the save path as well as before
 recursive load normalization, because a document that writes must read back
 (`RON_RECURSION_LIMIT`; see `docs/dev/persistence.md`).

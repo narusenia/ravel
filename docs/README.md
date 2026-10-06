@@ -36,6 +36,10 @@ mise run docs:check            # リンク切れ / 索引漏れ / issue 件数�
 
 エージェントは `ravel-docs` スキル（`.agents/skills/ravel-docs/`）を使う。
 
+実装単位と issue は Plane（project `RAVEL`）にも写してあるが、**正本はこの
+リポジトリ**。Plane への反映は `plane-sync` スキル（`scripts/plane-sync.py`）で、
+向きはリポジトリ → Plane だけ。
+
 ## 要件
 
 [requirements/](requirements/) — プロダクト要件。ID は `REQ-<領域>-<番号>`。

@@ -616,8 +616,8 @@ mod tests {
         (
             "comp.lift_gamma_gain",
             "lift",
-            [0.0, 0.0, 0.0, 1.0],
-            [0.5, 0.0, 0.0, 1.0],
+            [0.0; 4],
+            [-0.5, 0.0, 0.0, 0.0],
             &[],
         ),
         (
@@ -631,7 +631,7 @@ mod tests {
             "comp.lift_gamma_gain",
             "gain",
             [1.0; 4],
-            [0.5, 1.0, 1.0, 1.0],
+            [2.0, 1.0, 1.0, 1.0],
             &[],
         ),
     ];
@@ -696,6 +696,9 @@ mod tests {
                 .clone();
             let value = match template_value {
                 ParameterValue::Float(_) => ParameterValue::Channel(keyed(0)),
+                ParameterValue::Channel3(_) => {
+                    ParameterValue::Channel3([keyed(0), keyed(1), keyed(2)])
+                }
                 ParameterValue::Channel4(_) => {
                     ParameterValue::Channel4([keyed(0), keyed(1), keyed(2), keyed(3)])
                 }
@@ -771,7 +774,9 @@ mod tests {
             for p in &reg.get(type_key).unwrap().default_params {
                 match p.value {
                     ParameterValue::Curve(_) => {}
-                    ParameterValue::Float(_) | ParameterValue::Channel4(_) => assert!(
+                    ParameterValue::Float(_)
+                    | ParameterValue::Channel3(_)
+                    | ParameterValue::Channel4(_) => assert!(
                         GRADE_ANIMATION
                             .iter()
                             .any(|c| c.0 == type_key && c.1 == p.key),

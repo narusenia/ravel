@@ -80,12 +80,14 @@ fn curves(rgb: vec3<f32>) -> vec3<f32> {
     );
 }
 
-// a.xyz = lift, b.xyz = gamma, c.xyz = gain, per channel. Black moves to the
-// lift and white to the gain (`x * gain + lift * (1 - x)`), then the gamma
-// bends the midtones. A negative value is clipped before the gamma.
+// a.xyz = lift, b.xyz = gamma, c.xyz = gain, per channel:
+// `lift + (gain - lift) * pow(x, 1 / gamma)`. The gamma bends the 0..1 ramp
+// *before* it is stretched between lift and gain, so black is exactly the lift
+// and white exactly the gain whatever the gamma. A negative input is clipped to
+// black; an input above 1 (HDR) continues past the gain along the same curve.
 fn lift_gamma_gain(rgb: vec3<f32>) -> vec3<f32> {
-    let v = rgb * params.c.xyz + params.a.xyz * (vec3<f32>(1.0) - rgb);
-    return pow(max(v, vec3<f32>(0.0)), vec3<f32>(1.0) / max(params.b.xyz, vec3<f32>(1e-3)));
+    let t = pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(1.0) / max(params.b.xyz, vec3<f32>(1e-3)));
+    return params.a.xyz + (params.c.xyz - params.a.xyz) * t;
 }
 
 // Hue of a colour in [0, 1) (red = 0, green = 1/3, blue = 2/3) and its

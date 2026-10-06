@@ -111,7 +111,8 @@ pub struct XProcessor { ctx, pipeline, pool }
 > `lift_gamma_gain` / `hsl_curves`、`crates/ravel-nodes/src/comp/grade.rs`）。
 > LUT はファイル参照の設計（パス文字列か素材か）が未決なので別単位。
 > カラーホイールのウィジェットは作らず、`comp.lift_gamma_gain` の
-> 色パラメータがホイールの演算を担う。下の完了条件のうち LUT の項目だけが
+> RGB ベクタのパラメータ（色パラメータではない。ピッカーが 0〜1 に
+> クランプし、暗くする方向にしか振れないため）がホイールの演算を担う。下の完了条件のうち LUT の項目だけが
 > 残っている。
 
 **完了条件**

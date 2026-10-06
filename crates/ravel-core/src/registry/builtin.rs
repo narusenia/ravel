@@ -2060,9 +2060,10 @@ fn comp_curves() -> NodeTemplate {
         .with_param(curve_parameter("blue", CurveParam::identity()))
 }
 
-/// `comp.lift_gamma_gain`: the three colour-wheel controls of a grade, each a
-/// colour parameter (so the colour picker is the wheel). Neutral is black,
-/// white, white.
+/// `comp.lift_gamma_gain`: the three controls of a three-way grade, each an RGB
+/// vector. They are deliberately **not** colour parameters: the colour picker
+/// clamps to 0..1, which would leave only darkening reachable (lift >= 0,
+/// gain <= 1, gamma <= 1). Neutral is 0, 1, 1.
 fn comp_lift_gamma_gain() -> NodeTemplate {
     NodeTemplate::new(
         "comp.lift_gamma_gain",
@@ -2071,12 +2072,14 @@ fn comp_lift_gamma_gain() -> NodeTemplate {
     )
     .with_input(frame_buffer_input("image"))
     .with_output(frame_buffer_output())
-    .with_param(color_parameter("lift", [0.0, 0.0, 0.0, 1.0]))
-    .with_param(color_parameter("gamma", [1.0, 1.0, 1.0, 1.0]))
-    .with_param(color_parameter("gain", [1.0, 1.0, 1.0, 1.0]))
-    .with_color_param("lift")
-    .with_color_param("gamma")
-    .with_color_param("gain")
+    .with_param(channel3_parameter("lift", 0.0, 0.0, 0.0))
+    .with_param(channel3_parameter("gamma", 1.0, 1.0, 1.0))
+    .with_param(channel3_parameter("gain", 1.0, 1.0, 1.0))
+    // Soft ranges reach both sides of neutral: lift may go negative (crush
+    // below black), gain above 1 (push highlights), gamma either way.
+    .with_param_range("lift", -10.0..=10.0, -1.0..=1.0)
+    .with_param_range("gamma", 0.01..=10.0, 0.1..=4.0)
+    .with_param_range("gain", 0.0..=10.0, 0.0..=4.0)
 }
 
 /// `comp.hsl_curves`: three `Curve` parameters read over the hue circle. The
@@ -3505,9 +3508,6 @@ mod tests {
             ("comp.fill", "color", true),
             ("comp.tint", "map_black", true),
             ("comp.tint", "map_white", true),
-            ("comp.lift_gamma_gain", "lift", true),
-            ("comp.lift_gamma_gain", "gamma", true),
-            ("comp.lift_gamma_gain", "gain", true),
             ("style.fill", "color", true),
             ("style.stroke", "color", true),
         ];

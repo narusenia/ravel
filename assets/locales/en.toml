@@ -1180,11 +1180,11 @@ blue = "Curve applied to the blue channel after the RGB curve."
 
 [node."comp.lift_gamma_gain"]
 label = "Lift / Gamma / Gain"
-description = "Three-way color grade: a color for the shadows, the midtones and the highlights. Each color is its own wheel. Alpha is kept."
+description = "Three-way grade on the shadows, midtones and highlights, one RGB value each. Black becomes the lift and white the gain exactly, whatever the gamma. Alpha is kept."
 [node."comp.lift_gamma_gain".params]
-lift = "Color black becomes (black leaves it unchanged); tints the shadows."
-gamma = "Per-channel midtone exponent (white leaves it unchanged; above 1 brightens that channel)."
-gain = "Color white becomes (white leaves it unchanged); tints and scales the highlights."
+lift = "RGB that black becomes (0 leaves it unchanged; negative crushes the shadows, positive lifts them)."
+gamma = "Per-channel midtone exponent (1 is unchanged; above 1 brightens that channel, below 1 darkens it)."
+gain = "RGB that white becomes (1 leaves it unchanged; above 1 pushes the highlights, below 1 pulls them down)."
 
 [node."comp.hsl_curves"]
 label = "HSL Curves"

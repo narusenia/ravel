@@ -339,7 +339,7 @@ rename を使う（Linux は `renameat2(RENAME_NOREPLACE)`、macOS は
 > 呼び出し（音声エンコーダのサンプル形式）を `supported_formats()` に替えた。このフィーチャの
 > テストが一度も走っていなかったので、走らせて見つかった 2 件（`probe_asset` が画像でない
 > 静止画を読めると答える、`exposed_media_swap` が色名 `green`（= #008000）を純緑と仮定）も直した。
-> Windows は FFmpeg 9 の開発用ファイルを確実に入れる手段が無いので足していない。本 PR。
+> Windows は FFmpeg 9 の開発用ファイルを確実に入れる手段が無いので足していない。#599。
 
 **該当**: `.github/workflows/ci.yml`、`crates/ravel-media/Cargo.toml`
 （`ffmpeg = ["dep:ffmpeg-the-third"]`、`default = []`）

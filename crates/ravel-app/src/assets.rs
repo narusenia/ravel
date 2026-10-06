@@ -226,6 +226,18 @@ pub enum RavelIcon {
     NodeCompTint,
     /// Node header/menu: `comp.alpha`.
     NodeCompAlpha,
+    /// Node header/menu: `comp.brightness_contrast`.
+    NodeCompBrightnessContrast,
+    /// Node header/menu: `comp.hue_saturation`.
+    NodeCompHueSaturation,
+    /// Node header/menu: `comp.levels`.
+    NodeCompLevels,
+    /// Node header/menu: `comp.curves`.
+    NodeCompCurves,
+    /// Node header/menu: `comp.lift_gamma_gain`.
+    NodeCompLiftGammaGain,
+    /// Node header/menu: `comp.hsl_curves`.
+    NodeCompHslCurves,
     /// Node header/menu: `rasterize`.
     NodeRasterize,
     /// Node header/menu: `shape.rect`.
@@ -453,6 +465,12 @@ impl RavelIcon {
             "comp.fill" => Self::NodeCompFill,
             "comp.tint" => Self::NodeCompTint,
             "comp.alpha" => Self::NodeCompAlpha,
+            "comp.brightness_contrast" => Self::NodeCompBrightnessContrast,
+            "comp.hue_saturation" => Self::NodeCompHueSaturation,
+            "comp.levels" => Self::NodeCompLevels,
+            "comp.curves" => Self::NodeCompCurves,
+            "comp.lift_gamma_gain" => Self::NodeCompLiftGammaGain,
+            "comp.hsl_curves" => Self::NodeCompHslCurves,
             "rasterize" => Self::NodeRasterize,
             "shape.rect" => Self::NodeShapeRect,
             "shape.ellipse" => Self::NodeShapeEllipse,
@@ -612,6 +630,12 @@ impl RavelIcon {
             Self::NodeCompFill => "icons/replace.svg",
             Self::NodeCompTint => "icons/palette.svg",
             Self::NodeCompAlpha => "icons/blend.svg",
+            Self::NodeCompBrightnessContrast => "icons/sliders-horizontal.svg",
+            Self::NodeCompHueSaturation => "icons/palette.svg",
+            Self::NodeCompLevels => "icons/chart-column.svg",
+            Self::NodeCompCurves => "icons/spline.svg",
+            Self::NodeCompLiftGammaGain => "icons/circle-dot.svg",
+            Self::NodeCompHslCurves => "icons/activity.svg",
             Self::NodeRasterize => "icons/image-down.svg",
             Self::NodeShapeRect => "icons/square.svg",
             Self::NodeShapeEllipse => "icons/circle.svg",

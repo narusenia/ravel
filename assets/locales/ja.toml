@@ -1132,6 +1132,56 @@ description = "アルファの反転、輝度との相互変換、マット入�
 [node."comp.alpha".params]
 mode = "invert（反転）、luma_to_alpha（輝度×アルファ）、alpha_to_luma（アルファの不透明グレー）、matte_alpha / matte_luma（マットのアルファまたは輝度を掛ける。サイズが違うマットは画像全体へ引き伸ばす）。"
 
+[node."comp.brightness_contrast"]
+label = "明るさ・コントラスト"
+description = "画像のコントラストを基準値のまわりで拡縮し、明るさを加算する。アルファは保つ。"
+[node."comp.brightness_contrast".params]
+brightness = "コントラストの後に全チャネルへ加算する量（-1〜1）。"
+contrast = "基準値からの距離の倍率（1 で変化なし）。"
+pivot = "コントラストで動かない値（0.5 で中間グレー）。"
+
+[node."comp.hue_saturation"]
+label = "色相・彩度"
+description = "画像の色相を回転し、彩度を拡縮する。アルファは保つ。"
+[node."comp.hue_saturation".params]
+hue = "グレー軸まわりの色相回転（度。120 で赤が緑へ）。"
+saturation = "輝度からの距離の倍率（1 で変化なし、0 でグレー）。"
+
+[node."comp.levels"]
+label = "レベル"
+description = "画像の階調を、入力レンジ・ガンマ・出力レンジで補正する。アルファは保つ。"
+[node."comp.levels".params]
+in_black = "出力の黒になる入力値（これ未満はクリップ）。"
+in_white = "出力の白になる入力値（これ超はクリップ）。黒点以下ならしきい値処理になる。"
+gamma = "中間調のカーブ（1 超で明るく、1 未満で暗く。1 で変化なし）。"
+out_black = "入力の黒点が写る出力値。"
+out_white = "入力の白点が写る出力値。"
+
+[node."comp.curves"]
+label = "トーンカーブ"
+description = "画像の階調を転送カーブで補正する。全チャンネル共通 1 本と個別チャンネル 3 本。アルファは保つ。"
+[node."comp.curves".params]
+rgb = "最初に全チャンネルへ掛けるカーブ（横軸が入力、縦軸が出力）。"
+red = "RGB カーブの後に赤へ掛けるカーブ。"
+green = "RGB カーブの後に緑へ掛けるカーブ。"
+blue = "RGB カーブの後に青へ掛けるカーブ。"
+
+[node."comp.lift_gamma_gain"]
+label = "リフト・ガンマ・ゲイン"
+description = "シャドウ・中間調・ハイライトを RGB 値 1 つずつで補正する 3 ウェイのグレード。ガンマに関係なく、黒は必ずリフト、白は必ずゲインになる。アルファは保つ。"
+[node."comp.lift_gamma_gain".params]
+lift = "黒が写る RGB 値（0 で変化なし。負でシャドウを潰し、正で持ち上げる）。"
+gamma = "チャネルごとの中間調の指数（1 で変化なし。1 超で明るく、1 未満で暗く）。"
+gain = "白が写る RGB 値（1 で変化なし。1 超でハイライトを押し上げ、1 未満で引き下げる）。"
+
+[node."comp.hsl_curves"]
+label = "HSL カーブ"
+description = "色相・彩度・輝度を色相環上のカーブで調整し、特定の色域だけを変える。アルファは保つ。"
+[node."comp.hsl_curves".params]
+hue_vs_hue = "色相ごとの色相シフト（横軸が色相で 0 と 1 が赤。0.5 でシフトなし、1 で 360 度）。"
+hue_vs_sat = "色相ごとの彩度（0.5 で変化なし。倍率は値の 2 倍）。"
+hue_vs_lum = "色相ごとの輝度ゲイン（0.5 で変化なし。倍率は値の 2 倍。グレーは影響を受けない）。"
+
 [node."color.ramp"]
 label = "カラーランプ"
 description = "グラデーションで値を色に写す。明るさではなく色そのものを数値で動かせる。"

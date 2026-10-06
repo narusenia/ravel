@@ -334,6 +334,42 @@ pub fn processor_for_node(
             shaders,
             pool.clone(),
         ))),
+        "comp.brightness_contrast" => Some(Arc::new(comp::CompGradeProcessor::new(
+            comp::GradeKind::BrightnessContrast,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.hue_saturation" => Some(Arc::new(comp::CompGradeProcessor::new(
+            comp::GradeKind::HueSaturation,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.levels" => Some(Arc::new(comp::CompGradeProcessor::new(
+            comp::GradeKind::Levels,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.curves" => Some(Arc::new(comp::CompGradeProcessor::new(
+            comp::GradeKind::Curves,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.lift_gamma_gain" => Some(Arc::new(comp::CompGradeProcessor::new(
+            comp::GradeKind::LiftGammaGain,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.hsl_curves" => Some(Arc::new(comp::CompGradeProcessor::new(
+            comp::GradeKind::HslCurves,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
         "comp.alpha" => Some(Arc::new(comp::CompAlphaProcessor::new(
             ctx.clone(),
             shaders,
@@ -460,6 +496,12 @@ mod tests {
             "comp.fill",
             "comp.tint",
             "comp.alpha",
+            "comp.brightness_contrast",
+            "comp.hue_saturation",
+            "comp.levels",
+            "comp.curves",
+            "comp.lift_gamma_gain",
+            "comp.hsl_curves",
             "comp.transform",
             "comp.merge.normal",
             "comp.merge.adjustment",
@@ -529,6 +571,221 @@ mod tests {
         assert_eq!((fb.width, fb.height), (4, 4));
         for px in fb.as_f32().chunks_exact(4) {
             assert_eq!(px, [1.0, 1.0, 1.0, 0.0]);
+        }
+    }
+
+    /// `(type_key, param, from, to, fixed)`: every animatable parameter of the
+    /// colour-adjustment nodes, with two values that change a mid-tone pixel
+    /// and the other parameters it needs held at.
+    type AnimCase = (
+        &'static str,
+        &'static str,
+        [f32; 4],
+        [f32; 4],
+        &'static [(&'static str, f32)],
+    );
+    const GRADE_ANIMATION: &[AnimCase] = &[
+        (
+            "comp.brightness_contrast",
+            "brightness",
+            [0.0; 4],
+            [0.5; 4],
+            &[],
+        ),
+        (
+            "comp.brightness_contrast",
+            "contrast",
+            [1.0; 4],
+            [2.0; 4],
+            &[],
+        ),
+        (
+            "comp.brightness_contrast",
+            "pivot",
+            [0.5; 4],
+            [0.0; 4],
+            &[("contrast", 2.0)],
+        ),
+        ("comp.hue_saturation", "hue", [0.0; 4], [120.0; 4], &[]),
+        ("comp.hue_saturation", "saturation", [1.0; 4], [0.0; 4], &[]),
+        ("comp.levels", "in_black", [0.0; 4], [0.25; 4], &[]),
+        ("comp.levels", "in_white", [1.0; 4], [0.5; 4], &[]),
+        ("comp.levels", "gamma", [1.0; 4], [2.0; 4], &[]),
+        ("comp.levels", "out_black", [0.0; 4], [0.5; 4], &[]),
+        ("comp.levels", "out_white", [1.0; 4], [0.5; 4], &[]),
+        (
+            "comp.lift_gamma_gain",
+            "lift",
+            [0.0; 4],
+            [-0.5, 0.0, 0.0, 0.0],
+            &[],
+        ),
+        (
+            "comp.lift_gamma_gain",
+            "gamma",
+            [1.0; 4],
+            [2.0, 1.0, 1.0, 1.0],
+            &[],
+        ),
+        (
+            "comp.lift_gamma_gain",
+            "gain",
+            [1.0; 4],
+            [2.0, 1.0, 1.0, 1.0],
+            &[],
+        ),
+    ];
+    const GRADE_NODES: [&str; 6] = [
+        "comp.brightness_contrast",
+        "comp.hue_saturation",
+        "comp.levels",
+        "comp.curves",
+        "comp.lift_gamma_gain",
+        "comp.hsl_curves",
+    ];
+
+    /// `comp.solid` (a mid-tone colour) feeding `type_key`, evaluated at
+    /// `frame` through `register_all_processors`. `param` replaces the node's
+    /// default: keyframed `from` at frame 0 to `to` at frame 10.
+    fn grade_pixel(
+        type_key: &str,
+        animated: Option<(&str, [f32; 4], [f32; 4])>,
+        fixed: &[(&str, f32)],
+        frame: u64,
+    ) -> [f32; 4] {
+        use ravel_core::animation::Interpolation;
+        use ravel_core::animation::channel::AnimationChannel;
+        use ravel_core::animation::curve::KeyframeCurve;
+
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let mut shaders = ShaderManager::new(gpu.clone());
+        let mut reg = ravel_core::registry::NodeRegistry::new();
+        builtin::register_builtins(&mut reg);
+
+        let mut solid = reg.create_node("comp.solid", NodeId::new(1)).unwrap();
+        let mut node = reg.create_node(type_key, NodeId::new(2)).expect(type_key);
+        let set = |node: &mut Node, key: &str, value: ParameterValue| {
+            node.parameters
+                .iter_mut()
+                .find(|p| p.key == key)
+                .unwrap_or_else(|| panic!("{type_key} has no {key}"))
+                .value = value;
+        };
+        let color = [0.6, 0.3, 0.2, 1.0];
+        set(
+            &mut solid,
+            "color",
+            ParameterValue::Channel4(color.map(AnimationChannel::constant)),
+        );
+        for (key, v) in fixed {
+            set(&mut node, key, ParameterValue::Float(*v));
+        }
+        if let Some((key, from, to)) = animated {
+            let keyed = |i: usize| {
+                let mut curve = KeyframeCurve::new();
+                curve.insert(0, from[i], Interpolation::Linear);
+                curve.insert(10, to[i], Interpolation::Linear);
+                AnimationChannel::keyframes(curve)
+            };
+            let template_value = node
+                .parameters
+                .iter()
+                .find(|p| p.key == key)
+                .unwrap()
+                .value
+                .clone();
+            let value = match template_value {
+                ParameterValue::Float(_) => ParameterValue::Channel(keyed(0)),
+                ParameterValue::Channel3(_) => {
+                    ParameterValue::Channel3([keyed(0), keyed(1), keyed(2)])
+                }
+                ParameterValue::Channel4(_) => {
+                    ParameterValue::Channel4([keyed(0), keyed(1), keyed(2), keyed(3)])
+                }
+                other => panic!("{type_key}.{key} is {other:?}, not animatable"),
+            };
+            set(&mut node, key, value);
+        }
+        let graph = Graph::new()
+            .add_node(solid)
+            .unwrap()
+            .add_node(node)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        let pool = shared_texture_pool(&gpu);
+        let frames = MediaFrameCache::standalone();
+        register_all_processors(&mut ev, &graph, &gpu, &mut shaders, &pool, &frames);
+        let out = ev
+            .evaluate(
+                &graph,
+                NodeId::new(2),
+                &EvalContext::new(frame, FrameRate::new(30, 1), (4, 4)),
+            )
+            .unwrap();
+        let fb = out
+            .downcast_ref::<ravel_gpu::GpuFrameBuffer>()
+            .expect("GPU-resident")
+            .to_frame_buffer()
+            .expect("readback");
+        let px = &fb.as_f32()[..4];
+        [px[0], px[1], px[2], px[3]]
+    }
+
+    /// Every colour-adjustment node, built from the registry's own template,
+    /// evaluates through `register_all_processors` and, with its default
+    /// parameters, leaves a pixel unchanged (alpha included).
+    #[test]
+    fn every_grade_template_has_a_processor_and_defaults_to_the_identity() {
+        for type_key in GRADE_NODES {
+            let px = grade_pixel(type_key, None, &[], 0);
+            for (got, want) in px.iter().zip([0.6, 0.3, 0.2, 1.0]) {
+                assert!((got - want).abs() < 1e-6, "{type_key}: {px:?}");
+            }
+        }
+    }
+
+    /// Every animatable parameter of the colour-adjustment nodes rides the
+    /// unified animation channel: keyframed, it changes the output between
+    /// frame 0 and frame 10, so the processor reads it per frame under the
+    /// right key. The `Curve` parameters are structural (their shape is not
+    /// animatable), and the guard below keeps this table complete.
+    #[test]
+    fn grade_parameters_animate_through_the_unified_channels() {
+        for &(type_key, key, from, to, fixed) in GRADE_ANIMATION {
+            let a = grade_pixel(type_key, Some((key, from, to)), fixed, 0);
+            let b = grade_pixel(type_key, Some((key, from, to)), fixed, 10);
+            assert!(
+                a.iter().zip(&b).any(|(x, y)| (x - y).abs() > 1e-3),
+                "{type_key}.{key} did not change the output: {a:?} vs {b:?}"
+            );
+        }
+
+        let mut reg = ravel_core::registry::NodeRegistry::new();
+        builtin::register_builtins(&mut reg);
+        for type_key in GRADE_NODES {
+            for p in &reg.get(type_key).unwrap().default_params {
+                match p.value {
+                    ParameterValue::Curve(_) => {}
+                    ParameterValue::Float(_)
+                    | ParameterValue::Channel3(_)
+                    | ParameterValue::Channel4(_) => assert!(
+                        GRADE_ANIMATION
+                            .iter()
+                            .any(|c| c.0 == type_key && c.1 == p.key),
+                        "{type_key}.{} is animatable but not covered above",
+                        p.key
+                    ),
+                    ref other => panic!("{type_key}.{} is {other:?}", p.key),
+                }
+            }
         }
     }
 

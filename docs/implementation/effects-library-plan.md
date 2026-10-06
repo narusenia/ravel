@@ -106,6 +106,15 @@ pub struct XProcessor { ctx, pipeline, pool }
 - リフト/ガンマ/ゲイン、カラーホイール、HSL カーブ、LUT 適用（`.cube`）
 - カラーマッチは**非対象**（参照画像の統計マッチングは別物）
 
+> **2026-10-06 実装**: LUT 適用（`.cube`）を**除いて**入れた
+> （`comp.brightness_contrast` / `hue_saturation` / `levels` / `curves` /
+> `lift_gamma_gain` / `hsl_curves`、`crates/ravel-nodes/src/comp/grade.rs`）。
+> LUT はファイル参照の設計（パス文字列か素材か）が未決なので別単位 `FX-1b`。
+> カラーホイールのウィジェットは作らず、`comp.lift_gamma_gain` の
+> RGB ベクタのパラメータ（色パラメータではない。ピッカーが 0〜1 に
+> クランプし、暗くする方向にしか振れないため）がホイールの演算を担う。下の完了条件のうち LUT の項目だけが
+> 残っている。
+
 **完了条件**
 
 - 各ノードのゴールデンテスト（既知の入力パッチ → 期待画素）。

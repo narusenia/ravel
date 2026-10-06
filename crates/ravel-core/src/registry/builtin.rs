@@ -186,6 +186,12 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(comp_fill());
     reg.register(comp_tint());
     reg.register(comp_alpha());
+    reg.register(comp_brightness_contrast());
+    reg.register(comp_hue_saturation());
+    reg.register(comp_levels());
+    reg.register(comp_curves());
+    reg.register(comp_lift_gamma_gain());
+    reg.register(comp_hsl_curves());
     reg.register(color_ramp());
     reg.register(rasterize());
     reg.register(shape_rect());
@@ -1990,6 +1996,105 @@ fn comp_alpha() -> NodeTemplate {
         .with_param_options("mode", COMP_ALPHA_MODES)
 }
 
+/// `comp.brightness_contrast`: contrast about a pivot, then a brightness offset.
+/// Unlike `color_correct` (which also has saturation) the pivot is a parameter.
+fn comp_brightness_contrast() -> NodeTemplate {
+    NodeTemplate::new(
+        "comp.brightness_contrast",
+        "Brightness / Contrast",
+        NodeCategory::Image,
+    )
+    .with_input(frame_buffer_input("image"))
+    .with_output(frame_buffer_output())
+    .with_param(float_parameter("brightness", 0.0))
+    .with_param(float_parameter("contrast", 1.0))
+    .with_param(float_parameter("pivot", 0.5))
+    .with_param_range("brightness", -10.0..=10.0, -1.0..=1.0)
+    .with_param_range("contrast", 0.0..=10.0, 0.0..=2.0)
+    .with_param_range("pivot", -10.0..=10.0, 0.0..=1.0)
+}
+
+/// `comp.hue_saturation`: a hue rotation about the gray axis, then a
+/// saturation scale about luminance.
+fn comp_hue_saturation() -> NodeTemplate {
+    NodeTemplate::new(
+        "comp.hue_saturation",
+        "Hue / Saturation",
+        NodeCategory::Image,
+    )
+    .with_input(frame_buffer_input("image"))
+    .with_output(frame_buffer_output())
+    .with_param(float_parameter("hue", 0.0))
+    .with_param(float_parameter("saturation", 1.0))
+    .with_param_range("hue", -3600.0..=3600.0, -180.0..=180.0)
+    .with_param_range("saturation", 0.0..=10.0, 0.0..=2.0)
+}
+
+/// `comp.levels`: input range, gamma, output range, applied to each channel.
+fn comp_levels() -> NodeTemplate {
+    NodeTemplate::new("comp.levels", "Levels", NodeCategory::Image)
+        .with_input(frame_buffer_input("image"))
+        .with_output(frame_buffer_output())
+        .with_param(float_parameter("in_black", 0.0))
+        .with_param(float_parameter("in_white", 1.0))
+        .with_param(float_parameter("gamma", 1.0))
+        .with_param(float_parameter("out_black", 0.0))
+        .with_param(float_parameter("out_white", 1.0))
+        .with_param_range("in_black", -10.0..=10.0, 0.0..=1.0)
+        .with_param_range("in_white", -10.0..=10.0, 0.0..=1.0)
+        .with_param_range("gamma", 0.01..=10.0, 0.1..=4.0)
+        .with_param_range("out_black", -10.0..=10.0, 0.0..=1.0)
+        .with_param_range("out_white", -10.0..=10.0, 0.0..=1.0)
+}
+
+/// `comp.curves`: a transfer curve over all channels (`rgb`) and one per
+/// channel, as `Curve` parameters — the same type as `math.curve`, so the
+/// curve editor is shared. Each channel runs through `rgb` first, then its own.
+fn comp_curves() -> NodeTemplate {
+    NodeTemplate::new("comp.curves", "Curves", NodeCategory::Image)
+        .with_input(frame_buffer_input("image"))
+        .with_output(frame_buffer_output())
+        .with_param(curve_parameter("rgb", CurveParam::identity()))
+        .with_param(curve_parameter("red", CurveParam::identity()))
+        .with_param(curve_parameter("green", CurveParam::identity()))
+        .with_param(curve_parameter("blue", CurveParam::identity()))
+}
+
+/// `comp.lift_gamma_gain`: the three controls of a three-way grade, each an RGB
+/// vector. They are deliberately **not** colour parameters: the colour picker
+/// clamps to 0..1, which would leave only darkening reachable (lift >= 0,
+/// gain <= 1, gamma <= 1). Neutral is 0, 1, 1.
+fn comp_lift_gamma_gain() -> NodeTemplate {
+    NodeTemplate::new(
+        "comp.lift_gamma_gain",
+        "Lift / Gamma / Gain",
+        NodeCategory::Image,
+    )
+    .with_input(frame_buffer_input("image"))
+    .with_output(frame_buffer_output())
+    .with_param(channel3_parameter("lift", 0.0, 0.0, 0.0))
+    .with_param(channel3_parameter("gamma", 1.0, 1.0, 1.0))
+    .with_param(channel3_parameter("gain", 1.0, 1.0, 1.0))
+    // Soft ranges reach both sides of neutral: lift may go negative (crush
+    // below black), gain above 1 (push highlights), gamma either way.
+    .with_param_range("lift", -10.0..=10.0, -1.0..=1.0)
+    .with_param_range("gamma", 0.01..=10.0, 0.1..=4.0)
+    .with_param_range("gain", 0.0..=10.0, 0.0..=4.0)
+}
+
+/// `comp.hsl_curves`: three `Curve` parameters read over the hue circle. The
+/// neutral curve is flat at 0.5 for all three (the hue axis is periodic; the
+/// node's module comment defines the seam).
+fn comp_hsl_curves() -> NodeTemplate {
+    let neutral = || CurveParam::linear([(0.0, 0.5), (1.0, 0.5)]);
+    NodeTemplate::new("comp.hsl_curves", "HSL Curves", NodeCategory::Image)
+        .with_input(frame_buffer_input("image"))
+        .with_output(frame_buffer_output())
+        .with_param(curve_parameter("hue_vs_hue", neutral()))
+        .with_param(curve_parameter("hue_vs_sat", neutral()))
+        .with_param(curve_parameter("hue_vs_lum", neutral()))
+}
+
 /// `shape.rect`: a sized quad, and the one node a Solid layer's network is
 /// built on (`assets/layer-templates/solid.ron`).
 ///
@@ -2801,7 +2906,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 94);
+        assert_eq!(reg.all_templates().count(), 100);
     }
 
     #[test]
@@ -2811,7 +2916,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 28);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
-        assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 9);
+        assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 15);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
         assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 28);

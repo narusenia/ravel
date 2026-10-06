@@ -30,11 +30,11 @@ clippy、`*.md` を含むときだけ `docs:check` が走る（lint-patterns と
 
 `mise run check` も CI の `check` ジョブも既定フィーチャで `cargo test --workspace`
 を回すので、`#[cfg(feature = "ffmpeg")]` の下にあるテストはそこでは実行されない。
-CI は別ジョブ `ffmpeg`（macOS、Homebrew の FFmpeg 9）で `ravel-media` / `ravel-nodes` /
-`ravel-cli` を `--features ffmpeg` で clippy + test する。`ffmpeg-the-third` 6 は
+CI は別ジョブ `ffmpeg`（macOS、Homebrew の FFmpeg 9）で `ravel-media` / `ravel-audio` /
+`ravel-nodes` / `ravel-cli` を `--features ffmpeg` で clippy + test する。`ffmpeg-the-third` 6 は
 FFmpeg 9 を束ねる（Windows では回していない）。
 
-`ravel-audio` など上記 3 クレート以外や、手元での確認には
+上記 4 クレート以外や、手元での確認には
 
 ```bash
 cargo test --workspace --features ffmpeg

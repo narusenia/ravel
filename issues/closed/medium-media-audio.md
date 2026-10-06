@@ -333,8 +333,8 @@ rename を使う（Linux は `renameat2(RENAME_NOREPLACE)`、macOS は
 ## MED-MED-10 | debt | CI が `--features ffmpeg` を一度もビルドしない — 出荷する構成が検証されていない
 
 > **解決済み**: `ci.yml` に `ffmpeg` ジョブ（macOS、`brew install ffmpeg` の FFmpeg 9）を足し、
-> `cargo clippy -p ravel-media -p ravel-nodes -p ravel-cli --features ffmpeg --all-targets` と
-> 同じ 3 クレートの `cargo test --features ffmpeg` を回す。入った FFmpeg の版はログに出る。
+> `cargo clippy -p ravel-media -p ravel-audio -p ravel-nodes -p ravel-cli --features ffmpeg --all-targets` と
+> 同じ 4 クレートの `cargo test --features ffmpeg` を回す。入った FFmpeg の版はログに出る。
 > `ffmpeg-the-third` を `6.0.0+ffmpeg-9.0` へ上げ、`Codec::formats()` が FFmpeg 9 で消えた
 > 呼び出し（音声エンコーダのサンプル形式）を `supported_formats()` に替えた。このフィーチャの
 > テストが一度も走っていなかったので、走らせて見つかった 2 件（`probe_asset` が画像でない

@@ -406,10 +406,10 @@ jobs:
           echo "libavcodec $(pkg-config --modversion libavcodec)"
 
       - name: Clippy (ffmpeg)
-        run: mise exec -- cargo clippy -p ravel-media -p ravel-nodes -p ravel-cli --features ffmpeg --all-targets -- -D warnings
+        run: mise exec -- cargo clippy -p ravel-media -p ravel-audio -p ravel-nodes -p ravel-cli --features ffmpeg --all-targets -- -D warnings
 
       - name: Test (ffmpeg)
-        run: mise exec -- cargo test -p ravel-media -p ravel-nodes -p ravel-cli --features ffmpeg
+        run: mise exec -- cargo test -p ravel-media -p ravel-audio -p ravel-nodes -p ravel-cli --features ffmpeg
 
       - name: sccache statistics
         if: ${{ !cancelled() && env.SCCACHE_ENABLED == 'true' }}

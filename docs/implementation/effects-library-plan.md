@@ -198,6 +198,15 @@ opacity / transform のみ、`rasterize` は Geometry 入力が必須）、
 - ミラー、タイル
 - マスク（ジオメトリ入力でのマット）、キーイング（クロマ / ルミナンス）
 
+> **2026-10-06 実装**: `comp.mirror` / `comp.tile`（`comp/tile.rs`、
+> `comp_tile.wgsl`）、`comp.mask`（`comp/mask.rs`）、`comp.key`（`comp/key.rs`、
+> `comp_key.wgsl`）。ミラーは**反転**（2 回で元に戻る）で、半分を写す
+> カレイドスコープ型は作っていない。タイルは端で**回り込む**（wrap）。
+> マスクは新しい被覆計算を持たず、`RasterizeProcessor` でジオメトリを描き、
+> その結果を `CompAlphaProcessor` の `matte_alpha` へ渡す。キーはクロマ
+> （最大チャンネルで正規化した CbCr 距離）とルミナンスのみで、アルファだけを
+> 変える（スピル抑制・エッジ処理・ガベージマットは非対象のまま）。
+
 **完了条件**
 
 - タイル: 1×1 で入力と一致するテスト。

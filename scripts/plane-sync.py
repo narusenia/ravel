@@ -249,10 +249,12 @@ def main(argv):
         it = next((x for x in export() if x["external_id"] == argv[2]), None)
         if not it:
             sys.exit(f"unknown external_id: {argv[2]}")
-        # Record the hash of what was pushed (from show), not of the repo now:
-        # an edit landing between show and ack must still show up in the next plan.
+        # If the repo changed since show, what was pushed is not what export sees now
+        # (hash and module alike). Record nothing so the next plan pushes it again.
+        if argv[4] != it["hash"]:
+            sys.exit(f"{argv[2]} changed since show; not recorded, the next plan will list it again")
         os.makedirs(os.path.dirname(STATE), exist_ok=True)
-        rec = dict(external_id=argv[2], plane_id=argv[3], hash=argv[4], module=it["module"])
+        rec = dict(external_id=argv[2], plane_id=argv[3], hash=it["hash"], module=it["module"])
         with open(STATE, "a", encoding="utf-8") as f:  # one short O_APPEND write per ack
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     elif cmd == "selftest":

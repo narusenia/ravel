@@ -46,7 +46,8 @@ Plane 側でそれらが Todo / Backlog のまま残っていないかを別途�
 2. `scripts/plane-sync.py plan` で差分を得る。`ops` が反映する項目、
    `gone_from_repo` はリポジトリから消えた項目
    - **書き込む前に、件数（作成見込み / 更新）と `gone_from_repo` を利用者に示して
-     確認を取る**。`ops` が空なら「差分なし」と言って終わる
+     確認を取る**。`ops` も `gone_from_repo` も空なら「差分なし」と言って終わる。
+     `ops` だけが空なら書き込みはせず、手順 5 の報告だけをする
 3. ID を引く（1 回だけ）: `project list` で identifier `RAVEL` の id、`state list`、
    `label list`、`module list`。`ops` が要る label / module が無ければ作る
 4. `ops` を 1 件ずつ処理する。**`show` は 1 件ずつ呼ぶ。** `export` を丸ごと読むと
@@ -59,7 +60,8 @@ Plane 側でそれらが Todo / Backlog のまま残っていないかを別途�
    4. `module` があれば `module manage_workitems` で追加する。`old_module` があれば
       そこから外す
    5. `scripts/plane-sync.py ack <external_id> <plane_id> <hash>`。hash は 4.1 の
-      `show` が出した値を渡す（今のリポジトリでなく、送った内容を記録するため）。**成功した直後に毎回**
+      `show` が出した値を渡す。`show` の後にリポジトリが変わっていると `ack` は記録せずに
+      失敗し、その項目は次の `plan` にもう一度出る（失敗として報告するだけでよい）。**成功した直後に毎回**
       打つ。途中で止まっても、次の `plan` は残りだけを出す
 5. `gone_from_repo` は消さずに報告だけする（ID の付け替えか削除かは人が判断する）
 6. 報告: 作成数、更新数、失敗した external_id とエラー文、`gone_from_repo`

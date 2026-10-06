@@ -155,7 +155,7 @@ tracing-appender = "0.2"
 bincode = "1"
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
-ffmpeg-the-third = "5"
+ffmpeg-the-third = "6"
 
 # Command-line front end (`ravel-cli`). Approved as production dependencies for
 # the render CLI (`docs/implementation/render-export-plan.md`, unit 3); none of

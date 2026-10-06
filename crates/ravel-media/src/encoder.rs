@@ -11,6 +11,7 @@ use ravel_core::color::quantize_u8;
 use std::path::Path;
 
 use ffmpeg_the_third as ffmpeg;
+use ffmpeg_the_third::codec::config::Supported;
 use ffmpeg_the_third::software::resampling as swr;
 use ffmpeg_the_third::software::scaling as sws;
 use ffmpeg_the_third::util::format::pixel::Pixel as PixelFmt;
@@ -498,7 +499,12 @@ fn create_audio_stream(
     let preferred = SampleFmt::F32(SampleType::Packed);
     let sample_format = codec
         .audio()
-        .and_then(|audio| audio.formats().map(|formats| formats.collect::<Vec<_>>()))
+        // `formats()` is gone in FFmpeg 9; `supported_formats()` exists from 7.1 on.
+        // `All` (no list) falls through to `preferred`, as the old `None` did.
+        .and_then(|audio| match audio.supported_formats() {
+            Supported::Specific(formats) => Some(formats.collect::<Vec<_>>()),
+            Supported::All => None,
+        })
         .and_then(|formats| {
             formats
                 .iter()

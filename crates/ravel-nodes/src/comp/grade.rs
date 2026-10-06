@@ -3,7 +3,7 @@
 
 //! The colour-adjustment and grading nodes: `comp.brightness_contrast`,
 //! `comp.hue_saturation`,
-//! `comp.levels`.
+//! `comp.levels`, `comp.curves`.
 //!
 //! One processor, one shader (`comp_grade.wgsl`), one uniform. [`GradeKind`]
 //! says which node a [`CompGradeProcessor`] is, and [`GradeKind::fill`] is the
@@ -11,12 +11,21 @@
 //! per-pixel operation on the **straight** RGB as stored; the alpha channel is
 //! carried through bit for bit (GPUCOMP-4, see `premultiplied.wgsl`).
 //!
+//! **Curves** (`ParameterValue::Curve`, [`CurveParam`]) reach the GPU as a baked
+//! table: the CPU samples [`CurveParam::evaluate`] at [`TABLE_LEN`] evenly
+//! spaced inputs and the shader interpolates linearly between samples. The
+//! curve evaluation (every interpolation mode, tangents, clamping) is therefore
+//! the one implementation in `ravel-core`, not a second one in WGSL. The cost
+//! is resolution: a step or a very tight bezier is quantised to 1/255 of the
+//! domain.
+//!
 //! **Not shell nodes**: like `comp.fill` these are ordinary user-placed nodes
 //! and never decode a deterministic id or read the `Document`.
 
 use bytemuck::Zeroable;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::graph::Node;
+use ravel_core::param_curve::CurveParam;
 use ravel_core::types::NodeData;
 use ravel_gpu::{
     ComputeDispatch, ComputePipeline, GpuContext, GpuFrameBuffer, ShaderManager, TexturePool,
@@ -25,6 +34,9 @@ use std::sync::{Arc, Mutex};
 
 use super::transparent;
 use crate::gpu_util;
+
+/// Entries in a baked curve table (the array length in the shader too).
+const TABLE_LEN: usize = 256;
 
 const SHADER_SRC: &str = include_str!("../shaders/comp_grade.wgsl");
 
@@ -35,6 +47,7 @@ pub enum GradeKind {
     BrightnessContrast = 0,
     HueSaturation = 1,
     Levels = 2,
+    Curves = 3,
 }
 
 #[repr(C)]
@@ -44,6 +57,7 @@ struct Params {
     a: [f32; 4],
     b: [f32; 4],
     c: [f32; 4],
+    table: [[f32; 4]; TABLE_LEN],
 }
 
 impl GradeKind {
@@ -52,6 +66,7 @@ impl GradeKind {
             Self::BrightnessContrast => "comp.brightness_contrast",
             Self::HueSaturation => "comp.hue_saturation",
             Self::Levels => "comp.levels",
+            Self::Curves => "comp.curves",
         }
     }
 
@@ -98,8 +113,33 @@ impl GradeKind {
                     0.0,
                 ];
             }
+            // table[i] = (rgb, red, green, blue) curves at x = i / 255. A
+            // missing curve is the identity. The curves clamp outside [0, 1]
+            // (an input above 1 takes the curve's value at 1).
+            Self::Curves => {
+                for (lane, key) in ["rgb", "red", "green", "blue"].into_iter().enumerate() {
+                    bake(&mut out.table, lane, p, key, |i| {
+                        i as f32 / (TABLE_LEN - 1) as f32
+                    });
+                }
+            }
         }
         out
+    }
+}
+
+/// Sample the curve parameter `key` into lane `lane` of every table entry, at
+/// the input `x(i)` of entry `i`.
+fn bake(
+    table: &mut [[f32; 4]; TABLE_LEN],
+    lane: usize,
+    p: &ResolvedParams,
+    key: &str,
+    x: impl Fn(usize) -> f32,
+) {
+    let curve = p.curve(key).cloned().unwrap_or_else(CurveParam::identity);
+    for (i, entry) in table.iter_mut().enumerate() {
+        entry[lane] = curve.evaluate(x(i));
     }
 }
 
@@ -197,6 +237,7 @@ mod tests {
     use super::*;
     use ravel_core::eval::{Evaluator, ResolvedValue};
     use ravel_core::id::NodeId;
+    use ravel_core::param_curve::CurveParam;
     use ravel_core::types::FrameBuffer;
 
     /// Run one node over `input` with the given resolved parameters.
@@ -311,6 +352,7 @@ mod tests {
             GradeKind::BrightnessContrast,
             GradeKind::HueSaturation,
             GradeKind::Levels,
+            GradeKind::Curves,
         ] {
             let out = run(&gpu, kind, &[], &input);
             assert_matches(&out, &input, 1e-6, |rgb| rgb);
@@ -417,6 +459,58 @@ mod tests {
         );
         assert_eq!(out.as_f32()[..3], [0.0; 3]);
         assert_eq!(out.as_f32()[4..7], [1.0; 3]);
+    }
+
+    fn curve(points: &[(f32, f32)]) -> ResolvedValue {
+        ResolvedValue::Curve(CurveParam::linear(points.iter().copied()))
+    }
+
+    #[test]
+    fn curves_invert_through_the_rgb_curve() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let input = ramp(9, 5);
+        let out = run(
+            &gpu,
+            GradeKind::Curves,
+            &[("rgb", curve(&[(0.0, 1.0), (1.0, 0.0)]))],
+            &input,
+        );
+        assert_matches(&out, &input, 1e-6, |[r, g, b]| [1.0 - r, 1.0 - g, 1.0 - b]);
+    }
+
+    #[test]
+    fn a_channel_curve_moves_only_its_channel_and_follows_the_rgb_curve() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let input = frame(2, 1, &[[0.5, 0.5, 0.5, 1.0], [1.0, 0.25, 0.75, 0.5]]);
+        // The red curve halves red; the RGB curve (applied first) lifts the
+        // black point to 0.25 and keeps white.
+        let out = run(
+            &gpu,
+            GradeKind::Curves,
+            &[
+                ("rgb", curve(&[(0.0, 0.25), (1.0, 1.0)])),
+                ("red", curve(&[(0.0, 0.0), (1.0, 0.5)])),
+            ],
+            &input,
+        );
+        // 0.5 -> rgb -> 0.625; red then halves it.
+        assert_matches(&out, &input, 1e-6, |[r, g, b]| {
+            let lift = |v: f32| 0.25 + 0.75 * v;
+            [lift(r) * 0.5, lift(g), lift(b)]
+        });
+    }
+
+    #[test]
+    fn curves_clamp_outside_the_unit_range() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let input = frame(2, 1, &[[-1.0, 2.0, 0.5, 1.0], [0.0; 4]]);
+        let out = run(
+            &gpu,
+            GradeKind::Curves,
+            &[("rgb", curve(&[(0.0, 0.25), (1.0, 0.75)]))],
+            &input,
+        );
+        assert_eq!(out.as_f32()[..3], [0.25, 0.75, 0.5]);
     }
 
     #[test]

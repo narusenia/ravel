@@ -232,6 +232,8 @@ pub enum RavelIcon {
     NodeCompHueSaturation,
     /// Node header/menu: `comp.levels`.
     NodeCompLevels,
+    /// Node header/menu: `comp.curves`.
+    NodeCompCurves,
     /// Node header/menu: `rasterize`.
     NodeRasterize,
     /// Node header/menu: `shape.rect`.
@@ -462,6 +464,7 @@ impl RavelIcon {
             "comp.brightness_contrast" => Self::NodeCompBrightnessContrast,
             "comp.hue_saturation" => Self::NodeCompHueSaturation,
             "comp.levels" => Self::NodeCompLevels,
+            "comp.curves" => Self::NodeCompCurves,
             "rasterize" => Self::NodeRasterize,
             "shape.rect" => Self::NodeShapeRect,
             "shape.ellipse" => Self::NodeShapeEllipse,
@@ -624,6 +627,7 @@ impl RavelIcon {
             Self::NodeCompBrightnessContrast => "icons/sliders-horizontal.svg",
             Self::NodeCompHueSaturation => "icons/palette.svg",
             Self::NodeCompLevels => "icons/chart-column.svg",
+            Self::NodeCompCurves => "icons/spline.svg",
             Self::NodeRasterize => "icons/image-down.svg",
             Self::NodeShapeRect => "icons/square.svg",
             Self::NodeShapeEllipse => "icons/circle.svg",

@@ -16,6 +16,9 @@ struct Params {
     a: vec4<f32>,
     b: vec4<f32>,
     c: vec4<f32>,
+    // Baked 1D tables, `TABLE_LEN` entries (`comp/grade.rs`); what the four
+    // lanes of an entry hold depends on the mode.
+    table: array<vec4<f32>, 256>,
 }
 
 @group(0) @binding(0) var input_tex:  texture_2d<f32>;
@@ -51,6 +54,25 @@ fn levels(rgb: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(params.b.x) + curved * (params.b.y - params.b.x);
 }
 
+// Linear lookup of lane `lane` of the table over [0, 1]; `v` is clamped, so a
+// value outside the curve's domain takes the curve's end value.
+fn table_at(v: f32, lane: u32) -> f32 {
+    let pos = clamp(v, 0.0, 1.0) * 255.0;
+    let i0 = u32(floor(pos));
+    let i1 = min(i0 + 1u, 255u);
+    return mix(params.table[i0][lane], params.table[i1][lane], pos - f32(i0));
+}
+
+// Lanes: 0 = the RGB curve, 1..3 = the red, green and blue curves. Each
+// channel goes through the RGB curve first, then its own.
+fn curves(rgb: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        table_at(table_at(rgb.x, 0u), 1u),
+        table_at(table_at(rgb.y, 0u), 2u),
+        table_at(table_at(rgb.z, 0u), 3u),
+    );
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = textureDimensions(input_tex);
@@ -65,6 +87,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         case 0u: { rgb = brightness_contrast(rgb); }
         case 1u: { rgb = hue_saturation(rgb); }
         case 2u: { rgb = levels(rgb); }
+        case 3u: { rgb = curves(rgb); }
         default: {}
     }
     textureStore(output_tex, coord, vec4<f32>(rgb, src.a));

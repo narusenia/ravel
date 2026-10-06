@@ -1169,6 +1169,15 @@ gamma = "Midtone curve; above 1 brightens, below 1 darkens (1 is unchanged)."
 out_black = "Output value the input black point becomes."
 out_white = "Output value the input white point becomes."
 
+[node."comp.curves"]
+label = "Curves"
+description = "Remaps an image's tones through transfer curves: one for all channels and one per channel. Alpha is kept."
+[node."comp.curves".params]
+rgb = "Curve applied to every channel first (input on the x axis, output on y)."
+red = "Curve applied to the red channel after the RGB curve."
+green = "Curve applied to the green channel after the RGB curve."
+blue = "Curve applied to the blue channel after the RGB curve."
+
 [node."color.ramp"]
 label = "Color Ramp"
 description = "Maps a value to a color through a gradient, so a number drives a hue rather than a brightness."

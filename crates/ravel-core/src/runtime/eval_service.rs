@@ -738,6 +738,7 @@ impl EvalService {
         let worker_frames = frames.clone();
         let worker = std::thread::Builder::new()
             .name("ravel-eval-service".into())
+            .stack_size(crate::eval::EVAL_THREAD_STACK_SIZE)
             .spawn(move || {
                 let frames = worker_frames;
                 // Kept beside the evaluator so the per-request log line can

@@ -607,6 +607,7 @@ impl RenderQueue {
         let worker_on_event = on_event.clone();
         let worker = std::thread::Builder::new()
             .name("ravel-render-worker".into())
+            .stack_size(crate::eval::EVAL_THREAD_STACK_SIZE)
             .spawn(move || {
                 let mut evaluator = match budget {
                     Some(budget) => Evaluator::with_budget(budget),

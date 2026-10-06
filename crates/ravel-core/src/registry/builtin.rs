@@ -187,6 +187,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(comp_tint());
     reg.register(comp_alpha());
     reg.register(comp_brightness_contrast());
+    reg.register(comp_hue_saturation());
     reg.register(color_ramp());
     reg.register(rasterize());
     reg.register(shape_rect());
@@ -2009,6 +2010,22 @@ fn comp_brightness_contrast() -> NodeTemplate {
     .with_param_range("pivot", -10.0..=10.0, 0.0..=1.0)
 }
 
+/// `comp.hue_saturation`: a hue rotation about the gray axis, then a
+/// saturation scale about luminance.
+fn comp_hue_saturation() -> NodeTemplate {
+    NodeTemplate::new(
+        "comp.hue_saturation",
+        "Hue / Saturation",
+        NodeCategory::Image,
+    )
+    .with_input(frame_buffer_input("image"))
+    .with_output(frame_buffer_output())
+    .with_param(float_parameter("hue", 0.0))
+    .with_param(float_parameter("saturation", 1.0))
+    .with_param_range("hue", -3600.0..=3600.0, -180.0..=180.0)
+    .with_param_range("saturation", 0.0..=10.0, 0.0..=2.0)
+}
+
 /// `shape.rect`: a sized quad, and the one node a Solid layer's network is
 /// built on (`assets/layer-templates/solid.ron`).
 ///
@@ -2820,7 +2837,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 95);
+        assert_eq!(reg.all_templates().count(), 96);
     }
 
     #[test]
@@ -2830,7 +2847,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 28);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
-        assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 10);
+        assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 11);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
         assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 28);

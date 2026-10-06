@@ -1,7 +1,8 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! The colour-adjustment and grading nodes: `comp.brightness_contrast`.
+//! The colour-adjustment and grading nodes: `comp.brightness_contrast`,
+//! `comp.hue_saturation`.
 //!
 //! One processor, one shader (`comp_grade.wgsl`), one uniform. [`GradeKind`]
 //! says which node a [`CompGradeProcessor`] is, and [`GradeKind::fill`] is the
@@ -31,6 +32,7 @@ const SHADER_SRC: &str = include_str!("../shaders/comp_grade.wgsl");
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GradeKind {
     BrightnessContrast = 0,
+    HueSaturation = 1,
 }
 
 #[repr(C)]
@@ -46,6 +48,7 @@ impl GradeKind {
     fn label(self) -> &'static str {
         match self {
             Self::BrightnessContrast => "comp.brightness_contrast",
+            Self::HueSaturation => "comp.hue_saturation",
         }
     }
 
@@ -64,6 +67,17 @@ impl GradeKind {
                     p.f32_or("pivot", 0.5),
                     0.0,
                 ];
+            }
+            // a = the rotation's (m0, m1, m2), b.x = saturation. The hue is
+            // a rotation about the gray axis (1, 1, 1) by `hue` degrees
+            // (Rodrigues), so it is linear in RGB and HDR-safe, and a gray
+            // pixel never moves. 120 degrees turns red into green.
+            Self::HueSaturation => {
+                let (sin, cos) = p.f32_or("hue", 0.0).to_radians().sin_cos();
+                let third = (1.0 - cos) / 3.0;
+                let side = sin / 3.0_f32.sqrt();
+                out.a = [cos + third, third - side, third + side, 0.0];
+                out.b = [p.f32_or("saturation", 1.0), 0.0, 0.0, 0.0];
             }
         }
         out
@@ -274,8 +288,55 @@ mod tests {
     fn defaults_are_the_identity() {
         let Some(gpu) = gpu_or_skip() else { return };
         let input = ramp(9, 5);
-        let out = run(&gpu, GradeKind::BrightnessContrast, &[], &input);
-        assert_matches(&out, &input, 1e-6, |rgb| rgb);
+        for kind in [GradeKind::BrightnessContrast, GradeKind::HueSaturation] {
+            let out = run(&gpu, kind, &[], &input);
+            assert_matches(&out, &input, 1e-6, |rgb| rgb);
+        }
+    }
+
+    #[test]
+    fn hue_of_120_degrees_turns_red_into_green_into_blue() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let input = frame(
+            4,
+            1,
+            &[
+                [1.0, 0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0, 0.5],
+                [0.0, 0.0, 1.0, 1.0],
+                [0.5, 0.5, 0.5, 1.0],
+            ],
+        );
+        let out = run(&gpu, GradeKind::HueSaturation, &[("hue", f(120.0))], &input);
+        let want = [
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+            [0.5, 0.5, 0.5],
+        ];
+        for (px, want) in out.as_f32().chunks_exact(4).zip(want) {
+            for ch in 0..3 {
+                assert!((px[ch] - want[ch]).abs() < 1e-6, "{px:?} vs {want:?}");
+            }
+        }
+        assert_eq!(out.as_f32()[7], 0.5, "alpha is kept");
+    }
+
+    #[test]
+    fn saturation_zero_is_rec709_luminance_and_hue_turns_a_full_circle() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let input = ramp(9, 5);
+        let out = run(
+            &gpu,
+            GradeKind::HueSaturation,
+            &[("saturation", f(0.0))],
+            &input,
+        );
+        assert_matches(&out, &input, 1e-6, |[r, g, b]| {
+            [0.2126 * r + 0.7152 * g + 0.0722 * b; 3]
+        });
+        let out = run(&gpu, GradeKind::HueSaturation, &[("hue", f(360.0))], &input);
+        assert_matches(&out, &input, 1e-5, |rgb| rgb);
     }
 
     #[test]

@@ -1152,6 +1152,13 @@ brightness = "Added to every channel after the contrast (-1 to 1)."
 contrast = "Scales the distance from the pivot (1 is unchanged)."
 pivot = "The value contrast leaves in place (0.5 is mid gray)."
 
+[node."comp.hue_saturation"]
+label = "Hue / Saturation"
+description = "Rotates an image's hue and scales its saturation. Alpha is kept."
+[node."comp.hue_saturation".params]
+hue = "Hue rotation in degrees about the gray axis (120 turns red into green)."
+saturation = "Scales the distance from luminance (1 is unchanged, 0 is gray)."
+
 [node."color.ramp"]
 label = "Color Ramp"
 description = "Maps a value to a color through a gradient, so a number drives a hue rather than a brightness."

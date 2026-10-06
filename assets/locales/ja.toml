@@ -1140,6 +1140,13 @@ brightness = "コントラストの後に全チャネルへ加算する量（-1�
 contrast = "基準値からの距離の倍率（1 で変化なし）。"
 pivot = "コントラストで動かない値（0.5 で中間グレー）。"
 
+[node."comp.hue_saturation"]
+label = "色相・彩度"
+description = "画像の色相を回転し、彩度を拡縮する。アルファは保つ。"
+[node."comp.hue_saturation".params]
+hue = "グレー軸まわりの色相回転（度。120 で赤が緑へ）。"
+saturation = "輝度からの距離の倍率（1 で変化なし、0 でグレー）。"
+
 [node."color.ramp"]
 label = "カラーランプ"
 description = "グラデーションで値を色に写す。明るさではなく色そのものを数値で動かせる。"

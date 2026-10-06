@@ -27,6 +27,20 @@ fn brightness_contrast(rgb: vec3<f32>) -> vec3<f32> {
     return (rgb - vec3<f32>(params.a.z)) * params.a.y + vec3<f32>(params.a.z + params.a.x);
 }
 
+// a.xyz = (m0, m1, m2): the rotation about the gray axis, as the circulant
+// matrix [[m0 m1 m2] [m2 m0 m1] [m1 m2 m0]]; b.x = saturation. Rotate first,
+// then scale the distance from Rec.709 luminance.
+fn hue_saturation(rgb: vec3<f32>) -> vec3<f32> {
+    let m = params.a.xyz;
+    let rotated = vec3<f32>(
+        m.x * rgb.x + m.y * rgb.y + m.z * rgb.z,
+        m.z * rgb.x + m.x * rgb.y + m.y * rgb.z,
+        m.y * rgb.x + m.z * rgb.y + m.x * rgb.z,
+    );
+    let lum = dot(rotated, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return mix(vec3<f32>(lum), rotated, params.b.x);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = textureDimensions(input_tex);
@@ -39,6 +53,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var rgb = src.rgb;
     switch params.mode.x {
         case 0u: { rgb = brightness_contrast(rgb); }
+        case 1u: { rgb = hue_saturation(rgb); }
         default: {}
     }
     textureStore(output_tex, coord, vec4<f32>(rgb, src.a));

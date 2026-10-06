@@ -340,6 +340,12 @@ pub fn processor_for_node(
             shaders,
             pool.clone(),
         ))),
+        "comp.hue_saturation" => Some(Arc::new(comp::CompGradeProcessor::new(
+            comp::GradeKind::HueSaturation,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
         "comp.alpha" => Some(Arc::new(comp::CompAlphaProcessor::new(
             ctx.clone(),
             shaders,
@@ -467,6 +473,7 @@ mod tests {
             "comp.tint",
             "comp.alpha",
             "comp.brightness_contrast",
+            "comp.hue_saturation",
             "comp.transform",
             "comp.merge.normal",
             "comp.merge.adjustment",

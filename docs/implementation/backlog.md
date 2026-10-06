@@ -1266,7 +1266,7 @@ CPU / GPU 両方）。グリフが穴を持つ最初の図形だったので、`
 | FX-3b | 🟡 | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | — |
 | FX-4 | 🟡 | トランスフォーム拡張と合成 | — |
 | FX-5 | ⬜ | 時間系（`SCOPE-2` の時間シフト経路に載る） | FX-1〜4, SCOPE-2 |
-| FX-6 | ⬜ | レジストリ / ロケール / 文書 | FX-1〜5, FX-3b |
+| FX-6 | ⬜ | 文書と実機確認（登録・ロケールは各単位が持つ） | FX-1〜5, FX-3b |
 
 FX-3b は raster 側に**生成ノードが 1 つも無い**ことへの対応
 （`crates/ravel-nodes/src/comp/` は merge / opacity / transform のみ、

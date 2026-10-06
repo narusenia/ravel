@@ -32,9 +32,13 @@ description: >-
 
 `$XDG_CACHE_HOME/ravel/plane-sync.jsonl`（既定は `~/.cache/ravel/`）に、項目ごとの
 Plane の id・内容のハッシュ・module を持つ。追記専用で、同じ external_id は最後の行が勝つ。リポジトリの外にあるので、どの
-worktree から走らせても同じものを見る。**消えても壊れない**: 全件が差分に出て、
-手順 3 で external_id から既存の Plane の項目を見つけて更新する（重複は作らない）。
-ただし全件分の呼び出しがかかる。
+worktree から走らせても同じものを見る。**消えても重複は作らない**: 全件が差分に
+出て、手順 4 で external_id から既存の Plane の項目を見つけて更新する。ただし
+全件分の呼び出しがかかり、**完了済みの単位（✅ / ❌）は差分に出なくなる**ので、
+Plane 側でそれらが Todo / Backlog のまま残っていないかを別途確かめる。
+
+**同期は同時に 1 本だけ。** 2 本走ると、どちらも「未作成」と判断して同じ項目を
+2 回作りうる（Plane 側に external_id の一意制約は無い前提で扱う）。
 
 ## 手順
 
@@ -54,7 +58,8 @@ worktree から走らせても同じものを見る。**消えても壊れない
       labels・priority・description_html・external_source・external_id を渡す
    4. `module` があれば `module manage_workitems` で追加する。`old_module` があれば
       そこから外す
-   5. `scripts/plane-sync.py ack <external_id> <plane_id>`。**成功した直後に毎回**
+   5. `scripts/plane-sync.py ack <external_id> <plane_id> <hash>`。hash は 4.1 の
+      `show` が出した値を渡す（今のリポジトリでなく、送った内容を記録するため）。**成功した直後に毎回**
       打つ。途中で止まっても、次の `plan` は残りだけを出す
 5. `gone_from_repo` は消さずに報告だけする（ID の付け替えか削除かは人が判断する）
 6. 報告: 作成数、更新数、失敗した external_id とエラー文、`gone_from_repo`

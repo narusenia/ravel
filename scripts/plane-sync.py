@@ -7,7 +7,7 @@ The repository stays canonical. This script only computes *what* to push; the
   plane-sync.py export              all syncable items as JSON
   plane-sync.py plan                items whose content changed since the last ack
   plane-sync.py show <external_id>  one item's full payload (pushed one at a time)
-  plane-sync.py ack <external_id> <plane_id>
+  plane-sync.py ack <external_id> <plane_id> <hash>   hash as printed by show
   plane-sync.py selftest
 
 State lives outside the repo (worktrees share it): $XDG_CACHE_HOME/ravel/plane-sync.jsonl.
@@ -32,7 +32,19 @@ def inline(s):
     s = html.escape(s, quote=False)
     s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
     s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s, flags=re.S)
-    return re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', s)
+    return re.sub(r"\[([^\]]+)\]\(([^)]+)\)", link, s)
+
+
+def link(m):
+    # The text is already escaped; the URL goes into an attribute, so quote it too.
+    url = html.unescape(m.group(2))
+    if re.match(r"^[a-z][a-z0-9+.-]*:", url, re.I) and not url.startswith(("http://", "https://")):
+        return m.group(1)  # no javascript: and friends
+    return f'<a href="{html.escape(url, quote=True)}">{m.group(1)}</a>'
+
+
+def plain(s):
+    return s.replace("`", "").replace("**", "")
 
 
 def joined(lines):
@@ -134,7 +146,7 @@ def units():
         if not mark:  # "→" (moved) and "—" rows are not units of their own
             continue
         yield dict(
-            external_id=uid, name=f"{uid} {name.replace('`', '')}", state=UNIT_STATE[mark],
+            external_id=uid, name=f"{uid} {plain(name)}", state=UNIT_STATE[mark],
             labels=["unit"] + (["判断待ち"] if mark == "❓" else []), priority="none", module=section,
             description_html=f"<p><strong>状態</strong>: {mark}</p><p><strong>依存</strong>: {inline(dep) or '—'}</p>"
                              f"<p><strong>節</strong>: {inline(section)}</p>"
@@ -152,7 +164,7 @@ def issues():
         ext = iid if iid not in seen else iid + "~2"
         seen.add(iid)
         return dict(
-            external_id=ext, name=f"[{iid}] {title.replace('`', '')}", state="Done" if closed else "Todo",
+            external_id=ext, name=f"[{iid}] {plain(title)}", state="Done" if closed else "Todo",
             labels=["issue"] + kind.split(" / "), priority=SEV[sev], module=None,
             description_html=f'<p>正本: <a href="{GH}{rel}">{rel}</a></p>\n' + md2html(body.strip()))
 
@@ -232,9 +244,15 @@ def main(argv):
             sys.exit(f"unknown external_id: {argv[2]}")
         json.dump(it, sys.stdout, ensure_ascii=False, indent=1)
     elif cmd == "ack":
-        it = next(x for x in export() if x["external_id"] == argv[2])
+        if len(argv) != 5:
+            sys.exit("usage: plane-sync.py ack <external_id> <plane_id> <hash>")
+        it = next((x for x in export() if x["external_id"] == argv[2]), None)
+        if not it:
+            sys.exit(f"unknown external_id: {argv[2]}")
+        # Record the hash of what was pushed (from show), not of the repo now:
+        # an edit landing between show and ack must still show up in the next plan.
         os.makedirs(os.path.dirname(STATE), exist_ok=True)
-        rec = dict(external_id=argv[2], plane_id=argv[3], hash=it["hash"], module=it["module"])
+        rec = dict(external_id=argv[2], plane_id=argv[3], hash=argv[4], module=it["module"])
         with open(STATE, "a", encoding="utf-8") as f:  # one short O_APPEND write per ack
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     elif cmd == "selftest":
@@ -243,7 +261,9 @@ def main(argv):
         items = export()
         ids = [x["external_id"] for x in items]
         assert len(ids) == len(set(ids)), "duplicate external_id"
-        assert all("**" not in x["description_html"] for x in items), "unconverted bold"
+        assert all("**" not in x["description_html"] + x["name"] for x in items), "unconverted bold"
+        assert md2html('[a](x" onmouseover="y)') == '<p><a href="x&quot; onmouseover=&quot;y">a</a></p>'
+        assert md2html("[a](javascript:alert(1))") == "<p>a)</p>"
         print(f"ok: {len(items)} items")
     else:
         sys.exit(__doc__)

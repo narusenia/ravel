@@ -92,6 +92,61 @@ O(1) ハッシュ、ノードごとの確保ゼロ。
 
 ---
 
+## MED-CORE-04 | bug | 評価とサブネット再帰走査に深さ上限が無い — 深いグラフでスタックオーバーフロー
+
+**該当**: `crates/ravel-core/src/eval.rs:840-1178`
+
+> **解決済み**（2026-10-06）: 修正方針の後者を採った。評価を走らせる本番の
+> スレッドは `EvalService` と `RenderQueue` のワーカー 2 本だけで（アプリも
+> `ravel-cli` もこの 2 つを経由する）、どちらも `EVAL_THREAD_STACK_SIZE`
+> （`eval.rs`、16 MiB）で起動する。再帰の深さは `MAX_EVALUATION_DEPTH`（256）が
+> 既に押さえていたので、欠けていたのは「その深さがどのスタックに載るか」の側。
+> 実測で 256 段は軽いプロセッサなら 256 KiB で溢れ 512 KiB に収まる（debug /
+> release とも）ので、既定の 2 MiB では大きなフレームを持つプロセッサに余裕が
+> 無かった。テスト `the_deepest_admitted_evaluation_fits_a_sixteenth_of_the_worker_stack`
+> が上限いっぱいの評価を 1/16（1 MiB）のスタックで通し、上限かフレームだけを
+> 増やすと落ちる。明示的なワークスタックへの書き換えは採らない — プロセッサが
+> `EvalScope` 越しに入力を pull する契約そのものが再帰なので、全ノードの契約を
+> 変えることになる。ロード時の `normalize_*` の再帰は `MAX_SUBNET_DEPTH`（16）で
+> 抑えられている。
+
+> **一部のみ解決（2026-08-03 再判定）**: 評価とサブネット**再帰走査**には
+> `EvalError::DepthLimitExceeded { node, limit }` が入り（`eval.rs:106`, `:2000`,
+> `:2546`, `:2601`）、ロード後の検証にも `Document::validate_subnet_depth`
+> （`composition/mod.rs`、上限 `MAX_SUBNET_DEPTH`。`HIGH-26` で 64 → 16）が入った。
+>
+> **デシリアライズ経路は `HIGH-26` の修正で閉じた（2026-08-20 再判定）。**
+> RON リーダは全経路が `composition::RON_RECURSION_LIMIT`（192）を使うようになり、
+> 予算を**超えた入力はパース中にエラーを返す**（スタックを消費し切らない。
+> 実測で RON 360 段は 2 MiB スタックに収まり、464 段で溢れる）。上限は
+> `MAX_SUBNET_DEPTH`（**64 → 16**）が要求する段数の上に置かれ、保存側にも
+> 深さ検査が入ったので「保存できたが開けない」も消えた。詳細は
+> [`../closed/HIGH-26-ravprj-saves-deeper-than-it-loads.md`](../closed/HIGH-26-ravprj-saves-deeper-than-it-loads.md)
+> と `docs/dev/persistence.md` の「保存できたものは開ける」。
+>
+> **残っているのは評価側**（下記の `eval_node` / `pull_input` の再帰と、
+> ロード時 `normalize_*` の再帰走査）。数千ノードの直線チェーンは
+> `MAX_EVALUATION_DEPTH` で拒否されるが、再帰そのものは明示的な
+> ワークスタックになっていない。この項目はそのために未解決のまま残す。
+
+`eval_node` は `pull_input` を通じて再帰する（連鎖ノード1つあたり2スタックフレーム、
+各フレームが複数の `Vec` / キーを保持）。
+モジュールドキュメントは循環安全性を保証するが、**深さ**は一切制限していない。
+数千ノードの直線チェーン（プロシージャルグラフでは現実的。テストは 100 まで、`eval.rs:2098`）で
+ワーカースレッドのスタックを溢れさせプロセスが abort する（バックグラウンドスレッドの
+オーバーフローは catch 不能）。
+
+同じパターンが全サブネット再帰走査にある — `check_unique_node_ids`
+(`composition/mod.rs:567-580`)、ロード時の `normalize_*`、`Graph` のデシリアライズ
+(`graph.rs:293-297`)。深くネストしたサブネットを持つ細工済み / 破損した `.ravprj` や
+ジャーナルは、`Document::validate` を迂回してロード時にアプリをクラッシュさせられる。
+
+**修正方針**: `eval_node` を明示的なワークスタックに変換する（または評価ワーカーを
+大きい固定スタックで spawn し、文書化された深さ上限を超えたら `EvalError` を返す）。
+サブネットのデシリアライズ・検証にネスト深さ上限を追加。
+
+---
+
 ## MED-CORE-05 | perf | `attribute_transfer` が O(source×target)、ターゲットごとに重み `Vec` を確保
 
 **該当**: `crates/ravel-core/src/geometry/ops.rs:120-133`（ヘルパー `:510-538`）

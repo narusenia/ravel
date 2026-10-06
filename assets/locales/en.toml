@@ -1194,6 +1194,51 @@ hue_vs_hue = "Hue shift by hue (x is the hue, 0 and 1 are red; 0.5 is no shift, 
 hue_vs_sat = "Saturation by hue (0.5 is unchanged; the scale is twice the value)."
 hue_vs_lum = "Luminance gain by hue (0.5 is unchanged; the gain is twice the value; grays are not affected)."
 
+[node."comp.directional_blur"]
+label = "Directional Blur"
+description = "Smears an image along one direction. Pixels past the border repeat the edge pixel, so the border never fades."
+[node."comp.directional_blur".params]
+length = "Blur length in composition pixels (the same picture at any preview scale)."
+angle = "Direction in degrees. 0 smears horizontally only, 90 vertically."
+
+[node."comp.radial_blur"]
+label = "Radial Blur"
+description = "Blurs around a center point, by spinning or zooming. The center point itself does not change."
+[node."comp.radial_blur".params]
+mode = "spin (rotate around the center) or zoom (smear toward the center)."
+angle = "Spin mode: total rotation of the blur in degrees."
+zoom = "Zoom mode: how far toward the center each pixel smears, as a fraction of its distance (0 to 1)."
+center = "Center point as a fraction of the frame (0.5, 0.5 is the middle)."
+
+[node."comp.sharpen"]
+label = "Sharpen"
+description = "Sharpens with an unsharp mask: subtracts a blurred copy to boost edges. Alpha is kept."
+[node."comp.sharpen".params]
+amount = "Strength of the sharpening (0 does nothing)."
+radius = "Blur radius of the mask in composition pixels."
+
+[node."comp.warp"]
+label = "Warp"
+description = "Displaces pixels by a map image. The map's red moves pixels across and green down; mid-gray moves nothing. Without a map the image passes through."
+[node."comp.warp".params]
+amount = "Displacement at full map value, in composition pixels (x, y). A map of another size is stretched over the image."
+
+[node."comp.lens_distortion"]
+label = "Lens Distortion"
+description = "Barrel or pincushion distortion around a center point. An amount of 0 is the identity."
+[node."comp.lens_distortion".params]
+amount = "Distortion coefficient. Positive samples outward (barrel), negative inward (pincushion)."
+center = "Center point as a fraction of the frame (0.5, 0.5 is the middle)."
+
+[node."comp.ripple"]
+label = "Ripple"
+description = "Concentric waves radiating from a center point. An amplitude of 0 is the identity."
+[node."comp.ripple".params]
+amplitude = "Wave height in composition pixels."
+wavelength = "Distance between wave crests in composition pixels."
+phase = "Wave offset in wavelengths; animate it to make the ripple travel."
+center = "Center point as a fraction of the frame (0.5, 0.5 is the middle)."
+
 [node."color.ramp"]
 label = "Color Ramp"
 description = "Maps a value to a color through a gradient, so a number drives a hue rather than a brightness."

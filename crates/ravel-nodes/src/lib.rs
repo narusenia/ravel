@@ -370,6 +370,42 @@ pub fn processor_for_node(
             shaders,
             pool.clone(),
         ))),
+        "comp.directional_blur" => Some(Arc::new(comp::CompDistortProcessor::new(
+            comp::DistortKind::DirectionalBlur,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.radial_blur" => Some(Arc::new(comp::CompDistortProcessor::new(
+            comp::DistortKind::RadialBlur,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.sharpen" => Some(Arc::new(comp::CompDistortProcessor::new(
+            comp::DistortKind::Sharpen,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.warp" => Some(Arc::new(comp::CompDistortProcessor::new(
+            comp::DistortKind::Warp,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.lens_distortion" => Some(Arc::new(comp::CompDistortProcessor::new(
+            comp::DistortKind::LensDistortion,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.ripple" => Some(Arc::new(comp::CompDistortProcessor::new(
+            comp::DistortKind::Ripple,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
         "comp.alpha" => Some(Arc::new(comp::CompAlphaProcessor::new(
             ctx.clone(),
             shaders,
@@ -502,6 +538,12 @@ mod tests {
             "comp.curves",
             "comp.lift_gamma_gain",
             "comp.hsl_curves",
+            "comp.directional_blur",
+            "comp.radial_blur",
+            "comp.sharpen",
+            "comp.warp",
+            "comp.lens_distortion",
+            "comp.ripple",
             "comp.transform",
             "comp.merge.normal",
             "comp.merge.adjustment",
@@ -737,6 +779,309 @@ mod tests {
             .expect("readback");
         let px = &fb.as_f32()[..4];
         [px[0], px[1], px[2], px[3]]
+    }
+
+    /// The image-effect nodes whose parameters all animate (FX-2).
+    const DISTORT_NODES: [&str; 6] = [
+        "comp.directional_blur",
+        "comp.radial_blur",
+        "comp.sharpen",
+        "comp.warp",
+        "comp.lens_distortion",
+        "comp.ripple",
+    ];
+
+    /// Every FX-2 node, built from the registry's own template, evaluates
+    /// through `register_all_processors` (a template without a processor, or a
+    /// processor keyed on another name, fails here) and, with its default
+    /// parameters set to the neutral values, keeps the image's size.
+    #[test]
+    fn every_distort_template_has_a_processor_and_evaluates() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let mut shaders = ShaderManager::new(gpu.clone());
+        let mut reg = ravel_core::registry::NodeRegistry::new();
+        builtin::register_builtins(&mut reg);
+        for type_key in DISTORT_NODES {
+            let mut graph = Graph::new()
+                .add_node(reg.create_node("comp.solid", NodeId::new(1)).unwrap())
+                .unwrap()
+                .add_node(reg.create_node(type_key, NodeId::new(2)).unwrap())
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(1),
+                    NodeId::new(1),
+                    OutputPortIndex(0),
+                    NodeId::new(2),
+                    InputPortIndex(0),
+                )
+                .unwrap();
+            if type_key == "comp.warp" {
+                graph = graph
+                    .add_node(reg.create_node("comp.solid", NodeId::new(3)).unwrap())
+                    .unwrap()
+                    .add_edge(
+                        EdgeId::new(2),
+                        NodeId::new(3),
+                        OutputPortIndex(0),
+                        NodeId::new(2),
+                        InputPortIndex(1),
+                    )
+                    .unwrap();
+            }
+            let mut ev = Evaluator::new();
+            let pool = shared_texture_pool(&gpu);
+            let frames = MediaFrameCache::standalone();
+            register_all_processors(&mut ev, &graph, &gpu, &mut shaders, &pool, &frames);
+            let out = ev.evaluate(&graph, NodeId::new(2), &ctx()).unwrap();
+            let fb = out
+                .downcast_ref::<ravel_gpu::GpuFrameBuffer>()
+                .unwrap_or_else(|| panic!("{type_key} stays GPU-resident"))
+                .to_frame_buffer()
+                .expect("readback");
+            assert_eq!((fb.width, fb.height), (4, 4), "{type_key}");
+            // Opaque white in: a uniform image stays uniform whatever the
+            // distortion (edge clamp), so the template defaults cannot have
+            // produced anything but white.
+            for px in fb.as_f32().chunks_exact(4) {
+                for (g, w) in px.iter().zip([1.0f32; 4]) {
+                    assert!((g - w).abs() < 1e-5, "{type_key}: {px:?}");
+                }
+            }
+        }
+    }
+
+    /// Every numeric parameter of an FX-2 node is a unified animation channel
+    /// (`Float` / `Channel2`), none a plain value the animation system cannot
+    /// reach; the strings are the one dropdown.
+    #[test]
+    fn distort_parameters_are_animation_channels() {
+        let mut reg = ravel_core::registry::NodeRegistry::new();
+        builtin::register_builtins(&mut reg);
+        for type_key in DISTORT_NODES {
+            for p in &reg.get(type_key).unwrap().default_params {
+                match p.value {
+                    ParameterValue::Float(_) | ParameterValue::Channel2(_) => {}
+                    ParameterValue::String(_) => assert_eq!(
+                        (type_key, p.key.as_str()),
+                        ("comp.radial_blur", "mode"),
+                        "unexpected string parameter"
+                    ),
+                    ref other => panic!("{type_key}.{} is {other:?}", p.key),
+                }
+            }
+        }
+    }
+
+    /// An animated FX-2 parameter changes the picture between frames: the
+    /// processor reads each one per frame under the right key.
+    #[test]
+    fn distort_parameters_animate_through_the_unified_channels() {
+        use ravel_core::animation::Interpolation;
+        use ravel_core::animation::channel::AnimationChannel;
+        use ravel_core::animation::curve::KeyframeCurve;
+
+        // `(type_key, param, from, to, mode, fixed floats)`; Channel2 params key
+        // both components. The fixed floats keep the animated parameter
+        // visible (a blur angle is moot at length 0).
+        type Case = (
+            &'static str,
+            &'static str,
+            f32,
+            f32,
+            Option<&'static str>,
+            &'static [(&'static str, f32)],
+        );
+        let cases: &[Case] = &[
+            ("comp.directional_blur", "length", 0.0, 6.0, None, &[]),
+            (
+                "comp.directional_blur",
+                "angle",
+                0.0,
+                90.0,
+                None,
+                &[("length", 6.0)],
+            ),
+            ("comp.radial_blur", "angle", 0.0, 60.0, Some("spin"), &[]),
+            ("comp.radial_blur", "zoom", 0.0, 0.8, Some("zoom"), &[]),
+            (
+                "comp.radial_blur",
+                "center",
+                0.5,
+                0.0,
+                Some("spin"),
+                &[("angle", 60.0)],
+            ),
+            ("comp.sharpen", "amount", 0.0, 3.0, None, &[]),
+            ("comp.sharpen", "radius", 0.0, 3.0, None, &[("amount", 3.0)]),
+            ("comp.warp", "amount", 0.0, 3.0, None, &[]),
+            ("comp.lens_distortion", "amount", 0.0, 0.9, None, &[]),
+            (
+                "comp.lens_distortion",
+                "center",
+                0.5,
+                0.0,
+                None,
+                &[("amount", 0.9)],
+            ),
+            ("comp.ripple", "amplitude", 0.0, 3.0, None, &[]),
+            ("comp.ripple", "wavelength", 20.0, 3.0, None, &[]),
+            ("comp.ripple", "phase", 0.0, 0.3, None, &[]),
+            ("comp.ripple", "center", 0.5, 0.0, None, &[]),
+        ];
+        let at = |type_key: &str,
+                  key: &str,
+                  from: f32,
+                  to: f32,
+                  mode: Option<&str>,
+                  fixed: &[(&str, f32)],
+                  frame: u64|
+         -> Vec<f32> {
+            let gpu = GpuContext::new_blocking().expect("GPU required");
+            let mut shaders = ShaderManager::new(gpu.clone());
+            let mut reg = ravel_core::registry::NodeRegistry::new();
+            builtin::register_builtins(&mut reg);
+            // The source has structure (a checkerboard): every effect of a
+            // uniform image is invisible. `comp.warp` gets a varying map too.
+            let mut node = reg.create_node(type_key, NodeId::new(2)).unwrap();
+            let keyed = |a: f32, b: f32| {
+                let mut curve = KeyframeCurve::new();
+                curve.insert(0, a, Interpolation::Linear);
+                curve.insert(10, b, Interpolation::Linear);
+                AnimationChannel::keyframes(curve)
+            };
+            let slot = node.parameters.iter_mut().find(|p| p.key == key).unwrap();
+            slot.value = match slot.value {
+                ParameterValue::Float(_) => ParameterValue::Channel(keyed(from, to)),
+                ParameterValue::Channel2(_) => {
+                    ParameterValue::Channel2([keyed(from, to), keyed(from, to)])
+                }
+                ref other => panic!("{type_key}.{key} is {other:?}"),
+            };
+            if let Some(mode) = mode {
+                node.parameters
+                    .iter_mut()
+                    .find(|p| p.key == "mode")
+                    .unwrap()
+                    .value = ParameterValue::String(mode.into());
+            }
+            for (key, v) in fixed {
+                node.parameters
+                    .iter_mut()
+                    .find(|p| p.key == *key)
+                    .unwrap()
+                    .value = ParameterValue::Float(*v);
+            }
+            let graph = Graph::new()
+                .add_node(
+                    Node::new(NodeId::new(1), "test.image")
+                        .with_output("output", DataTypeId::FRAME_BUFFER),
+                )
+                .unwrap()
+                .add_node(node)
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(1),
+                    NodeId::new(1),
+                    OutputPortIndex(0),
+                    NodeId::new(2),
+                    InputPortIndex(0),
+                )
+                .unwrap();
+            let graph = if type_key == "comp.warp" {
+                graph
+                    .add_node(
+                        Node::new(NodeId::new(3), "test.map")
+                            .with_output("output", DataTypeId::FRAME_BUFFER),
+                    )
+                    .unwrap()
+                    .add_edge(
+                        EdgeId::new(2),
+                        NodeId::new(3),
+                        OutputPortIndex(0),
+                        NodeId::new(2),
+                        InputPortIndex(1),
+                    )
+                    .unwrap()
+            } else {
+                graph
+            };
+            let image = FrameBuffer::from_f32(
+                8,
+                8,
+                (0..64)
+                    .flat_map(|i| {
+                        let v = if (i % 8 + i / 8) % 2 == 0 { 0.9 } else { 0.1 };
+                        [v, 0.2 + v * 0.5, 0.3, 1.0]
+                    })
+                    .collect(),
+            );
+            let map = FrameBuffer::from_f32(
+                8,
+                8,
+                (0..64)
+                    .flat_map(|i| [(i % 8) as f32 / 7.0, (i / 8) as f32 / 7.0, 0.5, 1.0])
+                    .collect(),
+            );
+            struct Fixed(FrameBuffer);
+            impl ravel_core::eval::NodeProcessor for Fixed {
+                fn process(
+                    &self,
+                    _node: &Node,
+                    _ctx: &EvalContext,
+                    _inputs: &[Option<Arc<dyn ravel_core::types::NodeData>>],
+                    _params: &ravel_core::eval::ResolvedParams,
+                    _scope: &mut dyn ravel_core::eval::EvalScope,
+                ) -> anyhow::Result<Arc<dyn ravel_core::types::NodeData>> {
+                    Ok(Arc::new(self.0.clone()))
+                }
+            }
+            let mut ev = Evaluator::new();
+            ev.register(NodeId::new(1), Arc::new(Fixed(image)));
+            ev.register(NodeId::new(3), Arc::new(Fixed(map)));
+            let pool = shared_texture_pool(&gpu);
+            let frames = MediaFrameCache::standalone();
+            register_all_processors(&mut ev, &graph, &gpu, &mut shaders, &pool, &frames);
+            let out = ev
+                .evaluate(
+                    &graph,
+                    NodeId::new(2),
+                    &EvalContext::new(frame, FrameRate::new(30, 1), (8, 8)),
+                )
+                .unwrap();
+            out.downcast_ref::<ravel_gpu::GpuFrameBuffer>()
+                .expect("GPU-resident")
+                .to_frame_buffer()
+                .expect("readback")
+                .as_f32()
+                .to_vec()
+        };
+        for &(type_key, key, from, to, mode, fixed) in cases {
+            let a = at(type_key, key, from, to, mode, fixed, 0);
+            let b = at(type_key, key, from, to, mode, fixed, 10);
+            assert!(
+                a.iter().zip(&b).any(|(x, y)| (x - y).abs() > 1e-3),
+                "{type_key}.{key} did not change the output between frames"
+            );
+        }
+    }
+
+    /// The dropdown values the radial blur template offers are exactly the
+    /// ones the processor understands.
+    #[test]
+    fn comp_radial_blur_template_modes_are_all_known_to_the_processor() {
+        let mut reg = ravel_core::registry::NodeRegistry::new();
+        builtin::register_builtins(&mut reg);
+        let offered = reg
+            .param_options("comp.radial_blur", "mode")
+            .expect("mode options");
+        assert_eq!(
+            offered.iter().map(String::as_str).collect::<Vec<_>>(),
+            builtin::COMP_RADIAL_BLUR_MODES
+        );
+        for mode in offered {
+            assert!(comp::radial_blur_mode_is_known(mode), "{mode}");
+        }
+        assert!(!comp::radial_blur_mode_is_known("no_such_mode"));
     }
 
     /// Every colour-adjustment node, built from the registry's own template,

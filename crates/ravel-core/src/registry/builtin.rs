@@ -192,6 +192,12 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(comp_curves());
     reg.register(comp_lift_gamma_gain());
     reg.register(comp_hsl_curves());
+    reg.register(comp_directional_blur());
+    reg.register(comp_radial_blur());
+    reg.register(comp_sharpen());
+    reg.register(comp_warp());
+    reg.register(comp_lens_distortion());
+    reg.register(comp_ripple());
     reg.register(color_ramp());
     reg.register(rasterize());
     reg.register(shape_rect());
@@ -2095,6 +2101,100 @@ fn comp_hsl_curves() -> NodeTemplate {
         .with_param(curve_parameter("hue_vs_lum", neutral()))
 }
 
+/// A frame fraction (0.5, 0.5 is the middle); shared by the nodes that act
+/// about a point.
+fn comp_center_parameter() -> Parameter {
+    channel2_parameter("center", 0.5, 0.5)
+}
+
+/// `comp.directional_blur`: a box blur along an angle. Lengths are in
+/// composition pixels (a preview scale does not change the picture).
+fn comp_directional_blur() -> NodeTemplate {
+    NodeTemplate::new(
+        "comp.directional_blur",
+        "Directional Blur",
+        NodeCategory::Image,
+    )
+    .with_input(frame_buffer_input("image"))
+    .with_output(frame_buffer_output())
+    .with_param(float_parameter("length", 0.0))
+    .with_param(float_parameter("angle", 0.0))
+    .with_param_range("length", 0.0..=1000.0, 0.0..=100.0)
+    .with_param_range("angle", -3600.0..=3600.0, -180.0..=180.0)
+}
+
+/// The `mode` values of `comp.radial_blur`, in dropdown order.
+pub const COMP_RADIAL_BLUR_MODES: [&str; 2] = ["spin", "zoom"];
+
+/// `comp.radial_blur`: spin or zoom blur about a point; the point itself is
+/// unchanged. `angle` is read in `spin` mode, `zoom` in `zoom` mode.
+fn comp_radial_blur() -> NodeTemplate {
+    NodeTemplate::new("comp.radial_blur", "Radial Blur", NodeCategory::Image)
+        .with_input(frame_buffer_input("image"))
+        .with_output(frame_buffer_output())
+        .with_param(string_parameter("mode", "spin"))
+        .with_param(float_parameter("angle", 0.0))
+        .with_param(float_parameter("zoom", 0.0))
+        .with_param(comp_center_parameter())
+        .with_param_options("mode", COMP_RADIAL_BLUR_MODES)
+        .with_param_range("angle", -360.0..=360.0, -90.0..=90.0)
+        .with_param_range("zoom", 0.0..=1.0, 0.0..=1.0)
+        .with_param_range("center", -10.0..=10.0, 0.0..=1.0)
+}
+
+/// `comp.sharpen`: unsharp mask. `radius` is in composition pixels.
+fn comp_sharpen() -> NodeTemplate {
+    NodeTemplate::new("comp.sharpen", "Sharpen", NodeCategory::Image)
+        .with_input(frame_buffer_input("image"))
+        .with_output(frame_buffer_output())
+        .with_param(float_parameter("amount", 0.0))
+        .with_param(float_parameter("radius", 2.0))
+        .with_param_range("amount", 0.0..=20.0, 0.0..=5.0)
+        .with_param_range("radius", 0.0..=100.0, 0.0..=20.0)
+}
+
+/// `comp.warp`: displacement-map warp; the `map` input drives it (R across,
+/// G down, mid-gray is no shift) and without it the image passes through.
+fn comp_warp() -> NodeTemplate {
+    NodeTemplate::new("comp.warp", "Warp", NodeCategory::Image)
+        .with_input(frame_buffer_input("image"))
+        .with_input(frame_buffer_input("map"))
+        .with_output(frame_buffer_output())
+        .with_param(channel2_parameter("amount", 10.0, 10.0))
+        .with_param_range("amount", -10_000.0..=10_000.0, -200.0..=200.0)
+}
+
+/// `comp.lens_distortion`: radial lens model; `amount` 0 is the identity.
+fn comp_lens_distortion() -> NodeTemplate {
+    NodeTemplate::new(
+        "comp.lens_distortion",
+        "Lens Distortion",
+        NodeCategory::Image,
+    )
+    .with_input(frame_buffer_input("image"))
+    .with_output(frame_buffer_output())
+    .with_param(float_parameter("amount", 0.0))
+    .with_param(comp_center_parameter())
+    .with_param_range("amount", -2.0..=2.0, -1.0..=1.0)
+    .with_param_range("center", -10.0..=10.0, 0.0..=1.0)
+}
+
+/// `comp.ripple`: concentric radial waves; `amplitude` 0 is the identity.
+/// Lengths are in composition pixels, `phase` in wavelengths.
+fn comp_ripple() -> NodeTemplate {
+    NodeTemplate::new("comp.ripple", "Ripple", NodeCategory::Image)
+        .with_input(frame_buffer_input("image"))
+        .with_output(frame_buffer_output())
+        .with_param(float_parameter("amplitude", 10.0))
+        .with_param(float_parameter("wavelength", 60.0))
+        .with_param(float_parameter("phase", 0.0))
+        .with_param(comp_center_parameter())
+        .with_param_range("amplitude", -1000.0..=1000.0, -100.0..=100.0)
+        .with_param_range("wavelength", 1.0..=10_000.0, 4.0..=500.0)
+        .with_param_range("phase", -1000.0..=1000.0, -1.0..=1.0)
+        .with_param_range("center", -10.0..=10.0, 0.0..=1.0)
+}
+
 /// `shape.rect`: a sized quad, and the one node a Solid layer's network is
 /// built on (`assets/layer-templates/solid.ron`).
 ///
@@ -2906,7 +3006,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 100);
+        assert_eq!(reg.all_templates().count(), 106);
     }
 
     #[test]
@@ -2916,7 +3016,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 28);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
-        assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 15);
+        assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 21);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
         assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 28);

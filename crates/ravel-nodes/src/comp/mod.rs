@@ -17,6 +17,7 @@
 mod alpha;
 mod background;
 mod colorize;
+mod distort;
 #[cfg(test)]
 mod fx_test_util;
 mod grade;
@@ -28,6 +29,7 @@ mod transform;
 pub use alpha::{CompAlphaProcessor, comp_alpha_mode_is_known};
 pub use background::CompBackgroundProcessor;
 pub use colorize::{ColorizeKind, CompColorizeProcessor};
+pub use distort::{CompDistortProcessor, DistortKind, radial_blur_mode_is_known};
 pub use grade::{CompGradeProcessor, GradeKind};
 pub use merge::{CompMergeGpuProcessor, CompMergeProcessor};
 pub use opacity::{CompOpacityGpuProcessor, CompOpacityProcessor};

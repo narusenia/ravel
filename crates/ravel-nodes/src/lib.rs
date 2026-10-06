@@ -314,6 +314,32 @@ pub fn processor_for_node(
             pool.clone(),
             node,
         ))),
+        // User-placed image nodes (not shell nodes): they read nothing from
+        // the `Document`.
+        "comp.solid" => Some(Arc::new(comp::CompSolidProcessor::new(
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+            node,
+        ))),
+        "comp.fill" => Some(Arc::new(comp::CompColorizeProcessor::new(
+            comp::ColorizeKind::Fill,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.tint" => Some(Arc::new(comp::CompColorizeProcessor::new(
+            comp::ColorizeKind::Tint,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.alpha" => Some(Arc::new(comp::CompAlphaProcessor::new(
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+            node,
+        ))),
         // One pipeline serves every blend mode; `comp::CompMergeProcessor`
         // stays public as the CPU reference tests register explicitly.
         t if t.starts_with("comp.merge.") => Some(Arc::new(comp::CompMergeGpuProcessor::new(
@@ -430,6 +456,10 @@ mod tests {
             "merge",
             "rasterize",
             "comp.opacity",
+            "comp.solid",
+            "comp.fill",
+            "comp.tint",
+            "comp.alpha",
             "comp.transform",
             "comp.merge.normal",
             "comp.merge.adjustment",
@@ -456,6 +486,70 @@ mod tests {
             proc.rebuild_on_node_change(),
             "a node-state processor must keep the conservative default"
         );
+    }
+
+    /// The four user-placed image nodes are registered *and* evaluable: a chain
+    /// built from the registry's own templates (so a template without a
+    /// processor, or a processor keyed on another name, fails here) renders.
+    #[test]
+    fn solid_tint_alpha_chain_built_from_templates_evaluates() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let mut shaders = ShaderManager::new(gpu.clone());
+        let mut reg = ravel_core::registry::NodeRegistry::new();
+        builtin::register_builtins(&mut reg);
+
+        let node = |id: u64, key: &str| reg.create_node(key, NodeId::new(id)).expect(key);
+        let mut graph = Graph::new();
+        for (id, key) in [(1, "comp.solid"), (2, "comp.tint"), (3, "comp.alpha")] {
+            graph = graph.add_node(node(id, key)).unwrap();
+        }
+        for (edge, from, to) in [(1, 1, 2), (2, 2, 3)] {
+            graph = graph
+                .add_edge(
+                    EdgeId::new(edge),
+                    NodeId::new(from),
+                    OutputPortIndex(0),
+                    NodeId::new(to),
+                    InputPortIndex(0),
+                )
+                .unwrap();
+        }
+        // Default `comp.solid` is opaque white; default tint maps white to
+        // white; default `comp.alpha` inverts: white at alpha 0.
+        let mut ev = Evaluator::new();
+        let pool = shared_texture_pool(&gpu);
+        let frames = MediaFrameCache::standalone();
+        register_all_processors(&mut ev, &graph, &gpu, &mut shaders, &pool, &frames);
+        let out = ev.evaluate(&graph, NodeId::new(3), &ctx()).unwrap();
+        let fb = out
+            .downcast_ref::<ravel_gpu::GpuFrameBuffer>()
+            .expect("the chain stays GPU-resident")
+            .to_frame_buffer()
+            .expect("readback");
+        assert_eq!((fb.width, fb.height), (4, 4));
+        for px in fb.as_f32().chunks_exact(4) {
+            assert_eq!(px, [1.0, 1.0, 1.0, 0.0]);
+        }
+    }
+
+    /// The dropdown values the template offers are exactly the ones the
+    /// processor understands.
+    #[test]
+    fn comp_alpha_template_modes_are_all_known_to_the_processor() {
+        let mut reg = ravel_core::registry::NodeRegistry::new();
+        builtin::register_builtins(&mut reg);
+        let offered = reg
+            .param_options("comp.alpha", "mode")
+            .expect("mode options");
+        assert_eq!(
+            offered.iter().map(String::as_str).collect::<Vec<_>>(),
+            builtin::COMP_ALPHA_MODES
+        );
+        assert!(comp::comp_alpha_mode_is_known("invert"));
+        for mode in offered {
+            assert!(comp::comp_alpha_mode_is_known(mode), "{mode}");
+        }
+        assert!(!comp::comp_alpha_mode_is_known("no_such_mode"));
     }
 
     #[test]

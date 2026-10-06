@@ -1107,6 +1107,31 @@ brightness = "全チャネルに加算する量（-1〜1）。"
 contrast = "中間グレーからの距離の倍率（1 で変化なし）。"
 saturation = "輝度からの距離の倍率（1 で変化なし、0 でグレー）。"
 
+[node."comp.solid"]
+label = "ソリッド"
+description = "コンポジションの解像度で単色のフレームを生成する。"
+[node."comp.solid".params]
+color = "全画素の色。"
+
+[node."comp.fill"]
+label = "塗りつぶし（画像）"
+description = "画像のアルファを保ったまま色を 1 色に置き換える。ジオメトリの塗りスタイルとは別物。"
+[node."comp.fill".params]
+color = "全画素の RGB を置き換える色（アルファは無視）。"
+
+[node."comp.tint"]
+label = "ティント"
+description = "画像の輝度を 2 色の間にマッピングする。アルファは保つ。"
+[node."comp.tint".params]
+map_black = "黒が写る色。"
+map_white = "白が写る色。"
+
+[node."comp.alpha"]
+label = "アルファ"
+description = "アルファの反転、輝度との相互変換、マット入力によるマスクを行う。"
+[node."comp.alpha".params]
+mode = "invert（反転）、luma_to_alpha（輝度×アルファ）、alpha_to_luma（アルファの不透明グレー）、matte_alpha / matte_luma（マットのアルファまたは輝度を掛ける。サイズが違うマットは画像全体へ引き伸ばす）。"
+
 [node."color.ramp"]
 label = "カラーランプ"
 description = "グラデーションで値を色に写す。明るさではなく色そのものを数値で動かせる。"

@@ -107,6 +107,19 @@ intrusive list に変更。
 分母の意味をラベルに書く（`/ completed evaluation` を `/ successful evaluation` と
 区別する）。どちらでも「0 を 1 と書かない」ことが要点。
 
+**LOW-GPU-06 | bug | `blur` の半径がプレビュー縮尺に追従しない**
+`crates/ravel-nodes/src/blur.rs`（`process` が `params.f32_or("radius", 5.0)` を
+そのまま `sanitized_radius` に渡す）
+半径を評価解像度のピクセル数として使うので、`ViewerResolution` が `Half` /
+`Quarter` のとき（既定は `Half`）、同じ半径が合成座標で 2 倍 / 4 倍ぼけて見える。
+フル解像度の書き出しとプレビューで絵が変わる。後発の `comp.directional_blur` /
+`comp.sharpen` などは `composition_scale`（`crates/ravel-nodes/src/lib.rs`）を
+掛けて合わせている — `comp.sharpen` は内部で `BlurProcessor` を呼ぶので、
+呼ぶ側で縮尺を掛けて回避した（`FX-2` の実装中に発見。既存の挙動で、
+`FX-2` が入れた退行ではない）。
+→ `process` で `radius` に `composition_scale` の幾何平均を掛ける。
+その際 `comp.sharpen` 側の補正を外す（二重に掛かる）。
+
 ---
 
 ## ravel-media / ravel-audio

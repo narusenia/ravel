@@ -440,8 +440,7 @@ fn a_render_of_a_project_with_sound_writes_a_wav_beside_the_frames() {
 
     let last: serde_json::Value = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter(|line| !line.trim().is_empty())
-        .next_back()
+        .rfind(|line| !line.trim().is_empty())
         .map(|line| serde_json::from_str(line).expect("the last line is JSON"))
         .expect("at least one line");
     assert_eq!(last["event"], "completed");

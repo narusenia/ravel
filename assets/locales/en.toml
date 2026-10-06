@@ -1239,6 +1239,35 @@ wavelength = "Distance between wave crests in composition pixels."
 phase = "Wave offset in wavelengths; animate it to make the ripple travel."
 center = "Center point as a fraction of the frame (0.5, 0.5 is the middle)."
 
+[node."comp.mirror"]
+label = "Mirror"
+description = "Flips the image about the center of the frame. Applying it twice gives the original back."
+[node."comp.mirror".params]
+mode = "horizontal (left and right swap), vertical (top and bottom swap) or both."
+
+[node."comp.tile"]
+label = "Tile"
+description = "Repeats the image in a grid, each copy the whole image shrunk to fit. Copies wrap around at the edges; 1 by 1 is the original."
+[node."comp.tile".params]
+columns = "Copies across (rounded to a whole number, 1 to 256)."
+rows = "Copies down (rounded to a whole number, 1 to 256)."
+
+[node."comp.mask"]
+label = "Mask"
+description = "Keeps the image where a geometry covers it and clears the alpha everywhere else. The geometry is drawn the way Rasterize draws it, so its coverage and anti-aliasing match. Without a geometry the image passes through."
+[node."comp.mask".params]
+invert = "Keep the image outside the geometry instead of inside."
+
+[node."comp.key"]
+label = "Key"
+description = "Removes a backdrop by color or brightness: pixels near the key color become transparent. Only alpha changes; there is no spill suppression or edge treatment."
+[node."comp.key".params]
+mode = "chroma (compare hue and saturation, so a dim backdrop keys like a bright one) or luma (compare brightness only)."
+key_color = "The color to remove. In luma mode only its brightness counts."
+tolerance = "How far from the key color a pixel is still removed completely."
+softness = "Width of the soft edge beyond the tolerance, where the alpha ramps back to opaque. 0 is a hard edge."
+invert = "Keep only the pixels near the key color and remove the rest."
+
 [node."color.ramp"]
 label = "Color Ramp"
 description = "Maps a value to a color through a gradient, so a number drives a hue rather than a brightness."

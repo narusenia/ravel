@@ -1227,6 +1227,35 @@ wavelength = "波の山と山の間隔（コンポジションのピクセル）
 phase = "波のずれ（波長単位）。動かすと波が伝わる。"
 center = "中心点（フレームに対する割合。0.5, 0.5 が中央）。"
 
+[node."comp.mirror"]
+label = "ミラー"
+description = "フレームの中心を軸に画像を反転する。2 回かけると元に戻る。"
+[node."comp.mirror".params]
+mode = "horizontal（左右を入れ替え）、vertical（上下を入れ替え）、both（両方）。"
+
+[node."comp.tile"]
+label = "タイル"
+description = "画像全体を縮めたコピーをグリッド状に並べる。端では反対側へ回り込み、1 × 1 なら元のまま。"
+[node."comp.tile".params]
+columns = "横に並べる数（整数に丸める。1〜256）。"
+rows = "縦に並べる数（整数に丸める。1〜256）。"
+
+[node."comp.mask"]
+label = "マスク"
+description = "ジオメトリが覆う部分だけ画像を残し、それ以外のアルファを 0 にする。ジオメトリはラスタライズと同じ方法で描くので、被覆とアンチエイリアスが一致する。ジオメトリがなければ画像をそのまま通す。"
+[node."comp.mask".params]
+invert = "ジオメトリの内側ではなく外側を残す。"
+
+[node."comp.key"]
+label = "キー"
+description = "色または明るさで背景を抜く。キー色に近い画素が透明になる。変わるのはアルファだけで、スピル抑制やエッジ処理はない。"
+[node."comp.key".params]
+mode = "chroma（色相と彩度で比べる。暗い背景も明るい背景と同じように抜ける）または luma（明るさだけで比べる）。"
+key_color = "抜く色。luma ではその明るさだけが効く。"
+tolerance = "キー色からどこまで離れた画素を完全に抜くか。"
+softness = "許容範囲の外側で、アルファが不透明へ戻るなだらかな幅。0 で硬い縁。"
+invert = "キー色に近い画素だけを残し、それ以外を抜く。"
+
 [node."color.ramp"]
 label = "カラーランプ"
 description = "グラデーションで値を色に写す。明るさではなく色そのものを数値で動かせる。"

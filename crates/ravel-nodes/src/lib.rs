@@ -406,6 +406,29 @@ pub fn processor_for_node(
             shaders,
             pool.clone(),
         ))),
+        "comp.mirror" => Some(Arc::new(comp::CompTileProcessor::new(
+            comp::TileKind::Mirror,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.tile" => Some(Arc::new(comp::CompTileProcessor::new(
+            comp::TileKind::Tile,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.mask" => Some(Arc::new(comp::CompMaskProcessor::new(
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+            node,
+        ))),
+        "comp.key" => Some(Arc::new(comp::CompKeyProcessor::new(
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
         "comp.alpha" => Some(Arc::new(comp::CompAlphaProcessor::new(
             ctx.clone(),
             shaders,
@@ -544,6 +567,10 @@ mod tests {
             "comp.warp",
             "comp.lens_distortion",
             "comp.ripple",
+            "comp.mirror",
+            "comp.tile",
+            "comp.mask",
+            "comp.key",
             "comp.transform",
             "comp.merge.normal",
             "comp.merge.adjustment",
@@ -781,17 +808,22 @@ mod tests {
         [px[0], px[1], px[2], px[3]]
     }
 
-    /// The image-effect nodes whose parameters all animate (FX-2).
-    const DISTORT_NODES: [&str; 6] = [
+    /// The image-effect nodes of the effects library (blur / distortion, then
+    /// mirror / tile / mask / key).
+    const FX_NODES: [&str; 10] = [
         "comp.directional_blur",
         "comp.radial_blur",
         "comp.sharpen",
         "comp.warp",
         "comp.lens_distortion",
         "comp.ripple",
+        "comp.mirror",
+        "comp.tile",
+        "comp.mask",
+        "comp.key",
     ];
 
-    /// Every FX-2 node, built from the registry's own template, evaluates
+    /// Every effect node, built from the registry's own template, evaluates
     /// through `register_all_processors` (a template without a processor, or a
     /// processor keyed on another name, fails here) and, with its default
     /// parameters set to the neutral values, keeps the image's size.
@@ -801,7 +833,7 @@ mod tests {
         let mut shaders = ShaderManager::new(gpu.clone());
         let mut reg = ravel_core::registry::NodeRegistry::new();
         builtin::register_builtins(&mut reg);
-        for type_key in DISTORT_NODES {
+        for type_key in FX_NODES {
             let mut graph = Graph::new()
                 .add_node(reg.create_node("comp.solid", NodeId::new(1)).unwrap())
                 .unwrap()
@@ -815,9 +847,15 @@ mod tests {
                     InputPortIndex(0),
                 )
                 .unwrap();
-            if type_key == "comp.warp" {
+            // The second input: a warp's map, a mask's geometry.
+            let second = match type_key {
+                "comp.warp" => Some("comp.solid"),
+                "comp.mask" => Some("shape.rect"),
+                _ => None,
+            };
+            if let Some(second) = second {
                 graph = graph
-                    .add_node(reg.create_node("comp.solid", NodeId::new(3)).unwrap())
+                    .add_node(reg.create_node(second, NodeId::new(3)).unwrap())
                     .unwrap()
                     .add_edge(
                         EdgeId::new(2),
@@ -839,6 +877,12 @@ mod tests {
                 .to_frame_buffer()
                 .expect("readback");
             assert_eq!((fb.width, fb.height), (4, 4), "{type_key}");
+            if type_key == "comp.mask" {
+                // Which pixels the default rectangle covers is `rasterize`'s
+                // business (tested in `comp/mask.rs`); here the chain only has
+                // to evaluate.
+                continue;
+            }
             // Opaque white in: a uniform image stays uniform whatever the
             // distortion (edge clamp), so the template defaults cannot have
             // produced anything but white.
@@ -851,21 +895,25 @@ mod tests {
     }
 
     /// Every numeric parameter of an FX-2 node is a unified animation channel
-    /// (`Float` / `Channel2`), none a plain value the animation system cannot
+    /// (`Float` / `Channel2` / `Channel4`), none a plain value the animation system cannot
     /// reach; the strings are the one dropdown.
     #[test]
     fn distort_parameters_are_animation_channels() {
         let mut reg = ravel_core::registry::NodeRegistry::new();
         builtin::register_builtins(&mut reg);
-        for type_key in DISTORT_NODES {
+        for type_key in FX_NODES {
             for p in &reg.get(type_key).unwrap().default_params {
                 match p.value {
-                    ParameterValue::Float(_) | ParameterValue::Channel2(_) => {}
-                    ParameterValue::String(_) => assert_eq!(
-                        (type_key, p.key.as_str()),
-                        ("comp.radial_blur", "mode"),
-                        "unexpected string parameter"
+                    ParameterValue::Float(_)
+                    | ParameterValue::Channel2(_)
+                    | ParameterValue::Channel4(_) => {}
+                    // The dropdowns and the switches are not animatable.
+                    ParameterValue::String(_) => assert!(
+                        p.key == "mode",
+                        "{type_key}.{} is a string but not a dropdown",
+                        p.key
                     ),
+                    ParameterValue::Bool(_) => assert_eq!(p.key, "invert"),
                     ref other => panic!("{type_key}.{} is {other:?}", p.key),
                 }
             }
@@ -927,6 +975,26 @@ mod tests {
             ("comp.ripple", "wavelength", 20.0, 3.0, None, &[]),
             ("comp.ripple", "phase", 0.0, 0.3, None, &[]),
             ("comp.ripple", "center", 0.5, 0.0, None, &[]),
+            ("comp.tile", "columns", 1.0, 3.0, None, &[]),
+            ("comp.tile", "rows", 1.0, 3.0, None, &[]),
+            ("comp.key", "tolerance", 0.0, 1.0, None, &[]),
+            (
+                "comp.key",
+                "softness",
+                0.0,
+                1.0,
+                None,
+                &[("tolerance", 0.5)],
+            ),
+            // Luma key: key luminance 0 -> 1 flips which checker squares go.
+            (
+                "comp.key",
+                "key_color",
+                0.0,
+                1.0,
+                Some("luma"),
+                &[("tolerance", 0.45)],
+            ),
         ];
         let at = |type_key: &str,
                   key: &str,
@@ -955,6 +1023,12 @@ mod tests {
                 ParameterValue::Channel2(_) => {
                     ParameterValue::Channel2([keyed(from, to), keyed(from, to)])
                 }
+                ParameterValue::Channel4(_) => ParameterValue::Channel4([
+                    keyed(from, to),
+                    keyed(from, to),
+                    keyed(from, to),
+                    keyed(from, to),
+                ]),
                 ref other => panic!("{type_key}.{key} is {other:?}"),
             };
             if let Some(mode) = mode {
@@ -1062,6 +1136,27 @@ mod tests {
                 a.iter().zip(&b).any(|(x, y)| (x - y).abs() > 1e-3),
                 "{type_key}.{key} did not change the output between frames"
             );
+        }
+    }
+
+    /// The dropdown values the mirror and key templates offer are exactly the
+    /// ones their processors understand.
+    #[test]
+    fn comp_mirror_and_key_template_modes_are_all_known_to_the_processor() {
+        let mut reg = ravel_core::registry::NodeRegistry::new();
+        builtin::register_builtins(&mut reg);
+        let offered = |type_key: &str| -> Vec<String> {
+            reg.param_options(type_key, "mode")
+                .expect("mode options")
+                .to_vec()
+        };
+        assert_eq!(offered("comp.mirror"), builtin::COMP_MIRROR_MODES);
+        assert_eq!(offered("comp.key"), builtin::COMP_KEY_MODES);
+        for mode in offered("comp.mirror") {
+            assert!(comp::comp_mirror_mode_is_known(&mode), "{mode}");
+        }
+        for mode in offered("comp.key") {
+            assert!(comp::comp_key_mode_is_known(&mode), "{mode}");
         }
     }
 

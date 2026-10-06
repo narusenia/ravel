@@ -364,6 +364,12 @@ pub fn processor_for_node(
             shaders,
             pool.clone(),
         ))),
+        "comp.hsl_curves" => Some(Arc::new(comp::CompGradeProcessor::new(
+            comp::GradeKind::HslCurves,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
         "comp.alpha" => Some(Arc::new(comp::CompAlphaProcessor::new(
             ctx.clone(),
             shaders,
@@ -495,6 +501,7 @@ mod tests {
             "comp.levels",
             "comp.curves",
             "comp.lift_gamma_gain",
+            "comp.hsl_curves",
             "comp.transform",
             "comp.merge.normal",
             "comp.merge.adjustment",

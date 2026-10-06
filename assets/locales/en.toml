@@ -1186,6 +1186,14 @@ lift = "Color black becomes (black leaves it unchanged); tints the shadows."
 gamma = "Per-channel midtone exponent (white leaves it unchanged; above 1 brightens that channel)."
 gain = "Color white becomes (white leaves it unchanged); tints and scales the highlights."
 
+[node."comp.hsl_curves"]
+label = "HSL Curves"
+description = "Adjusts hue, saturation and luminance as curves over the hue circle, to change one color range without touching the rest. Alpha is kept."
+[node."comp.hsl_curves".params]
+hue_vs_hue = "Hue shift by hue (x is the hue, 0 and 1 are red; 0.5 is no shift, a full unit is 360 degrees)."
+hue_vs_sat = "Saturation by hue (0.5 is unchanged; the scale is twice the value)."
+hue_vs_lum = "Luminance gain by hue (0.5 is unchanged; the gain is twice the value; grays are not affected)."
+
 [node."color.ramp"]
 label = "Color Ramp"
 description = "Maps a value to a color through a gradient, so a number drives a hue rather than a brightness."

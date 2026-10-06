@@ -191,6 +191,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(comp_levels());
     reg.register(comp_curves());
     reg.register(comp_lift_gamma_gain());
+    reg.register(comp_hsl_curves());
     reg.register(color_ramp());
     reg.register(rasterize());
     reg.register(shape_rect());
@@ -2078,6 +2079,19 @@ fn comp_lift_gamma_gain() -> NodeTemplate {
     .with_color_param("gain")
 }
 
+/// `comp.hsl_curves`: three `Curve` parameters read over the hue circle. The
+/// neutral curve is flat at 0.5 for all three (the hue axis is periodic; the
+/// node's module comment defines the seam).
+fn comp_hsl_curves() -> NodeTemplate {
+    let neutral = || CurveParam::linear([(0.0, 0.5), (1.0, 0.5)]);
+    NodeTemplate::new("comp.hsl_curves", "HSL Curves", NodeCategory::Image)
+        .with_input(frame_buffer_input("image"))
+        .with_output(frame_buffer_output())
+        .with_param(curve_parameter("hue_vs_hue", neutral()))
+        .with_param(curve_parameter("hue_vs_sat", neutral()))
+        .with_param(curve_parameter("hue_vs_lum", neutral()))
+}
+
 /// `shape.rect`: a sized quad, and the one node a Solid layer's network is
 /// built on (`assets/layer-templates/solid.ron`).
 ///
@@ -2889,7 +2903,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 99);
+        assert_eq!(reg.all_templates().count(), 100);
     }
 
     #[test]
@@ -2899,7 +2913,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 28);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
-        assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 14);
+        assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 15);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
         assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 28);

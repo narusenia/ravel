@@ -4,7 +4,7 @@
 //! The colour-adjustment and grading nodes: `comp.brightness_contrast`,
 //! `comp.hue_saturation`,
 //! `comp.levels`, `comp.curves`,
-//! `comp.lift_gamma_gain`.
+//! `comp.lift_gamma_gain`, `comp.hsl_curves`.
 //!
 //! One processor, one shader (`comp_grade.wgsl`), one uniform. [`GradeKind`]
 //! says which node a [`CompGradeProcessor`] is, and [`GradeKind::fill`] is the
@@ -19,6 +19,21 @@
 //! the one implementation in `ravel-core`, not a second one in WGSL. The cost
 //! is resolution: a step or a very tight bezier is quantised to 1/255 of the
 //! domain.
+//!
+//! **`comp.hsl_curves` and the hue axis.** Three curves (`hue_vs_hue`,
+//! `hue_vs_sat`, `hue_vs_lum`) are read over the hue circle, hue 0..360 degrees
+//! on the curve's x axis 0..1. A [`CurveParam`] clamps outside its end points
+//! and has no notion of a period, so the periodicity is defined here: entry `i`
+//! of the table is the curve at `i / 256` (x = 1 itself is never sampled),
+//! and the shader interpolates *circularly*, the entry after the last being the
+//! first. Red is x = 0 and x = 1 at once; with equal end values there is no
+//! seam, and with unequal ones the value glides from the curve's right end back
+//! to its left end across the last 1/256 of the circle (about 1.4 degrees).
+//! Every curve's neutral value is **0.5** (a flat curve at 0.5 does nothing):
+//! y = 0.5 + d is a hue shift of `d * 360` degrees, y is a saturation scale of
+//! `2y` and a luminance gain of `2y`. The luminance gain is weighted by the
+//! pixel's chroma (HSV saturation) so a gray, which has no hue, is not
+//! selected; a hue shift or a saturation scale already leaves grays unchanged.
 //!
 //! **Not shell nodes**: like `comp.fill` these are ordinary user-placed nodes
 //! and never decode a deterministic id or read the `Document`.
@@ -50,6 +65,7 @@ pub enum GradeKind {
     Levels = 2,
     Curves = 3,
     LiftGammaGain = 4,
+    HslCurves = 5,
 }
 
 #[repr(C)]
@@ -70,6 +86,7 @@ impl GradeKind {
             Self::Levels => "comp.levels",
             Self::Curves => "comp.curves",
             Self::LiftGammaGain => "comp.lift_gamma_gain",
+            Self::HslCurves => "comp.hsl_curves",
         }
     }
 
@@ -129,12 +146,30 @@ impl GradeKind {
                 out.b = rgb("gamma", 1.0);
                 out.c = rgb("gain", 1.0);
             }
+            // table[i] = (hue_vs_hue, hue_vs_sat, hue_vs_lum) at hue i / 256
+            // (see the module comment); a missing curve is the neutral flat
+            // 0.5.
+            Self::HslCurves => {
+                for (lane, key) in ["hue_vs_hue", "hue_vs_sat", "hue_vs_lum"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    bake(
+                        &mut out.table,
+                        lane,
+                        p,
+                        key,
+                        || CurveParam::linear([(0.0, 0.5), (1.0, 0.5)]),
+                        |i| i as f32 / TABLE_LEN as f32,
+                    );
+                }
+            }
             // table[i] = (rgb, red, green, blue) curves at x = i / 255. A
             // missing curve is the identity. The curves clamp outside [0, 1]
             // (an input above 1 takes the curve's value at 1).
             Self::Curves => {
                 for (lane, key) in ["rgb", "red", "green", "blue"].into_iter().enumerate() {
-                    bake(&mut out.table, lane, p, key, |i| {
+                    bake(&mut out.table, lane, p, key, CurveParam::identity, |i| {
                         i as f32 / (TABLE_LEN - 1) as f32
                     });
                 }
@@ -151,9 +186,10 @@ fn bake(
     lane: usize,
     p: &ResolvedParams,
     key: &str,
+    missing: impl Fn() -> CurveParam,
     x: impl Fn(usize) -> f32,
 ) {
-    let curve = p.curve(key).cloned().unwrap_or_else(CurveParam::identity);
+    let curve = p.curve(key).cloned().unwrap_or_else(missing);
     for (i, entry) in table.iter_mut().enumerate() {
         entry[lane] = curve.evaluate(x(i));
     }
@@ -370,6 +406,7 @@ mod tests {
             GradeKind::Levels,
             GradeKind::Curves,
             GradeKind::LiftGammaGain,
+            GradeKind::HslCurves,
         ] {
             let out = run(&gpu, kind, &[], &input);
             assert_matches(&out, &input, 1e-6, |rgb| rgb);
@@ -517,6 +554,154 @@ mod tests {
             }
         }
         assert_eq!(out.as_f32()[7], 0.5, "alpha is kept");
+    }
+
+    fn flat(y: f32) -> ResolvedValue {
+        curve(&[(0.0, y), (1.0, y)])
+    }
+
+    fn assert_pixels(out: &FrameBuffer, want: &[[f32; 3]], tol: f32) {
+        for (i, (px, want)) in out.as_f32().chunks_exact(4).zip(want).enumerate() {
+            for ch in 0..3 {
+                assert!(
+                    (px[ch] - want[ch]).abs() <= tol,
+                    "pixel {i}: {px:?} vs {want:?}"
+                );
+            }
+        }
+    }
+
+    const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+    const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+    const GRAY: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
+
+    #[test]
+    fn hsl_hue_vs_hue_shifts_every_hue_by_the_same_angle() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let input = frame(3, 1, &[RED, GREEN, GRAY]);
+        // 0.5 + 1/3 is +120 degrees.
+        let out = run(
+            &gpu,
+            GradeKind::HslCurves,
+            &[("hue_vs_hue", flat(0.5 + 1.0 / 3.0))],
+            &input,
+        );
+        assert_pixels(
+            &out,
+            &[[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.5, 0.5, 0.5]],
+            1e-5,
+        );
+    }
+
+    #[test]
+    fn hsl_hue_vs_sat_selects_by_hue() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let input = frame(2, 1, &[RED, GREEN]);
+        // Zero saturation around red (x = 0 .. 0.1), unchanged from 0.2 on.
+        let out = run(
+            &gpu,
+            GradeKind::HslCurves,
+            &[(
+                "hue_vs_sat",
+                curve(&[(0.0, 0.0), (0.1, 0.0), (0.2, 0.5), (1.0, 0.5)]),
+            )],
+            &input,
+        );
+        assert_pixels(&out, &[[0.2126; 3], [0.0, 1.0, 0.0]], 1e-6);
+    }
+
+    #[test]
+    fn hsl_hue_vs_lum_gains_colours_but_not_grays() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let input = frame(2, 1, &[[0.5, 0.0, 0.0, 1.0], GRAY]);
+        let out = run(
+            &gpu,
+            GradeKind::HslCurves,
+            &[("hue_vs_lum", flat(1.0))],
+            &input,
+        );
+        assert_pixels(&out, &[[1.0, 0.0, 0.0], [0.5, 0.5, 0.5]], 1e-6);
+    }
+
+    /// CPU mirror of `hsl_curves` in the shader, written from the module
+    /// comment rather than copied: the periodic seam is where it would differ.
+    fn hsl_reference(
+        rgb: [f32; 3],
+        hue: &CurveParam,
+        sat: &CurveParam,
+        lum: &CurveParam,
+    ) -> [f32; 3] {
+        let [r, g, b] = rgb;
+        let hi = r.max(g).max(b);
+        let d = hi - r.min(g).min(b);
+        let (h, w) = if d <= 1e-6 {
+            (0.0, 0.0)
+        } else {
+            let sector = if hi == r {
+                (g - b) / d
+            } else if hi == g {
+                (b - r) / d + 2.0
+            } else {
+                (r - g) / d + 4.0
+            };
+            ((sector / 6.0).rem_euclid(1.0), (d / hi).clamp(0.0, 1.0))
+        };
+        let at = |c: &CurveParam| {
+            let pos = h * TABLE_LEN as f32;
+            let i0 = pos.floor() as usize % TABLE_LEN;
+            let i1 = (i0 + 1) % TABLE_LEN;
+            let (a, z) = (
+                c.evaluate(i0 as f32 / TABLE_LEN as f32),
+                c.evaluate(i1 as f32 / TABLE_LEN as f32),
+            );
+            a + (z - a) * pos.fract()
+        };
+        let angle = (at(hue) - 0.5) * std::f32::consts::TAU;
+        let third = (1.0 - angle.cos()) / 3.0;
+        let side = angle.sin() / 3.0_f32.sqrt();
+        let m = [angle.cos() + third, third - side, third + side];
+        let rot = [
+            m[0] * r + m[1] * g + m[2] * b,
+            m[2] * r + m[0] * g + m[1] * b,
+            m[1] * r + m[2] * g + m[0] * b,
+        ];
+        let l = 0.2126 * rot[0] + 0.7152 * rot[1] + 0.0722 * rot[2];
+        let s = 2.0 * at(sat);
+        let gain = 1.0 + (2.0 * at(lum) - 1.0) * w;
+        rot.map(|v| (l + (v - l) * s) * gain)
+    }
+
+    #[test]
+    fn hsl_curves_match_a_cpu_reference_including_the_hue_seam() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        // The last pixel's hue is just under 1 (R = 1, B tiny), where the
+        // lookup wraps to the first table entry.
+        let mut pixels: Vec<[f32; 4]> = ramp(9, 4)
+            .as_f32()
+            .chunks_exact(4)
+            .map(|p| [p[0], p[1], p[2], p[3]])
+            .collect();
+        pixels.push([1.0, 0.0, 0.004, 1.0]);
+        let input = frame(pixels.len() as u32, 1, &pixels);
+        let hue = CurveParam::linear([(0.0, 0.8), (0.5, 0.3), (1.0, 0.2)]);
+        let sat = CurveParam::linear([(0.0, 0.25), (1.0, 0.75)]);
+        let lum = CurveParam::linear([(0.0, 0.75), (0.4, 0.25), (1.0, 0.5)]);
+        let out = run(
+            &gpu,
+            GradeKind::HslCurves,
+            &[
+                ("hue_vs_hue", ResolvedValue::Curve(hue.clone())),
+                ("hue_vs_sat", ResolvedValue::Curve(sat.clone())),
+                ("hue_vs_lum", ResolvedValue::Curve(lum.clone())),
+            ],
+            &input,
+        );
+        assert_matches(&out, &input, 2e-5, |rgb| {
+            hsl_reference(rgb, &hue, &sat, &lum)
+        });
+        // The seam pixel really did move away from a clamped read of x = 1.
+        let last = &out.as_f32()[(pixels.len() - 1) * 4..][..3];
+        assert!((last[0] - 1.0).abs() > 0.01, "{last:?}");
     }
 
     fn curve(points: &[(f32, f32)]) -> ResolvedValue {

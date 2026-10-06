@@ -7,6 +7,13 @@
 | 領域 | ravel-app / Timeline |
 | 該当 | `crates/ravel-app/src/panels/timeline.rs:3483-3485` |
 
+> **解決済み**（2026-10-06）: 修正方針どおり。ホイールズームは
+> `TimelineGpuiPanel::zoom_time_at` を通り、基準をスクラブ
+> （`scrub_target_frame`）と同じ描画済みの `ruler_origin_x` から測る。
+> 回帰テスト `a_wheel_zoom_keeps_the_frame_under_the_pointer_in_a_docked_panel`
+> はパネルを 600 px ずらした状態でポインタ下のフレームが動かないことを確かめ、
+> 基準を `HEADER_WIDTH` に戻す変異で落ちる（10 → 35 フレームにずれる）。
+
 ## 現状
 
 ズームは `event.position.x - HEADER_WIDTH`（ウィンドウ空間）を使う。

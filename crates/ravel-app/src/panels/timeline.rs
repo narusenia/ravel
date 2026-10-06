@@ -2279,6 +2279,18 @@ impl TimelineGpuiPanel {
         self.state.snap_playhead_x(local_x, &candidates)
     }
 
+    /// Zooms the time axis by `factor`, keeping the frame under window x `x`
+    /// in place.
+    ///
+    /// The anchor is measured from the painted ruler origin, the same as
+    /// [`Self::scrub_target_frame`]. The panel rarely starts at window x 0
+    /// (the Edit preset docks it right of the node graph), so measuring from
+    /// the header width alone shifts the content sideways on every zoom.
+    fn zoom_time_at(&mut self, x: f32, factor: f64) {
+        let local_x = (x - self.ruler_origin_x.get()) as f64;
+        self.state.zoom_at(local_x, factor);
+    }
+
     fn drag_moved(&mut self, x: f32, y: f32, shift: bool, alt: bool, cx: &mut Context<Self>) {
         match self.drag.clone() {
             TimelineDrag::Scrub => {
@@ -5419,9 +5431,7 @@ impl Render for TimelineGpuiPanel {
                         // pixels-per-frame — hence the reciprocal.
                         this.zoom_curve_values(1.0 / factor, event.position.y.into(), cx);
                     } else {
-                        let cursor_x: f32 = event.position.x.into();
-                        this.state
-                            .zoom_at(cursor_x as f64 - HEADER_WIDTH as f64, factor);
+                        this.zoom_time_at(event.position.x.into(), factor);
                         this.sync_zoom_slider(window, cx);
                     }
                 } else {
@@ -10134,6 +10144,38 @@ mod tests {
                 // Ending a scrub commits nothing and clears the drag.
                 panel.drag_ended(cx);
                 assert!(matches!(panel.drag, TimelineDrag::None));
+            })
+            .unwrap();
+    }
+
+    /// `Cmd`/`Ctrl` + wheel keeps the frame under the pointer in place when
+    /// the panel does not start at window x 0 — the Edit preset docks it
+    /// right of the node graph.
+    ///
+    /// Breaks on: measuring the anchor from `HEADER_WIDTH` instead of the
+    /// painted ruler origin (the content slides sideways by the panel's
+    /// offset on every zoom).
+    #[gpui::test]
+    fn a_wheel_zoom_keeps_the_frame_under_the_pointer_in_a_docked_panel(cx: &mut TestAppContext) {
+        let (window, _project, _comp_id, _a, _b) = setup(cx);
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                // As if the panel sat 600 px into the window.
+                let origin = HEADER_WIDTH + 600.0;
+                panel.ruler_origin_x.set(origin);
+                let pointer = origin + 40.0;
+                let frame_under = |panel: &TimelineGpuiPanel| -> f64 {
+                    40.0 / panel.state.pixels_per_frame() + panel.state.scroll_offset()
+                };
+
+                let before = frame_under(panel);
+                panel.zoom_time_at(pointer, 1.2);
+                let after = frame_under(panel);
+                assert!(
+                    (before - after).abs() < 1.0e-9,
+                    "the frame under the pointer moved from {before} to {after}",
+                );
             })
             .unwrap();
     }

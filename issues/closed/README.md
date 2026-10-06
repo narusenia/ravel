@@ -13,7 +13,7 @@
 | 深刻度 | 件数 | 形式 |
 |---|---|---|
 | critical | 4 | 1件1ファイル |
-| high | 33 | 1件1ファイル |
+| high | 34 | 1件1ファイル |
 | medium | 74 | 領域別5ファイル（`medium-*.md`） |
 | low | 13 | [low.md](low.md) 1ファイル |
 
@@ -26,7 +26,7 @@
 | [CRIT-03](CRIT-03-project-write-not-atomic.md) | 保存が非アトミック、`.bak` フォールバックなし | フェーズ A2 |
 | [CRIT-04](CRIT-04-uncommitted-gesture-baked-by-foreign-commit.md) | 未コミットジェスチャーが他パネルのコミットで焼き付き | フェーズ A2 |
 
-## high（33件）
+## high（34件）
 
 | ID | 内容 | 解決 |
 |---|---|---|
@@ -48,6 +48,7 @@
 | [HIGH-16](HIGH-16-no-decoded-frame-cache.md) | デコード済みフレームキャッシュが無く逆方向スクラブが GOP を再デコード | `CACHE-8` |
 | [HIGH-17](HIGH-17-sws-scaler-recreated-per-frame.md) | sws スケーラをフレームごとに再生成 + スカラー per-pixel 変換 | #380 |
 | [HIGH-18](HIGH-18-open-failure-invisible.md) | プロジェクトを開けないが無言 | フェーズ A2 |
+| [HIGH-19](HIGH-19-timeline-zoom-anchor-window-space.md) | Timeline の Cmd/Ctrl + ホイールズームがルーラー原点でなくウィンドウ座標を基準にする | 基準をスクラブと同じ `ruler_origin_x` に |
 | [HIGH-20](HIGH-20-media-import-failure-invisible.md) | メディアインポート失敗が無言 | フェーズ A2 |
 | [HIGH-21](HIGH-21-node-editor-repaints-every-playback-frame.md) | NodeEditor が再生中毎フレーム全再構築 | フェーズ A |
 | [HIGH-22](HIGH-22-port-hit-test-ignores-z-order.md) | ポートヒットテストが z 順を無視 | フェーズ A |

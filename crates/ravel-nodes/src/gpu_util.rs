@@ -271,7 +271,7 @@ mod shader_translation {
     /// How many built-in WGSL files exist. Pinned so that adding one is a
     /// visible change here rather than a silent gap: the walk above picks a new
     /// file up automatically, and this line makes the author confirm it.
-    const SHADER_COUNT: usize = 16;
+    const SHADER_COUNT: usize = 19;
 
     /// Every `.wgsl` under [`SHADER_DIRS`], sorted so failures name a stable
     /// order.

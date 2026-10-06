@@ -238,6 +238,26 @@ pub enum RavelIcon {
     NodeCompLiftGammaGain,
     /// Node header/menu: `comp.hsl_curves`.
     NodeCompHslCurves,
+    /// Node header/menu: `comp.directional_blur`.
+    NodeCompDirectionalBlur,
+    /// Node header/menu: `comp.radial_blur`.
+    NodeCompRadialBlur,
+    /// Node header/menu: `comp.sharpen`.
+    NodeCompSharpen,
+    /// Node header/menu: `comp.warp`.
+    NodeCompWarp,
+    /// Node header/menu: `comp.lens_distortion`.
+    NodeCompLensDistortion,
+    /// Node header/menu: `comp.ripple`.
+    NodeCompRipple,
+    /// Node header/menu: `comp.mirror`.
+    NodeCompMirror,
+    /// Node header/menu: `comp.tile`.
+    NodeCompTile,
+    /// Node header/menu: `comp.mask`.
+    NodeCompMask,
+    /// Node header/menu: `comp.key`.
+    NodeCompKey,
     /// Node header/menu: `rasterize`.
     NodeRasterize,
     /// Node header/menu: `shape.rect`.
@@ -471,6 +491,16 @@ impl RavelIcon {
             "comp.curves" => Self::NodeCompCurves,
             "comp.lift_gamma_gain" => Self::NodeCompLiftGammaGain,
             "comp.hsl_curves" => Self::NodeCompHslCurves,
+            "comp.directional_blur" => Self::NodeCompDirectionalBlur,
+            "comp.radial_blur" => Self::NodeCompRadialBlur,
+            "comp.sharpen" => Self::NodeCompSharpen,
+            "comp.warp" => Self::NodeCompWarp,
+            "comp.lens_distortion" => Self::NodeCompLensDistortion,
+            "comp.ripple" => Self::NodeCompRipple,
+            "comp.mirror" => Self::NodeCompMirror,
+            "comp.tile" => Self::NodeCompTile,
+            "comp.mask" => Self::NodeCompMask,
+            "comp.key" => Self::NodeCompKey,
             "rasterize" => Self::NodeRasterize,
             "shape.rect" => Self::NodeShapeRect,
             "shape.ellipse" => Self::NodeShapeEllipse,
@@ -636,6 +666,16 @@ impl RavelIcon {
             Self::NodeCompCurves => "icons/spline.svg",
             Self::NodeCompLiftGammaGain => "icons/circle-dot.svg",
             Self::NodeCompHslCurves => "icons/activity.svg",
+            Self::NodeCompDirectionalBlur => "icons/arrow-right-left.svg",
+            Self::NodeCompRadialBlur => "icons/orbit.svg",
+            Self::NodeCompSharpen => "icons/sparkles.svg",
+            Self::NodeCompWarp => "icons/waypoints.svg",
+            Self::NodeCompLensDistortion => "icons/target.svg",
+            Self::NodeCompRipple => "icons/waves.svg",
+            Self::NodeCompMirror => "icons/combine.svg",
+            Self::NodeCompTile => "icons/grid-3x3.svg",
+            Self::NodeCompMask => "icons/shapes.svg",
+            Self::NodeCompKey => "icons/eraser.svg",
             Self::NodeRasterize => "icons/image-down.svg",
             Self::NodeShapeRect => "icons/square.svg",
             Self::NodeShapeEllipse => "icons/circle.svg",

@@ -158,6 +158,16 @@ pub struct XProcessor { ctx, pipeline, pool }
 - 方向ブラー、ラジアルブラー、シャープ（アンシャープマスク）
 - ワープ（メッシュではなく変位マップ方式）、レンズ歪み、波紋
 
+> **2026-10-06 実装**: 6 ノードを入れた（`comp.directional_blur` /
+> `radial_blur` / `sharpen` / `warp` / `lens_distortion` / `ripple`、
+> `crates/ravel-nodes/src/comp/distort.rs`、シェーダは
+> `comp_distort.wgsl` の 1 本）。境界は**端の画素へ clamp**（均一な不透明画像は
+> 端まで均一）、補間は premultiplied の双一次。長さの量はコンポジションの
+> ピクセルで持ち `composition_scale` を掛けるのでプレビュー縮小で絵が変わらない。
+> ワープは変位マップ方式（2 本目の入力、R=横 G=縦、中間グレーが無変位）で、
+> メッシュワープは作っていない。シャープのぼかしは既存の `blur` プロセッサを
+> 再利用する。
+
 **完了条件**
 
 - 方向ブラー: 角度 0 で水平方向のみににじむテスト。
@@ -218,6 +228,15 @@ opacity / transform のみ、`rasterize` は Geometry 入力が必須）、
 
 - ミラー、タイル
 - マスク（ジオメトリ入力でのマット）、キーイング（クロマ / ルミナンス）
+
+> **2026-10-06 実装**: `comp.mirror` / `comp.tile`（`comp/tile.rs`、
+> `comp_tile.wgsl`）、`comp.mask`（`comp/mask.rs`）、`comp.key`（`comp/key.rs`、
+> `comp_key.wgsl`）。ミラーは**反転**（2 回で元に戻る）で、半分を写す
+> カレイドスコープ型は作っていない。タイルは端で**回り込む**（wrap）。
+> マスクは新しい被覆計算を持たず、`RasterizeProcessor` でジオメトリを描き、
+> その結果を `CompAlphaProcessor` の `matte_alpha` へ渡す。キーはクロマ
+> （最大チャンネルで正規化した CbCr 距離）とルミナンスのみで、アルファだけを
+> 変える（スピル抑制・エッジ処理・ガベージマットは非対象のまま）。
 
 **完了条件**
 

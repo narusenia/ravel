@@ -1182,6 +1182,80 @@ hue_vs_hue = "色相ごとの色相シフト（横軸が色相で 0 と 1 が赤
 hue_vs_sat = "色相ごとの彩度（0.5 で変化なし。倍率は値の 2 倍）。"
 hue_vs_lum = "色相ごとの輝度ゲイン（0.5 で変化なし。倍率は値の 2 倍。グレーは影響を受けない）。"
 
+[node."comp.directional_blur"]
+label = "方向ブラー"
+description = "画像を一方向ににじませる。境界の外は端の画素を繰り返すので、端が薄くなることはない。"
+[node."comp.directional_blur".params]
+length = "ブラーの長さ（コンポジションのピクセル。プレビューの縮尺によらず同じ絵になる）。"
+angle = "方向（度）。0 で水平方向のみ、90 で垂直方向。"
+
+[node."comp.radial_blur"]
+label = "ラジアルブラー"
+description = "中心点のまわりを、回転またはズームでぼかす。中心点そのものは変わらない。"
+[node."comp.radial_blur".params]
+mode = "spin（中心まわりの回転）または zoom（中心へ向かってにじむ）。"
+angle = "spin のとき、ブラーの回転量の合計（度）。"
+zoom = "zoom のとき、各画素が中心へ向かってにじむ距離（その画素の距離に対する割合、0〜1）。"
+center = "中心点（フレームに対する割合。0.5, 0.5 が中央）。"
+
+[node."comp.sharpen"]
+label = "シャープ"
+description = "アンシャープマスクでシャープにする。ぼかしたコピーを引いて輪郭を強める。アルファは保つ。"
+[node."comp.sharpen".params]
+amount = "シャープの強さ（0 で変化なし）。"
+radius = "マスクのぼかし半径（コンポジションのピクセル）。"
+
+[node."comp.warp"]
+label = "ワープ"
+description = "マップ画像で画素をずらす。マップの赤で横、緑で縦に動き、中間グレーでは動かない。マップがなければ画像をそのまま通す。"
+[node."comp.warp".params]
+amount = "マップが最大のときのずれ（コンポジションのピクセル、x と y）。サイズが違うマップは画像全体へ引き伸ばす。"
+
+[node."comp.lens_distortion"]
+label = "レンズ歪み"
+description = "中心点のまわりに樽型または糸巻き型の歪みをかける。量が 0 なら恒等。"
+[node."comp.lens_distortion".params]
+amount = "歪み係数。正で外側を参照（樽型）、負で内側を参照（糸巻き型）。"
+center = "中心点（フレームに対する割合。0.5, 0.5 が中央）。"
+
+[node."comp.ripple"]
+label = "波紋"
+description = "中心点から広がる同心円状の波を作る。振幅が 0 なら恒等。"
+[node."comp.ripple".params]
+amplitude = "波の高さ（コンポジションのピクセル）。"
+wavelength = "波の山と山の間隔（コンポジションのピクセル）。"
+phase = "波のずれ（波長単位）。動かすと波が伝わる。"
+center = "中心点（フレームに対する割合。0.5, 0.5 が中央）。"
+
+[node."comp.mirror"]
+label = "ミラー"
+description = "フレームの中心を軸に画像を反転する。2 回かけると元に戻る。"
+[node."comp.mirror".params]
+mode = "horizontal（左右を入れ替え）、vertical（上下を入れ替え）、both（両方）。"
+
+[node."comp.tile"]
+label = "タイル"
+description = "画像全体を縮めたコピーをグリッド状に並べる。端では反対側へ回り込み、1 × 1 なら元のまま。"
+[node."comp.tile".params]
+columns = "横に並べる数（整数に丸める。1〜256）。"
+rows = "縦に並べる数（整数に丸める。1〜256）。"
+
+[node."comp.mask"]
+label = "マスク"
+description = "ジオメトリが覆う部分だけ画像を残し、それ以外のアルファを 0 にする。ジオメトリはラスタライズと同じ方法で描くので、被覆とアンチエイリアスが一致する。ジオメトリがなければ画像をそのまま通す。"
+[node."comp.mask".params]
+invert = "ジオメトリの内側ではなく外側を残す。"
+
+[node."comp.key"]
+label = "キー"
+description = "色または明るさで背景を抜く。キー色に近い画素が透明になる。変わるのはアルファだけで、スピル抑制やエッジ処理はない。"
+[node."comp.key".params]
+mode = "chroma（色相と彩度で比べる。暗い背景も明るい背景と同じように抜ける）または luma（明るさだけで比べる）。"
+key_color = "抜く色。luma ではその明るさだけが効く。"
+tolerance = "キー色からどこまで離れた画素を完全に抜くか。"
+softness = "許容範囲の外側で、アルファが不透明へ戻るなだらかな幅。0 で硬い縁。"
+invert = "キー色に近い画素だけを残し、それ以外を抜く。"
+
 [node."color.ramp"]
 label = "カラーランプ"
 description = "グラデーションで値を色に写す。明るさではなく色そのものを数値で動かせる。"

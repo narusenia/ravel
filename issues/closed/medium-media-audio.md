@@ -327,3 +327,51 @@ rename を使う（Linux は `renameat2(RENAME_NOREPLACE)`、macOS は
 着手すること**。`EXPORT-1` の書き込み経路に手を入れる変更になる。
 
 ---
+
+---
+
+## MED-MED-10 | debt | CI が `--features ffmpeg` を一度もビルドしない — 出荷する構成が検証されていない
+
+> **解決済み**: `ci.yml` に `ffmpeg` ジョブ（macOS、`brew install ffmpeg` の FFmpeg 9）を足し、
+> `cargo clippy -p ravel-media -p ravel-nodes -p ravel-cli --features ffmpeg --all-targets` と
+> 同じ 3 クレートの `cargo test --features ffmpeg` を回す。入った FFmpeg の版はログに出る。
+> `ffmpeg-the-third` を `6.0.0+ffmpeg-9.0` へ上げ、`Codec::formats()` が FFmpeg 9 で消えた
+> 呼び出し（音声エンコーダのサンプル形式）を `supported_formats()` に替えた。このフィーチャの
+> テストが一度も走っていなかったので、走らせて見つかった 2 件（`probe_asset` が画像でない
+> 静止画を読めると答える、`exposed_media_swap` が色名 `green`（= #008000）を純緑と仮定）も直した。
+> Windows は FFmpeg 9 の開発用ファイルを確実に入れる手段が無いので足していない。本 PR。
+
+**該当**: `.github/workflows/ci.yml`、`crates/ravel-media/Cargo.toml`
+（`ffmpeg = ["dep:ffmpeg-the-third"]`、`default = []`）
+
+`ffmpeg` はワークスペース全体でオプトインのフィーチャで、`ci.yml` に
+`--features` が 1 つも出てこない。つまり **CI は素材のデコードとエンコードを
+含むビルドを一度も compile していない**。`mise run check` も同じ既定なので、
+手元でも同じ。
+
+`#[cfg(feature = "ffmpeg")]` の中身は型検査すら通らないまま `main` に入りうる。
+実際にこの穴で見つかったもの:
+
+- `ravel-cli` の `probe_asset`（`media-unreadable` の警告、`WARN-2`）は
+  cfg の中にあり、**CI では compile されない**
+- `ravel-media` の `read_image_frame` / `format::probe` / `decoder.rs` の
+  大部分が同じ位置にある
+
+**影響**: リリースは当然 `--features ffmpeg` で作る（そうでなければ動画が
+読めない）。その構成だけが壊れていても、PR は緑のまま通る。
+`Cargo.lock` の再解決が Windows のクレートを降格させる類の「手元では絶対に
+見えない」破損と同じ形で、**気づく場所が無い**のが問題。
+
+**修正方針**: `ci.yml` に `--features ffmpeg` のジョブを 1 本足す。
+少なくとも `cargo clippy -p ravel-media -p ravel-nodes -p ravel-cli
+--features ffmpeg --all-targets` までは、FFmpeg の開発ヘッダを入れれば
+runner で通る（macOS は `brew install ffmpeg`、Windows は vcpkg か
+プリビルド）。テストの実行までやるかは別の判断 — 素材ファイルを用意する
+必要があるので、**まず型検査だけでも価値がある**。
+
+`ffmpeg-the-third` のバージョンと runner の FFmpeg の互換が要る点に注意
+（手元では ffmpeg 8.1 と `ffmpeg-the-third 5.0` が非互換で、
+`cargo clippy --all-features` が依存クレート内で落ちる）。CI では
+runner の FFmpeg を固定して入れる方が安定する。
+
+**備考**: `WARN-2`（#467）の独立レビュー中に見つけた。

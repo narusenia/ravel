@@ -26,20 +26,22 @@ clippy、`*.md` を含むときだけ `docs:check` が走る（lint-patterns と
   `scripts/lint-patterns.allow` に理由付きで 1 行足す（`.agents/rules/` が
   その例外を文書化しているときだけ）
 
-### `ffmpeg` フィーチャ配下のテストは既定で走らない
+### `ffmpeg` フィーチャ配下のテストは `check` では走らない
 
-`mise run check` も CI も既定フィーチャで `cargo test --workspace` を回すので、
-`#[cfg(feature = "ffmpeg")]` の下にあるテストは**1 つも実行されない**。
-`mise run clippy:all` はコンパイルするだけで、走らせはしない。
+`mise run check` も CI の `check` ジョブも既定フィーチャで `cargo test --workspace`
+を回すので、`#[cfg(feature = "ffmpeg")]` の下にあるテストはそこでは実行されない。
+CI は別ジョブ `ffmpeg`（macOS、Homebrew の FFmpeg 9）で `ravel-media` / `ravel-nodes` /
+`ravel-cli` を `--features ffmpeg` で clippy + test する。`ffmpeg-the-third` 6 は
+FFmpeg 9 を束ねる（Windows では回していない）。
 
-デコードを要する経路（`ravel-media` の統合テスト、`ravel-audio` のデコード上限、
-`ravel-cli` の音声書き出し）はここに入る。**触ったならローカルで**
+`ravel-audio` など上記 3 クレート以外や、手元での確認には
 
 ```bash
 cargo test --workspace --features ffmpeg
 ```
 
-**を自分で回し、結果を報告に書く。** FFmpeg の共有ライブラリが要る。
+を自分で回し、結果を報告に書く。FFmpeg の共有ライブラリと `ffmpeg` CLI
+（テストが素材を合成する）が要る。
 
 ## どこに何を置くか
 

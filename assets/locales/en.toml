@@ -1144,6 +1144,14 @@ description = "Inverts alpha, converts between luminance and alpha, or masks an 
 [node."comp.alpha".params]
 mode = "invert; luma_to_alpha (alpha = luminance x alpha); alpha_to_luma (opaque gray of the alpha); matte_alpha / matte_luma (multiply alpha by the matte's alpha or luminance; a matte of another size is stretched over the image)."
 
+[node."comp.brightness_contrast"]
+label = "Brightness / Contrast"
+description = "Scales an image's contrast about a pivot value, then offsets its brightness. Alpha is kept."
+[node."comp.brightness_contrast".params]
+brightness = "Added to every channel after the contrast (-1 to 1)."
+contrast = "Scales the distance from the pivot (1 is unchanged)."
+pivot = "The value contrast leaves in place (0.5 is mid gray)."
+
 [node."color.ramp"]
 label = "Color Ramp"
 description = "Maps a value to a color through a gradient, so a number drives a hue rather than a brightness."

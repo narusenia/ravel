@@ -1132,6 +1132,14 @@ description = "アルファの反転、輝度との相互変換、マット入�
 [node."comp.alpha".params]
 mode = "invert（反転）、luma_to_alpha（輝度×アルファ）、alpha_to_luma（アルファの不透明グレー）、matte_alpha / matte_luma（マットのアルファまたは輝度を掛ける。サイズが違うマットは画像全体へ引き伸ばす）。"
 
+[node."comp.brightness_contrast"]
+label = "明るさ・コントラスト"
+description = "画像のコントラストを基準値のまわりで拡縮し、明るさを加算する。アルファは保つ。"
+[node."comp.brightness_contrast".params]
+brightness = "コントラストの後に全チャネルへ加算する量（-1〜1）。"
+contrast = "基準値からの距離の倍率（1 で変化なし）。"
+pivot = "コントラストで動かない値（0.5 で中間グレー）。"
+
 [node."color.ramp"]
 label = "カラーランプ"
 description = "グラデーションで値を色に写す。明るさではなく色そのものを数値で動かせる。"

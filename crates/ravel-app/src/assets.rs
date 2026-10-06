@@ -226,6 +226,8 @@ pub enum RavelIcon {
     NodeCompTint,
     /// Node header/menu: `comp.alpha`.
     NodeCompAlpha,
+    /// Node header/menu: `comp.brightness_contrast`.
+    NodeCompBrightnessContrast,
     /// Node header/menu: `rasterize`.
     NodeRasterize,
     /// Node header/menu: `shape.rect`.
@@ -453,6 +455,7 @@ impl RavelIcon {
             "comp.fill" => Self::NodeCompFill,
             "comp.tint" => Self::NodeCompTint,
             "comp.alpha" => Self::NodeCompAlpha,
+            "comp.brightness_contrast" => Self::NodeCompBrightnessContrast,
             "rasterize" => Self::NodeRasterize,
             "shape.rect" => Self::NodeShapeRect,
             "shape.ellipse" => Self::NodeShapeEllipse,
@@ -612,6 +615,7 @@ impl RavelIcon {
             Self::NodeCompFill => "icons/replace.svg",
             Self::NodeCompTint => "icons/palette.svg",
             Self::NodeCompAlpha => "icons/blend.svg",
+            Self::NodeCompBrightnessContrast => "icons/sliders-horizontal.svg",
             Self::NodeRasterize => "icons/image-down.svg",
             Self::NodeShapeRect => "icons/square.svg",
             Self::NodeShapeEllipse => "icons/circle.svg",

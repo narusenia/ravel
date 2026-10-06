@@ -186,6 +186,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(comp_fill());
     reg.register(comp_tint());
     reg.register(comp_alpha());
+    reg.register(comp_brightness_contrast());
     reg.register(color_ramp());
     reg.register(rasterize());
     reg.register(shape_rect());
@@ -1990,6 +1991,24 @@ fn comp_alpha() -> NodeTemplate {
         .with_param_options("mode", COMP_ALPHA_MODES)
 }
 
+/// `comp.brightness_contrast`: contrast about a pivot, then a brightness offset.
+/// Unlike `color_correct` (which also has saturation) the pivot is a parameter.
+fn comp_brightness_contrast() -> NodeTemplate {
+    NodeTemplate::new(
+        "comp.brightness_contrast",
+        "Brightness / Contrast",
+        NodeCategory::Image,
+    )
+    .with_input(frame_buffer_input("image"))
+    .with_output(frame_buffer_output())
+    .with_param(float_parameter("brightness", 0.0))
+    .with_param(float_parameter("contrast", 1.0))
+    .with_param(float_parameter("pivot", 0.5))
+    .with_param_range("brightness", -10.0..=10.0, -1.0..=1.0)
+    .with_param_range("contrast", 0.0..=10.0, 0.0..=2.0)
+    .with_param_range("pivot", -10.0..=10.0, 0.0..=1.0)
+}
+
 /// `shape.rect`: a sized quad, and the one node a Solid layer's network is
 /// built on (`assets/layer-templates/solid.ron`).
 ///
@@ -2801,7 +2820,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 94);
+        assert_eq!(reg.all_templates().count(), 95);
     }
 
     #[test]
@@ -2811,7 +2830,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 28);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
-        assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 9);
+        assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 10);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
         assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 28);

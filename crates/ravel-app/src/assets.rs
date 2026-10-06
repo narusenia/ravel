@@ -218,6 +218,14 @@ pub enum RavelIcon {
     NodeTransform,
     /// Node header/menu: `color_correct`.
     NodeColorCorrect,
+    /// Node header/menu: `comp.solid`.
+    NodeCompSolid,
+    /// Node header/menu: `comp.fill`.
+    NodeCompFill,
+    /// Node header/menu: `comp.tint`.
+    NodeCompTint,
+    /// Node header/menu: `comp.alpha`.
+    NodeCompAlpha,
     /// Node header/menu: `rasterize`.
     NodeRasterize,
     /// Node header/menu: `shape.rect`.
@@ -441,6 +449,10 @@ impl RavelIcon {
             "blur" => Self::NodeBlur,
             "transform" => Self::NodeTransform,
             "color_correct" => Self::NodeColorCorrect,
+            "comp.solid" => Self::NodeCompSolid,
+            "comp.fill" => Self::NodeCompFill,
+            "comp.tint" => Self::NodeCompTint,
+            "comp.alpha" => Self::NodeCompAlpha,
             "rasterize" => Self::NodeRasterize,
             "shape.rect" => Self::NodeShapeRect,
             "shape.ellipse" => Self::NodeShapeEllipse,
@@ -596,6 +608,10 @@ impl RavelIcon {
             Self::NodeBlur => "icons/droplet.svg",
             Self::NodeTransform => "icons/scaling.svg",
             Self::NodeColorCorrect => "icons/contrast.svg",
+            Self::NodeCompSolid => "icons/square-filled.svg",
+            Self::NodeCompFill => "icons/replace.svg",
+            Self::NodeCompTint => "icons/palette.svg",
+            Self::NodeCompAlpha => "icons/blend.svg",
             Self::NodeRasterize => "icons/image-down.svg",
             Self::NodeShapeRect => "icons/square.svg",
             Self::NodeShapeEllipse => "icons/circle.svg",

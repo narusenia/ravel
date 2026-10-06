@@ -1119,6 +1119,31 @@ brightness = "Added to every channel (-1 to 1)."
 contrast = "Scales the distance from mid gray (1 is unchanged)."
 saturation = "Scales the distance from luminance (1 is unchanged, 0 is gray)."
 
+[node."comp.solid"]
+label = "Solid"
+description = "Generates a frame of one color at the composition's resolution."
+[node."comp.solid".params]
+color = "Color of every pixel."
+
+[node."comp.fill"]
+label = "Fill (Image)"
+description = "Replaces an image's color with one color, keeping its alpha. Not the geometry Fill style."
+[node."comp.fill".params]
+color = "Color that replaces the RGB of every pixel (its alpha is ignored)."
+
+[node."comp.tint"]
+label = "Tint"
+description = "Maps an image's luminance onto a gradient between two colors, keeping its alpha."
+[node."comp.tint".params]
+map_black = "Color that black maps to."
+map_white = "Color that white maps to."
+
+[node."comp.alpha"]
+label = "Alpha"
+description = "Inverts alpha, converts between luminance and alpha, or masks an image with a matte."
+[node."comp.alpha".params]
+mode = "invert; luma_to_alpha (alpha = luminance x alpha); alpha_to_luma (opaque gray of the alpha); matte_alpha / matte_luma (multiply alpha by the matte's alpha or luminance; a matte of another size is stretched over the image)."
+
 [node."color.ramp"]
 label = "Color Ramp"
 description = "Maps a value to a color through a gradient, so a number drives a hue rather than a brightness."

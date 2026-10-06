@@ -182,6 +182,10 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(blur());
     reg.register(transform());
     reg.register(color_correct());
+    reg.register(comp_solid());
+    reg.register(comp_fill());
+    reg.register(comp_tint());
+    reg.register(comp_alpha());
     reg.register(color_ramp());
     reg.register(rasterize());
     reg.register(shape_rect());
@@ -1917,6 +1921,75 @@ fn color_correct() -> NodeTemplate {
         .with_param_range("saturation", 0.0..=10.0, 0.0..=2.0)
 }
 
+fn frame_buffer_input(name: &str) -> InputPort {
+    InputPort {
+        name: name.into(),
+        accepted_types: vec![DataTypeId::FRAME_BUFFER],
+        is_param: false,
+        is_variadic: false,
+    }
+}
+
+fn frame_buffer_output() -> OutputPort {
+    OutputPort {
+        name: "output".into(),
+        data_type: DataTypeId::FRAME_BUFFER,
+    }
+}
+
+/// `comp.solid`: one colour over the evaluation frame. An Image-category
+/// generator, not a shell node (`ravel-nodes::comp` explains the difference).
+fn comp_solid() -> NodeTemplate {
+    NodeTemplate::new("comp.solid", "Solid", NodeCategory::Image)
+        .with_output(frame_buffer_output())
+        .with_param(color_parameter("color", [1.0, 1.0, 1.0, 1.0]))
+        .with_color_param("color")
+}
+
+/// `comp.fill`: replaces RGB with one colour, keeping alpha. Unrelated to the
+/// Geometry node `style.fill`, which writes an attribute and never rasterizes.
+fn comp_fill() -> NodeTemplate {
+    NodeTemplate::new("comp.fill", "Fill", NodeCategory::Image)
+        .with_input(frame_buffer_input("image"))
+        .with_output(frame_buffer_output())
+        .with_param(color_parameter("color", [1.0, 1.0, 1.0, 1.0]))
+        .with_color_param("color")
+}
+
+/// `comp.tint`: maps luminance onto the line between two colours.
+fn comp_tint() -> NodeTemplate {
+    NodeTemplate::new("comp.tint", "Tint", NodeCategory::Image)
+        .with_input(frame_buffer_input("image"))
+        .with_output(frame_buffer_output())
+        .with_param(color_parameter("map_black", [0.0, 0.0, 0.0, 1.0]))
+        .with_param(color_parameter("map_white", [1.0, 1.0, 1.0, 1.0]))
+        .with_color_param("map_black")
+        .with_color_param("map_white")
+}
+
+/// The `mode` values of `comp.alpha`, in dropdown order.
+pub const COMP_ALPHA_MODES: [&str; 5] = [
+    "invert",
+    "luma_to_alpha",
+    "alpha_to_luma",
+    "matte_alpha",
+    "matte_luma",
+];
+
+/// `comp.alpha`: alpha operations; the optional `matte` input feeds the two
+/// matte modes.
+fn comp_alpha() -> NodeTemplate {
+    NodeTemplate::new("comp.alpha", "Alpha", NodeCategory::Image)
+        .with_input(frame_buffer_input("image"))
+        .with_input(frame_buffer_input("matte"))
+        .with_output(frame_buffer_output())
+        .with_param(Parameter {
+            key: "mode".into(),
+            value: ParameterValue::String("invert".into()),
+        })
+        .with_param_options("mode", COMP_ALPHA_MODES)
+}
+
 /// `shape.rect`: a sized quad, and the one node a Solid layer's network is
 /// built on (`assets/layer-templates/solid.ron`).
 ///
@@ -2728,7 +2801,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 90);
+        assert_eq!(reg.all_templates().count(), 94);
     }
 
     #[test]
@@ -2738,7 +2811,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 28);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
-        assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 5);
+        assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 9);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
         assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 28);
@@ -3326,6 +3399,10 @@ mod tests {
             ("constant.vec4", "value", false),
             ("constant.color", "color", true),
             ("rasterize", "color", true),
+            ("comp.solid", "color", true),
+            ("comp.fill", "color", true),
+            ("comp.tint", "map_black", true),
+            ("comp.tint", "map_white", true),
             ("style.fill", "color", true),
             ("style.stroke", "color", true),
         ];

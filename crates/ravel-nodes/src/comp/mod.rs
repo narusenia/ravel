@@ -7,15 +7,29 @@
 //! Every shell processor resolves its owning layer from the [`Document`] at
 //! process time — decoding the deterministic node id — so layer edits only
 //! require cache invalidation, never a processor rebuild.
+//!
+//! The exception is the user-placed image nodes `comp.solid`, `comp.fill`,
+//! `comp.tint` and `comp.alpha` (`solid`, `colorize`, `alpha`): they are
+//! ordinary nodes, take their values from their parameters, and neither decode
+//! a node id nor read the `Document`. They live here because they work on the
+//! composited frame, not because they belong to the shell.
 
+mod alpha;
 mod background;
+mod colorize;
+#[cfg(test)]
+mod fx_test_util;
 mod merge;
 mod opacity;
+mod solid;
 mod transform;
 
+pub use alpha::{CompAlphaProcessor, comp_alpha_mode_is_known};
 pub use background::CompBackgroundProcessor;
+pub use colorize::{ColorizeKind, CompColorizeProcessor};
 pub use merge::{CompMergeGpuProcessor, CompMergeProcessor};
 pub use opacity::{CompOpacityGpuProcessor, CompOpacityProcessor};
+pub use solid::CompSolidProcessor;
 pub use transform::{CompTransformGpuProcessor, CompTransformProcessor};
 
 use ravel_core::composition::compile::{NodeRole, decode_deterministic_node_id};

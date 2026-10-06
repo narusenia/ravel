@@ -3,7 +3,8 @@
 
 //! The colour-adjustment and grading nodes: `comp.brightness_contrast`,
 //! `comp.hue_saturation`,
-//! `comp.levels`, `comp.curves`.
+//! `comp.levels`, `comp.curves`,
+//! `comp.lift_gamma_gain`.
 //!
 //! One processor, one shader (`comp_grade.wgsl`), one uniform. [`GradeKind`]
 //! says which node a [`CompGradeProcessor`] is, and [`GradeKind::fill`] is the
@@ -48,6 +49,7 @@ pub enum GradeKind {
     HueSaturation = 1,
     Levels = 2,
     Curves = 3,
+    LiftGammaGain = 4,
 }
 
 #[repr(C)]
@@ -67,6 +69,7 @@ impl GradeKind {
             Self::HueSaturation => "comp.hue_saturation",
             Self::Levels => "comp.levels",
             Self::Curves => "comp.curves",
+            Self::LiftGammaGain => "comp.lift_gamma_gain",
         }
     }
 
@@ -112,6 +115,19 @@ impl GradeKind {
                     0.0,
                     0.0,
                 ];
+            }
+            // a = lift, b = gamma, c = gain, each a colour's RGB (its alpha
+            // is ignored). Lift and gain are the colours black and white map
+            // to; gamma is the per-channel midtone exponent. The neutral
+            // colours are black, white, white.
+            Self::LiftGammaGain => {
+                let rgb = |key: &str, default: f32| {
+                    let c = p.vec4_or(key, [default, default, default, 1.0]);
+                    [c[0], c[1], c[2], 0.0]
+                };
+                out.a = rgb("lift", 0.0);
+                out.b = rgb("gamma", 1.0);
+                out.c = rgb("gain", 1.0);
             }
             // table[i] = (rgb, red, green, blue) curves at x = i / 255. A
             // missing curve is the identity. The curves clamp outside [0, 1]
@@ -353,6 +369,7 @@ mod tests {
             GradeKind::HueSaturation,
             GradeKind::Levels,
             GradeKind::Curves,
+            GradeKind::LiftGammaGain,
         ] {
             let out = run(&gpu, kind, &[], &input);
             assert_matches(&out, &input, 1e-6, |rgb| rgb);
@@ -459,6 +476,47 @@ mod tests {
         );
         assert_eq!(out.as_f32()[..3], [0.0; 3]);
         assert_eq!(out.as_f32()[4..7], [1.0; 3]);
+    }
+
+    fn color(rgb: [f32; 3]) -> ResolvedValue {
+        ResolvedValue::Vec4([rgb[0], rgb[1], rgb[2], 1.0])
+    }
+
+    #[test]
+    fn lift_gamma_gain_golden_pixels() {
+        let Some(gpu) = gpu_or_skip() else { return };
+        let input = frame(
+            3,
+            1,
+            &[
+                [0.5, 0.5, 0.25, 1.0],
+                [0.0, 0.0, 0.0, 0.5],
+                [1.0, 1.0, 1.0, 0.0],
+            ],
+        );
+        let out = run(
+            &gpu,
+            GradeKind::LiftGammaGain,
+            &[
+                ("lift", color([0.25, 0.0, 0.0])),
+                ("gamma", color([1.0, 1.0, 2.0])),
+                ("gain", color([1.0, 0.5, 1.0])),
+            ],
+            &input,
+        );
+        // r: 0.5 + 0.25 * 0.5; g: 0.5 * 0.5; b: sqrt(0.25).
+        let want = [
+            [0.625, 0.25, 0.5],
+            // Black becomes the lift, white the gain.
+            [0.25, 0.0, 0.0],
+            [1.0, 0.5, 1.0],
+        ];
+        for (px, want) in out.as_f32().chunks_exact(4).zip(want) {
+            for ch in 0..3 {
+                assert!((px[ch] - want[ch]).abs() < 1e-6, "{px:?} vs {want:?}");
+            }
+        }
+        assert_eq!(out.as_f32()[7], 0.5, "alpha is kept");
     }
 
     fn curve(points: &[(f32, f32)]) -> ResolvedValue {

@@ -234,6 +234,8 @@ pub enum RavelIcon {
     NodeCompLevels,
     /// Node header/menu: `comp.curves`.
     NodeCompCurves,
+    /// Node header/menu: `comp.lift_gamma_gain`.
+    NodeCompLiftGammaGain,
     /// Node header/menu: `rasterize`.
     NodeRasterize,
     /// Node header/menu: `shape.rect`.
@@ -465,6 +467,7 @@ impl RavelIcon {
             "comp.hue_saturation" => Self::NodeCompHueSaturation,
             "comp.levels" => Self::NodeCompLevels,
             "comp.curves" => Self::NodeCompCurves,
+            "comp.lift_gamma_gain" => Self::NodeCompLiftGammaGain,
             "rasterize" => Self::NodeRasterize,
             "shape.rect" => Self::NodeShapeRect,
             "shape.ellipse" => Self::NodeShapeEllipse,
@@ -628,6 +631,7 @@ impl RavelIcon {
             Self::NodeCompHueSaturation => "icons/palette.svg",
             Self::NodeCompLevels => "icons/chart-column.svg",
             Self::NodeCompCurves => "icons/spline.svg",
+            Self::NodeCompLiftGammaGain => "icons/circle-dot.svg",
             Self::NodeRasterize => "icons/image-down.svg",
             Self::NodeShapeRect => "icons/square.svg",
             Self::NodeShapeEllipse => "icons/circle.svg",

@@ -190,6 +190,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(comp_hue_saturation());
     reg.register(comp_levels());
     reg.register(comp_curves());
+    reg.register(comp_lift_gamma_gain());
     reg.register(color_ramp());
     reg.register(rasterize());
     reg.register(shape_rect());
@@ -2058,6 +2059,25 @@ fn comp_curves() -> NodeTemplate {
         .with_param(curve_parameter("blue", CurveParam::identity()))
 }
 
+/// `comp.lift_gamma_gain`: the three colour-wheel controls of a grade, each a
+/// colour parameter (so the colour picker is the wheel). Neutral is black,
+/// white, white.
+fn comp_lift_gamma_gain() -> NodeTemplate {
+    NodeTemplate::new(
+        "comp.lift_gamma_gain",
+        "Lift / Gamma / Gain",
+        NodeCategory::Image,
+    )
+    .with_input(frame_buffer_input("image"))
+    .with_output(frame_buffer_output())
+    .with_param(color_parameter("lift", [0.0, 0.0, 0.0, 1.0]))
+    .with_param(color_parameter("gamma", [1.0, 1.0, 1.0, 1.0]))
+    .with_param(color_parameter("gain", [1.0, 1.0, 1.0, 1.0]))
+    .with_color_param("lift")
+    .with_color_param("gamma")
+    .with_color_param("gain")
+}
+
 /// `shape.rect`: a sized quad, and the one node a Solid layer's network is
 /// built on (`assets/layer-templates/solid.ron`).
 ///
@@ -2869,7 +2889,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 98);
+        assert_eq!(reg.all_templates().count(), 99);
     }
 
     #[test]
@@ -2879,7 +2899,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 28);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
-        assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 13);
+        assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 14);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
         assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 28);
@@ -3471,6 +3491,9 @@ mod tests {
             ("comp.fill", "color", true),
             ("comp.tint", "map_black", true),
             ("comp.tint", "map_white", true),
+            ("comp.lift_gamma_gain", "lift", true),
+            ("comp.lift_gamma_gain", "gamma", true),
+            ("comp.lift_gamma_gain", "gain", true),
             ("style.fill", "color", true),
             ("style.stroke", "color", true),
         ];

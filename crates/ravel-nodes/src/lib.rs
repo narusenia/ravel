@@ -358,6 +358,12 @@ pub fn processor_for_node(
             shaders,
             pool.clone(),
         ))),
+        "comp.lift_gamma_gain" => Some(Arc::new(comp::CompGradeProcessor::new(
+            comp::GradeKind::LiftGammaGain,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
         "comp.alpha" => Some(Arc::new(comp::CompAlphaProcessor::new(
             ctx.clone(),
             shaders,
@@ -488,6 +494,7 @@ mod tests {
             "comp.hue_saturation",
             "comp.levels",
             "comp.curves",
+            "comp.lift_gamma_gain",
             "comp.transform",
             "comp.merge.normal",
             "comp.merge.adjustment",

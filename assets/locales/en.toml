@@ -1178,6 +1178,14 @@ red = "Curve applied to the red channel after the RGB curve."
 green = "Curve applied to the green channel after the RGB curve."
 blue = "Curve applied to the blue channel after the RGB curve."
 
+[node."comp.lift_gamma_gain"]
+label = "Lift / Gamma / Gain"
+description = "Three-way color grade: a color for the shadows, the midtones and the highlights. Each color is its own wheel. Alpha is kept."
+[node."comp.lift_gamma_gain".params]
+lift = "Color black becomes (black leaves it unchanged); tints the shadows."
+gamma = "Per-channel midtone exponent (white leaves it unchanged; above 1 brightens that channel)."
+gain = "Color white becomes (white leaves it unchanged); tints and scales the highlights."
+
 [node."color.ramp"]
 label = "Color Ramp"
 description = "Maps a value to a color through a gradient, so a number drives a hue rather than a brightness."

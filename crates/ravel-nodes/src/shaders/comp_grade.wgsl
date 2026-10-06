@@ -73,6 +73,14 @@ fn curves(rgb: vec3<f32>) -> vec3<f32> {
     );
 }
 
+// a.xyz = lift, b.xyz = gamma, c.xyz = gain, per channel. Black moves to the
+// lift and white to the gain (`x * gain + lift * (1 - x)`), then the gamma
+// bends the midtones. A negative value is clipped before the gamma.
+fn lift_gamma_gain(rgb: vec3<f32>) -> vec3<f32> {
+    let v = rgb * params.c.xyz + params.a.xyz * (vec3<f32>(1.0) - rgb);
+    return pow(max(v, vec3<f32>(0.0)), vec3<f32>(1.0) / max(params.b.xyz, vec3<f32>(1e-3)));
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = textureDimensions(input_tex);
@@ -88,6 +96,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         case 1u: { rgb = hue_saturation(rgb); }
         case 2u: { rgb = levels(rgb); }
         case 3u: { rgb = curves(rgb); }
+        case 4u: { rgb = lift_gamma_gain(rgb); }
         default: {}
     }
     textureStore(output_tex, coord, vec4<f32>(rgb, src.a));

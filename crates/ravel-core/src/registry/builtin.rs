@@ -2373,7 +2373,7 @@ fn comp_glow() -> NodeTemplate {
         .with_param(float_parameter("intensity", 1.0))
         .with_param(color_parameter("color", [1.0, 1.0, 1.0, 1.0]))
         .with_color_param("color")
-        .with_param_range("radius", 0.0..=200.0, 0.0..=50.0)
+        .with_param_range("radius", 0.0..=MAX_BLUR_RADIUS, 0.0..=50.0)
         .with_param_range("intensity", 0.0..=20.0, 0.0..=4.0)
 }
 
@@ -2390,7 +2390,7 @@ fn comp_drop_shadow() -> NodeTemplate {
         .with_color_param("color")
         .with_param_range("opacity", 0.0..=1.0, 0.0..=1.0)
         .with_param_range("offset", -10_000.0..=10_000.0, -100.0..=100.0)
-        .with_param_range("softness", 0.0..=200.0, 0.0..=50.0)
+        .with_param_range("softness", 0.0..=MAX_BLUR_RADIUS, 0.0..=50.0)
 }
 
 /// The `position` values of `comp.stroke`, in dropdown order.
@@ -2407,7 +2407,9 @@ fn comp_stroke() -> NodeTemplate {
         .with_param(string_parameter("position", "outside"))
         .with_color_param("color")
         .with_param_options("position", COMP_STROKE_POSITIONS)
-        .with_param_range("width", 0.0..=200.0, 0.0..=50.0)
+        // The stroke search stops at `MAX_REACH` (48 device px) in
+        // `ravel-nodes/src/comp/stylize.rs`; a wider value would draw nothing more.
+        .with_param_range("width", 0.0..=48.0, 0.0..=24.0)
 }
 
 /// `comp.emboss`: relief lit from `angle`; `amount` 0 is the input.

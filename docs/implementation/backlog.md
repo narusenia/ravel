@@ -30,7 +30,7 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| SCOPE-2 | 時間シフト経路（FX-5 の土台） | `evaluation-scope-plan.md` |
+| FX-5 | 時間系（`SCOPE-2` の時間シフト経路に載る） | `effects-library-plan.md` |
 | SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
 | BLUR-4 | `comp.motion_blur` と殻フィールド（BLUR-3 完了で着手可能） | `motion-blur-plan.md` |
@@ -325,7 +325,7 @@ Global に載り、層ごとに独立した書き込み API（失敗は通知）
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | SCOPE-1 | ✅ | `PathSegment` のスコープ次元（挙動不変） | #186 |
-| SCOPE-2 | 🟡 | 時間シフト経路（FX-5 の土台） | SCOPE-1 |
+| SCOPE-2 | ✅ #603 | 時間シフト経路（FX-5 の土台） | SCOPE-1 |
 | SCOPE-3 | 🟡 | `geometry.iterate`（ピース単位反復） | SCOPE-1 |
 | SCOPE-4 | ⬜ | 要素スコープ（group）規約の適用（`field.apply` は MOD-1 が担当） | SCOPE-3 |
 | SCOPE-5 | ⬜ | 文書更新 | SCOPE-4 |
@@ -1263,7 +1263,7 @@ CPU / GPU 両方）。グリフが穴を持つ最初の図形だったので、`
 | FX-3 | ✅ #600 | 生成とスタイライズ（グラデーションは PARAM-1 の `Ramp` を使う） | PARAM-1（グラデーションのみ） |
 | FX-3b | ✅ #596 | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | — |
 | FX-4 | ✅ #598 | トランスフォーム拡張と合成 | — |
-| FX-5 | ⬜ | 時間系（`SCOPE-2` の時間シフト経路に載る） | FX-1〜4, SCOPE-2 |
+| FX-5 | 🟡 | 時間系（`SCOPE-2` の時間シフト経路に載る） | FX-1〜4, SCOPE-2 |
 | FX-6 | ⬜ | 文書と実機確認（登録・ロケールは各単位が持つ） | FX-1〜5, FX-3b |
 
 FX-3b は raster 側に**生成ノードが 1 つも無い**ことへの対応

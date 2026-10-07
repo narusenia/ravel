@@ -145,6 +145,18 @@ pub struct XProcessor { ctx, pipeline, pool }
 - Properties 上のセクション分け（折りたたみ）が今の UI で表現できるかを
   最初に確認する。できなければ、その UI の追加を別単位に切り出す
 
+> **実装メモ**: セクション分けは既存の `NodeTemplate::with_param_group`
+> （`basic` / `curves` / `wheels` / `creative`）で表現でき、UI の追加は不要だった。
+> 既存 3 パラメータは名前・意味・既定値とも不変で、ブライトネスはコントラストの
+> 前に加算される（旧シェーダと同じ）ので、共有段へは `brightness * contrast`
+> として渡す。`grade_stages.wgsl` に単位 1 の段を移して `comp_grade.wgsl` と
+> `color_correct.wgsl` の両方へ前置し（`gpu_util::with_grade_stages`）、カーブの
+> テーブルも `comp/grade.rs` の `bake_curves` / `bake_hsl` を共有する。パラメータが
+> すべて中立の段は旗でスキップする（カーブのテーブルは 0〜1 にクランプするため、
+> HDR の画素を無駄に変えない）。対応ノードのない段（色温度 / 色かぶり、露光量、
+> ハイライト / シャドウ / 白 / 黒、自然な彩度、フェード、ビネット）の式は
+> `color_correct.wgsl` が正で、既知のパッチのテストで固定している。
+
 **完了条件**
 
 - 既存の `color_correct` を含む `.ravprj` を開いて、出力画素が変わらないテスト。

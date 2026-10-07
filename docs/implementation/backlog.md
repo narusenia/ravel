@@ -31,7 +31,7 @@
 | ID | 単位 | 計画 |
 |---|---|---|
 | FX-5 | 時間系（`SCOPE-2` の時間シフト経路に載る） | `effects-library-plan.md` |
-| SCOPE-3 | `geometry.iterate`（ピース単位反復） | `evaluation-scope-plan.md` |
+| SCOPE-4 | 要素スコープ（group）規約の適用 | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
 | BLUR-4 | `comp.motion_blur` と殻フィールド（BLUR-3 完了で着手可能） | `motion-blur-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
@@ -320,8 +320,8 @@ Global に載り、層ごとに独立した書き込み API（失敗は通知）
 |---|---|---|---|
 | SCOPE-1 | ✅ | `PathSegment` のスコープ次元（挙動不変） | #186 |
 | SCOPE-2 | ✅ #603 | 時間シフト経路（FX-5 の土台） | SCOPE-1 |
-| SCOPE-3 | 🟡 | `geometry.iterate`（ピース単位反復） | SCOPE-1 |
-| SCOPE-4 | ⬜ | 要素スコープ（group）規約の適用（`field.apply` は MOD-1 が担当） | SCOPE-3 |
+| SCOPE-3 | ✅ #606 | `geometry.iterate`（ピース単位反復） | SCOPE-1 |
+| SCOPE-4 | 🟡 | 要素スコープ（group）規約の適用（`field.apply` は MOD-1 が担当） | SCOPE-3 |
 | SCOPE-5 | ⬜ | 文書更新 | SCOPE-4 |
 
 ### ジオメトリ操作ノード拡充

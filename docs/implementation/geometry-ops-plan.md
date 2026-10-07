@@ -19,18 +19,18 @@
 | 複製 | Copy to Points | `scatter.*` 4 種 ✅ |
 | 変形 | Transform | `geometry.transform` ✅ |
 | 結合 | Merge | `geometry.merge` ✅ |
-| 属性 | AttribCreate / Promote / Transfer | `attribute.*` 4 種 ✅ |
-| **削除** | **Blast / Delete** | **無し** |
-| **並べ替え** | **Sort** | **無し** |
-| **再分割** | **Resample / Divide** | **無し** |
-| **統合** | **Fuse** | **無し** |
-| **計測** | **Measure** | **無し** |
-| **分岐** | **Switch** | **無し** |
-| 整理 | Null | 無し |
-| **反復複製** | **Copy Stamp / Transform 累積** | **無し**（`scatter` は位置を配るだけ） |
-| **デフォーマ** | **Bend / Twist / Taper** | **無し** |
-| **group 生成** | **Group / Group Expression** | **無し**（Bool 列を作る手段が全要素ブロードキャストのみ） |
-| **整列・分布** | — | **無し** |
+| 属性 | AttribCreate / Promote / Transfer | `attribute.*` ✅（`attribute.curveu` はパスパラメータ `u` を書く。単位 13） |
+| **削除** | **Blast / Delete** | `geometry.blast` ✅（Delete は Blast に統一） |
+| **並べ替え** | **Sort** | `geometry.sort` ✅ |
+| **再分割** | **Resample / Divide** | `geometry.resample` ✅（Divide はメッシュ前提で非対象） |
+| **統合** | **Fuse** | 無し（非対象） |
+| **計測** | **Measure** | `geometry.measure` ✅ |
+| **分岐** | **Switch** | `geometry.switch` ✅ |
+| 整理 | Null | `geometry.null` ✅ |
+| **反復複製** | **Copy Stamp / Transform 累積** | `geometry.repeat` ✅（`scatter` は位置を配るだけ） |
+| **デフォーマ** | **Bend / Twist / Taper** | `geometry.bend` / `twist` / `taper` ✅ |
+| **group 生成** | **Group / Group Expression** | `geometry.group_index` ✅（AND / OR / NOT の合成は非対象） |
+| **整列・分布** | — | `geometry.distribute` ✅ |
 
 ### group と反復が半端になる
 
@@ -117,7 +117,7 @@ pen ツールが現状の主な生成源であることを踏まえると優先�
 
 各単位は独立。並列委譲しやすいよう分けてある。
 
-### 単位 1: `geometry.blast`（要素削除）
+### ✅ 単位 1: `geometry.blast`（要素削除）
 
 - `group` / `domain` / `invert`。
 - ポイント削除時、参照点を失ったプリミティブも削除。
@@ -147,7 +147,7 @@ pen ツールが現状の主な生成源であることを踏まえると優先�
 - ディテールドメインは削除する要素が無いので素通し
 - アイコンは `eraser.svg`
 
-### 単位 2: `geometry.sort`（並べ替え）
+### ✅ 単位 2: `geometry.sort`（並べ替え）
 
 - 上記 7 モード。`index` 振り直し、`id` 保存。
 - 全属性列に同じ置換を適用。
@@ -186,7 +186,7 @@ pen ツールが現状の主な生成源であることを踏まえると優先�
   （`geometry::ops::element_hash` に移し、`scatter` が import する）
 - ノードのアイコンは `assets/icons/arrow-down-up.svg`（Lucide v0.462.0）
 
-### 単位 3: `geometry.resample`
+### ✅ 単位 3: `geometry.resample`
 
 - `length` / `segments` / `keep_corners`。
 - 既存の弧長計算（`geometry/ops.rs` の `path_sample`）を共有する。
@@ -218,7 +218,7 @@ pen ツールが現状の主な生成源であることを踏まえると優先�
   確保しない）。`keep_corners` の区間には要求数に比例して配り、最低 1
 - アイコンは `waypoints.svg`
 
-### 単位 4: `geometry.measure`
+### ✅ 単位 4: `geometry.measure`
 
 - `perimeter` / `area` / `curvature` / `segment_length` / `bounds` / `size`。
 - 出力ドメインは計測対象に応じて Primitive / Point / Detail。
@@ -251,7 +251,7 @@ pen ツールが現状の主な生成源であることを踏まえると優先�
   `bounds` / `size` はメッシュでも測れる
 - アイコンは `ruler.svg`
 
-### 単位 5: `geometry.switch` / `geometry.null`
+### ✅ 単位 5: `geometry.switch` / `geometry.null`
 
 - `switch`: 可変入力 + `index`。範囲外はクランプ。
 - `null`: 恒等（入力の `Arc` をそのまま返す）。
@@ -267,7 +267,7 @@ pen ツールが現状の主な生成源であることを踏まえると優先�
 空ジオメトリ。入力が 1 つも無ければ空ジオメトリ。選んだ入力は `Arc` のまま
 返す。アイコンは `arrow-right-left.svg` / `circle-dashed.svg`。
 
-### 単位 6: `geometry.group_index`（index による要素指定）
+### ✅ 単位 6: `geometry.group_index`（index による要素指定）
 
 group 規約（`evaluation-scope-plan.md`）は Bool 属性を group として扱うが、
 **その Bool 列を作る手段が `attribute.set`（全要素ブロードキャスト）しか
@@ -297,7 +297,7 @@ group 規約（`evaluation-scope-plan.md`）は Bool 属性を group として�
   （`group_index_group_confines_field_apply_in_place_of_transform`）。
   `SCOPE-4` で `transform` が `group` を持ったら、同じ形のテストを足す
 
-### 単位 7: `geometry.repeat`（トランスフォームリピータ）
+### ✅ 単位 7: `geometry.repeat`（トランスフォームリピータ）
 
 `scatter.*` は位置を配るだけで**変換が累積しない**。螺旋・入れ子・
 フラクタル的な反復は現状表現できない。
@@ -334,7 +334,7 @@ group 規約（`evaluation-scope-plan.md`）は Bool 属性を group として�
   ゴールデンと同じく画素値を書き写さず、螺旋の閉じた形（複素数の等比和）から
   求めた各コピーの中心が塗られていること、直線配置の位置が空であることを見る
 
-### 単位 8: デフォーマ（`geometry.bend` / `twist` / `taper`）
+### ✅ 単位 8: デフォーマ（`geometry.bend` / `twist` / `taper`）
 
 ノイズで `P` を歪めることはできるが、**制御された変形**が無い。
 
@@ -367,7 +367,7 @@ group 規約（`evaluation-scope-plan.md`）は Bool 属性を group として�
   （`tangents_follow_the_deformation_of_the_curve`）。接線を動かさない実装も、
   `bend` のヤコビアンの伸縮項を落とした実装も、このテストが落とす
 
-### 単位 9: `geometry.distribute`（要素サイズを考慮した分布）
+### ✅ 単位 9: `geometry.distribute`（要素サイズを考慮した分布）
 
 素朴な整列・等間隔は既存の変調で半分書ける（`field.constant → apply(P, set, x)` /
 `field.attribute(index, normalize) → apply(P, set, x)`）。ノードにする
@@ -407,7 +407,7 @@ group 規約（`evaluation-scope-plan.md`）は Bool 属性を group として�
   何も変えない（整列は 1 個なら不変）
 - `group` は付けていない（単位 9 の完了条件になく、SCOPE 系の範囲）
 
-### 単位 11: `shape.line` / `shape.grid`
+### ✅ 単位 11: `shape.line` / `shape.grid`
 
 問題の表にある「生成」の欠落分。`shape.custom_path` はペンツール専用で
 メニューから追加できない（`node_editor.rs` の `CUSTOM_PATH_TYPE_KEY` フィルタ）
@@ -430,7 +430,7 @@ group 規約（`evaluation-scope-plan.md`）は Bool 属性を group として�
   `OVL-5` は未着手。**回収は `OVL-5` 側で行う**ので、この単位は残りの条件で
   完了とし、宣言とそのテストは `OVL-5` の完了条件に持たせる。
 
-### 単位 12: `geometry.connect`（要素を結ぶ）
+### ✅ 単位 12: `geometry.connect`（要素を結ぶ）
 
 Houdini の Add SOP に相当する。点群を線で結ぶ手段が無いため、
 `scatter.*` で配った点をワイヤーフレームとして見せられない。
@@ -465,7 +465,7 @@ Houdini の Add SOP に相当する。点群を線で結ぶ手段が無いため
 - 近傍探索は `geometry/ops.rs` の `PointGrid`（`MED-CORE-05`）を使う。
   訪問済みが k 個の候補を埋めたら線形走査に落ちるので、長い鎖の末尾は O(n²)
 
-### 単位 13: `attribute.curveu`（パスパラメータ）
+### ✅ 単位 13: `attribute.curveu`（パスパラメータ）
 
 パスに沿った変調ができない原因。標準属性にパスパラメータが無く
 （`geometry/names.rs` は P / anchor / index / rot / scale / Cd / alpha /

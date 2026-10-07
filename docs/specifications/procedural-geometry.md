@@ -231,9 +231,9 @@ CPU 経路は texel を読むので、GPU 常駐フレームで来た画像は�
 | 変換系（`geometry.transform`） | 成分数で分岐して対応する |
 | 境界系（`Geometry::bounds` / `ops::drawn_bounds` / `bounds_center`） | 対応する。`bounds` は 2D の `Rect` なので xy 範囲を返す |
 | 属性系（`attribute.set` / `.promote` / `.transfer`、`field.apply`） | 次元非依存で素通しする |
-| 要素操作系（`geometry.merge`、将来の `blast` / `sort` / `switch`） | 次元非依存 |
+| 要素操作系（`geometry.merge`、`geometry.blast` / `sort` / `switch`） | 次元非依存 |
 | 複製系（`scatter.*`） | 3D 対応は 3D-6。3D の `P` を読むのは `center_input` の再センタリングだけで、そこは**明示エラー** |
-| 弧長・パス前提（`attribute.path_sample` / `scatter.path_array`、将来の `resample` / `curveu`） | **明示エラー**。黙って xy に射影しない |
+| 弧長・パス前提（`attribute.path_sample` / `scatter.path_array`、`geometry.resample` / `measure` の path 系、`attribute.curveu`） | **明示エラー**。黙って xy に射影しない |
 | ラスタライズ（`rasterize`） | **明示エラー**。3D は `scene.render` で描く |
 
 **明示エラーは `GeometryError::RequiresPlanarP`**（`{操作名} requires 2D
@@ -295,9 +295,10 @@ Path 前提のノードが `Mesh` を受けたときの挙動は種別ごとに�
 | 分類 | 挙動 |
 |---|---|
 | 構造検査（`Geometry::validate`） | 対応する。`verts` の範囲検査に加え、インデックス列の範囲・3 の倍数・頂点数未満を検査 |
-| 要素操作系（`geometry.merge`、将来の `blast` / `sort` / `switch`） | 種別非依存で素通しする。`Primitive::shifted` が両 variant を同じ 2 オフセットで再配置する |
+| 要素操作系（`geometry.merge`、`geometry.blast` / `switch`） | 種別非依存で素通しする。`Primitive::shifted` が両 variant を同じ 2 オフセットで再配置する |
+| `geometry.sort` | Primitive / Instance ドメインは種別非依存。**Point ドメインの並べ替えは Mesh で明示エラー**（`RequiresPathPrimitives`） |
 | 属性系（`attribute.set` / `.promote` / `.transfer`、`field.apply`） | 種別非依存で素通しする。列だけを触りトポロジを見ない |
-| 弧長・パス前提（`attribute.path_sample` / `scatter.path_array`、将来の `resample` / `curveu`） | **明示エラー**。Mesh に弧長は定義されない。黙って読み飛ばさない |
+| 弧長・パス前提（`attribute.path_sample` / `scatter.path_array`、`geometry.resample` / `measure` の path 系、`attribute.curveu`） | **明示エラー**。Mesh に弧長は定義されない。黙って読み飛ばさない |
 | ラスタライズ（`rasterize`） | **明示エラー**。三角形は `scene.render` が描く（3D-4） |
 
 **明示エラーは `GeometryError::RequiresPathPrimitives`**（`{操作名}
@@ -598,6 +599,47 @@ group 専用の型は導入しない。**Bool 属性を group として扱う**
 
 フィールドの `amount` は soft な重み付け、`group` は hard な適用可否で、
 両者は直交する。両方指定した場合は「group 内の要素にのみ amount を適用」。
+
+## ジオメトリ操作ノード（削除・並べ替え・計測ほか）
+
+「作る」「変える」に加えて、要素を**減らす・並べ替える・測る・反復する**
+ノード群。実装計画は `docs/implementation/geometry-ops-plan.md`。パラメータの
+範囲・既定は `registry/builtin.rs`、実装は `geometry/ops.rs`（と `deform.rs` /
+`distribute.rs` / `repeat.rs` / `index_group.rs`）が正。
+
+共通の規約:
+
+- **`index` は詰め直し・振り直し、`id` は保存する**（`blast` / `sort` / `resample`）
+- **属性列は全て同じ置換で動く**。1 列でも取り残すと値が点からずれる
+- **決定的**。同じ入力・同じ seed は同じ結果（`random` は `scatter.*` と共有する `ops::element_hash`）
+- `Primitive::Path` は連続範囲（`verts: Range<usize>`）なので、点の並べ替えは
+  プリミティブの頂点範囲の内側に閉じる
+
+| ノード | 入力 → 出力 | 主なパラメータ | 要点 |
+|---|---|---|---|
+| `geometry.blast` | Geometry → Geometry | `domain`（point / primitive / instance）、`group`、`invert` | `group` の Bool が true の要素を消す。**空・解決できない `group` は何も消さない**（他ノードの「全要素」と逆。作った瞬間に空になるのを避ける）。参照点を 1 つでも失ったプリミティブは消える。プリミティブ削除は点を残す。Detail は素通し |
+| `geometry.sort` | Geometry (+ `path`) → Geometry | `domain`、`mode`（x / y / radial / along_path / random / attribute / reverse）、`center`、`seed`、`attribute` | 格納順を昇順に並べ替える（降順は `reverse` をもう 1 回）。属性モードのキーはベクタ・色なら第 1 成分。プリミティブドメインの位置基準はその重心。**Mesh のポイントドメイン並べ替えは明示エラー** |
+| `geometry.resample` | Geometry → Geometry | `length`、`segments`、`keep_corners` | 全パスを弧長等間隔で打ち直す（`keep_corners` では角で区切った区間ごとに分割数を丸めるので、区間ごとに間隔が違う）。`length` > 0 が優先、0 なら `segments`。F32 / ベクタ / 色は線形補間、I32 / Bool / Str は近い側。`in_tan` / `out_tan` は捨てる。Mesh と 3D 位置は明示エラー。パスが無ければ素通し |
+| `geometry.measure` | Geometry → Geometry | `measure`（perimeter / area / curvature / segment_length / bounds / size）、`name` | 出力ドメインは値で固定: perimeter / area / size = Primitive、curvature / segment_length = Point、bounds = Detail。`area` は符号付き（反時計回りが正、開パスは閉じたとみなす）。`bounds` は `Vec4(min x, min y, max x, max y)`、`size` は `Vec2(幅, 高さ)`。パス系は平面 P のみ |
+| `geometry.switch` | Geometry ×可変 → Geometry | `index` | 範囲外は**接続済みの最後の入力**へクランプ。負は 0。入力が無ければ空。`Arc` のまま返す |
+| `geometry.null` | Geometry → Geometry | — | 恒等（`Arc` をそのまま返す） |
+| `geometry.group_index` | Geometry → Geometry | `range`、`domain`、`name`、`invert` | index の範囲から Bool group 列を書く。`3` / `3-7`（両端含む）/ `3,5,9` / `0-20:2`。範囲外・不正なトークンは警告して無視、複数トークンは和集合 |
+| `geometry.repeat` | Geometry（ソース、任意）→ Geometry | `count`、`translate`、`rotate`（度）、`scale` | コピー i の変換は 1 コピー分の変換を i 回**累積**。出力は Instance ドメインで `scatter.*` と同じ形。ソースの原点まわり（`center_input` 無し）。スケールが潰れてもコピーは落とさない。`count` は 100000 で頭打ち |
+| `geometry.bend` / `twist` / `taper` | Geometry → Geometry | `axis`（x / y）、`start`、`end`、`amount`、`group` | 点位置の純関数で、**接線（`in_tan` / `out_tan`）も同じ写像のヤコビアンで移す**。範囲の手前は不動、先は終端の値を保つ（`bend` は終端の接線方向へ剛体延長）。`amount` は `bend` / `twist` が度、`taper` が終端での幅の減り具合。`amount = 0` は入力を共有して返す。**平面専用・Point ドメインのみ** |
+| `geometry.distribute` | Geometry → Geometry | `axis`（x / y）、`mode`（min / center / max / centers / gaps） | 要素のサイズ（bounds）を考慮した整列と等間隔。要素 = プリミティブ、無ければインスタンス。`centers` は中心間、`gaps` は隙間が等しい。3 個未満の等間隔は何も変えない |
+| `shape.line` | — → Geometry | `start`、`end`、`segments` | 開パス 1 本、`segments + 1` 点（中間点は `field.apply` の変調対象）。始点 = 終点でもエラーにしない |
+| `shape.grid` | — → Geometry | `center`、`size`、`rows`、`columns` | 行と列の線で `rows + columns` 本のパス。**点だけ欲しいときは `scatter.grid`**（こちらはパスを出す） |
+| `geometry.connect` | Geometry → Geometry | `mode`（order / nearest / group）、`group`、`interpolation`（linear / bezier）、`closed` | **点を増やさず**、パスを 1 本張る（入力のプリミティブは置き換え、Mesh は明示エラー）。接続対象が 2 点未満なら入力をそのまま返す。点を並べ替えて張るので、`index` は振り直さない。`bezier` は `in_tan` / `out_tan` を隣接点の方向から書く |
+| `attribute.curveu` | Geometry → Geometry | `mode`（by_arc_length / by_vertex_order） | 各点にパスパラメータ `u`（0..1）を書く。**primitive ごとに正規化**。標準属性 `u` を参照 |
+
+`geometry.sort` と `field.attribute("index")` の組で stagger の順序を
+「左から」「中心から」「ランダム」に変えられる。`geometry.group_index` が書いた
+Bool 列は `group` を取るノード（上の表）にそのまま渡せる。線に沿った
+グラデーションは
+`shape.line → attribute.curveu` を `field.apply(Cd)` の geometry 入力へ、`field.attribute("u") → field.ramp` を同じ `field.apply` の field 入力へつなぐ。
+
+**非対象**: Fuse（近接点統合）、メッシュの Divide / Subdivide / PolyBevel /
+PolyExtrude、group の AND / OR / NOT 合成、`shape.box`。
 
 ## GPU 方針
 

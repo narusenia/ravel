@@ -710,9 +710,20 @@ fn path_parameters(path: &[Vec2], closed: bool, mode: CurveUMode) -> Vec<f32> {
             .map(|index| index as f32 / steps as f32)
             .collect();
     }
-    // Shares `push_segment` with `path_sample`: the same cumulative lengths,
-    // and the same rule that a zero-length segment does not advance them (a
-    // duplicated point therefore repeats its predecessor's `u`).
+    let (at_vertex, total) = vertex_arc_lengths(path, closed);
+    if total <= f32::EPSILON {
+        return vec![0.0; path.len()];
+    }
+    at_vertex.iter().map(|length| length / total).collect()
+}
+
+/// Cumulative arc length at each vertex of one polyline, and the total
+/// (closing segment included when `closed`).
+///
+/// Shares `push_segment` with `path_sample`: the same cumulative lengths, and
+/// the same rule that a zero-length segment does not advance them (a
+/// duplicated point therefore repeats its predecessor's length).
+fn vertex_arc_lengths(path: &[Vec2], closed: bool) -> (Vec<f32>, f32) {
     let mut segments = Vec::with_capacity(path.len());
     let mut at_vertex = Vec::with_capacity(path.len());
     for (index, point) in path.iter().enumerate() {
@@ -725,10 +736,250 @@ fn path_parameters(path: &[Vec2], closed: bool, mode: CurveUMode) -> Vec<f32> {
         push_segment(&mut segments, *last, *first);
     }
     let total = segments.last().map_or(0.0, |segment| segment.2);
-    if total <= f32::EPSILON {
-        return vec![0.0; path.len()];
+    (at_vertex, total)
+}
+
+// ---------------------------------------------------------------------------
+// Resample
+// ---------------------------------------------------------------------------
+
+/// Segments a single span may be divided into. A tiny `length` on a long path
+/// would otherwise ask for billions of points; the cap is far above anything a
+/// drawn path needs and turns a runaway parameter into a coarse result.
+const MAX_SPAN_SEGMENTS: usize = 1 << 20;
+
+/// A turn sharper than this at a vertex (cosine of 1 degree) is a corner.
+const CORNER_COS: f32 = 0.999_847_7;
+
+/// Re-places the points of every path primitive at even arc-length spacing.
+///
+/// `length > 0` divides each path into `round(arc / length)` equal segments
+/// (at least 1), so the spacing is the nearest *even* one to `length` and the
+/// path ends stay exact; otherwise `segments` equal segments are used. With
+/// `keep_corners` the vertices where the path turns by more than about a
+/// degree stay as points and each stretch between them is divided on its own —
+/// in `segments` mode a stretch gets `round(segments * its share of the arc)`.
+///
+/// Point attributes are read back from the original points the new point falls
+/// between: `F32`, vectors and colours interpolate linearly, and the
+/// non-interpolable `I32` / `Bool` / `Str` take the nearer endpoint (so `id`
+/// stays a real id). `index` is renumbered. `in_tan` / `out_tan` are dropped:
+/// they describe the old curve's handles, and a resampled path is a polyline.
+///
+/// Points that no path references are dropped with the rest of the rebuilt
+/// point list. A path with a single vertex or no length cannot be spaced, so it
+/// passes through as it is rather than failing; a geometry with no path at all
+/// is returned unchanged. Arc length is [`path_sample`]'s, so 3D positions and
+/// meshes are explicit errors for the same reasons.
+pub fn resample(
+    geometry: &Geometry,
+    length: f32,
+    segments: usize,
+    keep_corners: bool,
+) -> Result<Geometry, GeometryOpError> {
+    if geometry.primitives().is_empty() {
+        return Ok(geometry.clone());
     }
-    at_vertex.iter().map(|length| length / total).collect()
+    let points = positions(geometry, Domain::Point)?.require_planar("geometry.resample")?;
+    geometry.require_paths("geometry.resample")?;
+
+    // `(from, to, t)` per output point, in global point indices.
+    let mut samples: Vec<(usize, usize, f32)> = Vec::new();
+    let mut primitives = Vec::with_capacity(geometry.primitive_count());
+    for primitive in geometry.primitives() {
+        let Primitive::Path { verts, closed } = primitive else {
+            continue;
+        };
+        let path = points
+            .get(verts.clone())
+            .ok_or(GeometryOpError::InvalidPath)?;
+        let start = samples.len();
+        for (from, to, t) in path_samples(path, *closed, length, segments, keep_corners) {
+            samples.push((verts.start + from, verts.start + to, t));
+        }
+        primitives.push(Primitive::Path {
+            verts: start..samples.len(),
+            closed: *closed,
+        });
+    }
+
+    let mut result = geometry.clone();
+    let mut resampled = AttributeSet::new();
+    for (name, column) in geometry.points().iter() {
+        if name.as_str() == names::IN_TAN || name.as_str() == names::OUT_TAN {
+            continue;
+        }
+        resampled.insert(name.as_str(), interpolate_samples(column, &samples))?;
+    }
+    *result.attribute_set_mut(Domain::Point) = resampled;
+    result.set_primitives(primitives);
+    renumber_index(&mut result, Domain::Point)?;
+    result.validate()?;
+    Ok(result)
+}
+
+/// The `(from vertex, to vertex, t)` of every point [`resample`] puts on one
+/// path, in path order. A degenerate path answers with its own vertices.
+fn path_samples(
+    path: &[Vec2],
+    closed: bool,
+    length: f32,
+    segments: usize,
+    keep_corners: bool,
+) -> Vec<(usize, usize, f32)> {
+    let vertices = path.len();
+    let (at_vertex, total) = vertex_arc_lengths(path, closed);
+    if vertices < 2 || total <= f32::EPSILON {
+        return (0..vertices).map(|vertex| (vertex, vertex, 0.0)).collect();
+    }
+
+    // The vertices the spans run between. An open path always owns its two
+    // ends and a closed one its first vertex, so a span never needs to
+    // reason about "the start of the loop".
+    let mut anchors = vec![0];
+    if keep_corners {
+        anchors
+            .extend((1..vertices - usize::from(!closed)).filter(|v| is_corner(path, *v, closed)));
+    }
+    if !closed {
+        anchors.push(vertices - 1);
+    }
+    anchors.dedup();
+
+    let spans = if closed {
+        anchors.len()
+    } else {
+        anchors.len() - 1
+    };
+    let mut samples = Vec::new();
+    for span in 0..spans {
+        let (a, b) = (anchors[span], anchors[(span + 1) % anchors.len()]);
+        let begin = at_vertex[a];
+        let span_length = if b > a || (!closed) {
+            at_vertex[b] - begin
+        } else {
+            total - begin + at_vertex[b]
+        };
+        if span_length <= f32::EPSILON {
+            samples.push((a, a, 0.0));
+            continue;
+        }
+        let count = if length > 0.0 {
+            (span_length / length).round()
+        } else {
+            (segments as f32 * span_length / total).round()
+        }
+        .clamp(1.0, MAX_SPAN_SEGMENTS as f32) as usize;
+        samples.push((a, a, 0.0));
+        for step in 1..count {
+            let distance = begin + span_length * step as f32 / count as f32;
+            samples.push(locate(&at_vertex, total, vertices, closed, distance));
+        }
+    }
+    if !closed {
+        samples.push((vertices - 1, vertices - 1, 0.0));
+    }
+    samples
+}
+
+/// Whether the path turns by more than a degree at `vertex`.
+fn is_corner(path: &[Vec2], vertex: usize, closed: bool) -> bool {
+    let count = path.len();
+    let (before, after) = if closed {
+        (
+            path[(vertex + count - 1) % count],
+            path[(vertex + 1) % count],
+        )
+    } else {
+        (path[vertex - 1], path[vertex + 1])
+    };
+    let here = path[vertex];
+    let (incoming, outgoing) = (
+        Vec2(here.0 - before.0, here.1 - before.1),
+        Vec2(after.0 - here.0, after.1 - here.1),
+    );
+    let lengths = (incoming.0.hypot(incoming.1)) * (outgoing.0.hypot(outgoing.1));
+    lengths > f32::EPSILON
+        && (incoming.0 * outgoing.0 + incoming.1 * outgoing.1) / lengths < CORNER_COS
+}
+
+/// The segment `distance` along the path falls on, as `(from, to, t)`.
+fn locate(
+    at_vertex: &[f32],
+    total: f32,
+    vertices: usize,
+    closed: bool,
+    distance: f32,
+) -> (usize, usize, f32) {
+    // The last vertex at or before `distance`: with duplicated points several
+    // share a length, and the last of them is the one whose outgoing segment
+    // has any.
+    let from = at_vertex
+        .partition_point(|length| *length <= distance)
+        .saturating_sub(1);
+    let end = if from + 1 < vertices {
+        at_vertex[from + 1]
+    } else {
+        total
+    };
+    let to = if from + 1 < vertices || closed {
+        (from + 1) % vertices
+    } else {
+        from
+    };
+    let span = end - at_vertex[from];
+    let t = if span > f32::EPSILON {
+        ((distance - at_vertex[from]) / span).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (from, to, t)
+}
+
+/// One output row per `(from, to, t)` of `column`: a linear blend where the
+/// type has one, the nearer endpoint where it does not.
+fn interpolate_samples(column: &AttributeArray, samples: &[(usize, usize, f32)]) -> AttributeArray {
+    macro_rules! blend {
+        ($values:expr, $variant:ident, $mix:expr) => {
+            AttributeArray::$variant(
+                samples
+                    .iter()
+                    .map(|(from, to, t)| $mix(&$values[*from], &$values[*to], *t))
+                    .collect(),
+            )
+        };
+    }
+    fn nearest<T: Clone>(from: &T, to: &T, t: f32) -> T {
+        if t < 0.5 { from } else { to }.clone()
+    }
+    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    match column {
+        AttributeArray::F32(v) => blend!(v, F32, |a: &f32, b: &f32, t| lerp(*a, *b, t)),
+        AttributeArray::Vec2(v) => blend!(v, Vec2, |a: &Vec2, b: &Vec2, t| Vec2(
+            lerp(a.0, b.0, t),
+            lerp(a.1, b.1, t)
+        )),
+        AttributeArray::Vec3(v) => blend!(v, Vec3, |a: &Vec3, b: &Vec3, t| Vec3(
+            lerp(a.0, b.0, t),
+            lerp(a.1, b.1, t),
+            lerp(a.2, b.2, t)
+        )),
+        AttributeArray::Vec4(v) => blend!(v, Vec4, |a: &Vec4, b: &Vec4, t| Vec4(
+            lerp(a.0, b.0, t),
+            lerp(a.1, b.1, t),
+            lerp(a.2, b.2, t),
+            lerp(a.3, b.3, t)
+        )),
+        AttributeArray::Color(v) => blend!(v, Color, |a: &Color, b: &Color, t| Color::new(
+            lerp(a.r, b.r, t),
+            lerp(a.g, b.g, t),
+            lerp(a.b, b.b, t),
+            lerp(a.a, b.a, t)
+        )),
+        AttributeArray::I32(v) => blend!(v, I32, nearest),
+        AttributeArray::Bool(v) => blend!(v, Bool, nearest),
+        AttributeArray::Str(v) => blend!(v, Str, nearest),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -7074,5 +7325,291 @@ mod tests {
         assert_eq!(result.primitive_count(), 1, "the first mesh lost a vertex");
         assert_eq!(result.primitives()[0].verts(), &(2..5));
         assert_eq!(result.validate(), Ok(()));
+    }
+
+    // ----- resample ------------------------------------------------------------
+
+    fn path_geometry(points: Vec<Vec2>, closed: bool) -> Geometry {
+        let mut geometry = Geometry::from_points(points);
+        let count = geometry.point_count();
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..count,
+            closed,
+        });
+        geometry
+    }
+
+    fn xs(geometry: &Geometry) -> Vec<Vec2> {
+        geometry
+            .points()
+            .get(names::P)
+            .unwrap()
+            .as_vec2(names::P)
+            .unwrap()
+            .to_vec()
+    }
+
+    fn assert_points(actual: &[Vec2], expected: &[(f32, f32)]) {
+        assert_eq!(actual.len(), expected.len(), "{actual:?}");
+        for (point, (x, y)) in actual.iter().zip(expected) {
+            assert!(
+                (point.0 - x).abs() < 1e-4 && (point.1 - y).abs() < 1e-4,
+                "{actual:?} vs {expected:?}"
+            );
+        }
+    }
+
+    /// Uneven source vertices come out evenly spaced, by length and by count.
+    #[test]
+    fn resample_spaces_a_straight_path_evenly() {
+        let line = path_geometry(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(10.0, 0.0)], false);
+        let by_length = resample(&line, 2.5, 99, false).unwrap();
+        assert_points(
+            &xs(&by_length),
+            &[(0.0, 0.0), (2.5, 0.0), (5.0, 0.0), (7.5, 0.0), (10.0, 0.0)],
+        );
+        // `length` wins over `segments`; with no length the count decides.
+        let by_count = resample(&line, 0.0, 5, false).unwrap();
+        assert_points(
+            &xs(&by_count),
+            &[
+                (0.0, 0.0),
+                (2.0, 0.0),
+                (4.0, 0.0),
+                (6.0, 0.0),
+                (8.0, 0.0),
+                (10.0, 0.0),
+            ],
+        );
+        // A length that does not divide the path snaps to the nearest even one.
+        let snapped = resample(&line, 3.0, 0, false).unwrap();
+        assert_eq!(snapped.point_count(), 4, "10 / 3 rounds to 3 segments");
+        assert_eq!(
+            by_length.primitives(),
+            &[Primitive::Path {
+                verts: 0..5,
+                closed: false
+            }]
+        );
+    }
+
+    /// A closed path goes all the way round, ends on no duplicate of its
+    /// start, and stays closed.
+    #[test]
+    fn resample_walks_a_closed_path_once_around() {
+        let square = path_geometry(
+            vec![
+                Vec2(0.0, 0.0),
+                Vec2(4.0, 0.0),
+                Vec2(4.0, 4.0),
+                Vec2(0.0, 4.0),
+            ],
+            true,
+        );
+        let result = resample(&square, 0.0, 8, false).unwrap();
+        assert_points(
+            &xs(&result),
+            &[
+                (0.0, 0.0),
+                (2.0, 0.0),
+                (4.0, 0.0),
+                (4.0, 2.0),
+                (4.0, 4.0),
+                (2.0, 4.0),
+                (0.0, 4.0),
+                (0.0, 2.0),
+            ],
+        );
+        assert_eq!(
+            result.primitives(),
+            &[Primitive::Path {
+                verts: 0..8,
+                closed: true
+            }]
+        );
+    }
+
+    #[test]
+    fn keep_corners_keeps_the_turns_and_divides_each_stretch() {
+        let ell = path_geometry(
+            vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0), Vec2(10.0, 5.0)],
+            false,
+        );
+        let kept = xs(&resample(&ell, 4.0, 0, true).unwrap());
+        // 10 -> 3 segments, 5 -> 1 segment, and the corner is exactly there.
+        assert_eq!(kept.len(), 5);
+        assert!(kept.contains(&Vec2(10.0, 0.0)), "{kept:?}");
+        assert_eq!(kept.last(), Some(&Vec2(10.0, 5.0)));
+        assert_points(
+            &kept,
+            &[
+                (0.0, 0.0),
+                (10.0 / 3.0, 0.0),
+                (20.0 / 3.0, 0.0),
+                (10.0, 0.0),
+                (10.0, 5.0),
+            ],
+        );
+        // Without it the corner is stepped over: 15 / 4 = 3.75 spacing.
+        let loose = xs(&resample(&ell, 4.0, 0, false).unwrap());
+        assert!(!loose.contains(&Vec2(10.0, 0.0)), "{loose:?}");
+        assert_points(
+            &loose,
+            &[
+                (0.0, 0.0),
+                (3.75, 0.0),
+                (7.5, 0.0),
+                (10.0, 1.25),
+                (10.0, 5.0),
+            ],
+        );
+        // A closed shape keeps every corner of a square, 4 per side.
+        let square = path_geometry(
+            vec![
+                Vec2(0.0, 0.0),
+                Vec2(4.0, 0.0),
+                Vec2(4.0, 4.0),
+                Vec2(0.0, 4.0),
+            ],
+            true,
+        );
+        let corners = xs(&resample(&square, 1.0, 0, true).unwrap());
+        assert_eq!(corners.len(), 16);
+        for corner in [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)] {
+            assert!(corners.contains(&Vec2(corner.0, corner.1)), "{corner:?}");
+        }
+    }
+
+    #[test]
+    fn resample_interpolates_what_can_be_and_picks_the_nearer_point_for_the_rest() {
+        let mut line = path_geometry(vec![Vec2(0.0, 0.0), Vec2(8.0, 0.0)], false);
+        line.points_mut()
+            .insert("w", AttributeArray::F32(vec![0.0, 10.0]))
+            .unwrap();
+        line.points_mut()
+            .insert(
+                "c",
+                AttributeArray::Color(vec![
+                    Color::new(0.0, 0.0, 0.0, 1.0),
+                    Color::new(1.0, 0.5, 0.0, 1.0),
+                ]),
+            )
+            .unwrap();
+        line.points_mut()
+            .insert(names::ID, AttributeArray::I32(vec![7, 9]))
+            .unwrap();
+        line.points_mut()
+            .insert("name", AttributeArray::Str(vec!["a".into(), "b".into()]))
+            .unwrap();
+        line.points_mut()
+            .insert(names::IN_TAN, AttributeArray::Vec2(vec![Vec2(1.0, 1.0); 2]))
+            .unwrap();
+        line.primitive_attrs_mut()
+            .insert("tag", AttributeArray::I32(vec![42]))
+            .unwrap();
+        let result = resample(&line, 0.0, 4, false).unwrap();
+        let point = |name: &str| result.points().get(name).unwrap().clone();
+        assert_eq!(point("w").as_f32("w").unwrap(), [0.0, 2.5, 5.0, 7.5, 10.0]);
+        let AttributeArray::Color(colors) = point("c").as_ref().clone() else {
+            panic!("c is a colour column");
+        };
+        assert!((colors[2].r - 0.5).abs() < 1e-6 && (colors[2].g - 0.25).abs() < 1e-6);
+        assert_eq!(point(names::ID).as_i32(names::ID).unwrap(), [7, 7, 9, 9, 9]);
+        assert_eq!(
+            point(names::INDEX).as_i32(names::INDEX).unwrap(),
+            [0, 1, 2, 3, 4]
+        );
+        let AttributeArray::Str(names) = point("name").as_ref().clone() else {
+            panic!("name is a string column");
+        };
+        assert_eq!(names, ["a", "a", "b", "b", "b"]);
+        assert!(result.points().get(names::IN_TAN).is_none());
+        assert_eq!(
+            result
+                .primitive_attrs()
+                .get("tag")
+                .unwrap()
+                .as_i32("tag")
+                .unwrap(),
+            [42],
+            "primitive rows follow their primitive"
+        );
+    }
+
+    #[test]
+    fn resample_handles_degenerate_paths_without_erroring() {
+        // One vertex, a path whose points coincide, and an open two-point
+        // path of zero length all pass through.
+        for points in [
+            vec![Vec2(3.0, 4.0)],
+            vec![Vec2(1.0, 1.0), Vec2(1.0, 1.0)],
+            vec![Vec2(2.0, 2.0), Vec2(2.0, 2.0), Vec2(2.0, 2.0)],
+        ] {
+            for closed in [false, true] {
+                for keep in [false, true] {
+                    let geometry = path_geometry(points.clone(), closed);
+                    let result = resample(&geometry, 0.5, 4, keep).unwrap();
+                    assert_eq!(xs(&result), points, "{points:?} closed={closed}");
+                    assert_eq!(result.validate(), Ok(()));
+                }
+            }
+        }
+        // No path primitive at all: nothing to do, nothing wrong.
+        let cloud = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0)]);
+        assert_eq!(resample(&cloud, 0.5, 4, false).unwrap().point_count(), 2);
+        assert_eq!(
+            resample(&Geometry::new(), 0.5, 4, false)
+                .unwrap()
+                .point_count(),
+            0
+        );
+        // A tiny length is capped rather than allocating without bound.
+        let long = path_geometry(vec![Vec2(0.0, 0.0), Vec2(1.0e6, 0.0)], false);
+        assert!(resample(&long, 1.0e-6, 0, false).unwrap().point_count() <= MAX_SPAN_SEGMENTS + 1);
+    }
+
+    #[test]
+    fn resample_rebuilds_each_path_in_turn() {
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(4.0, 0.0),
+            Vec2(0.0, 10.0),
+            Vec2(0.0, 16.0),
+        ]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        geometry.push_primitive(Primitive::Path {
+            verts: 2..4,
+            closed: false,
+        });
+        let result = resample(&geometry, 2.0, 0, false).unwrap();
+        // 4 long -> 2 segments, 6 long -> 3 segments.
+        assert_eq!(
+            result.primitives(),
+            &[
+                Primitive::Path {
+                    verts: 0..3,
+                    closed: false
+                },
+                Primitive::Path {
+                    verts: 3..7,
+                    closed: false
+                },
+            ]
+        );
+        assert_points(
+            &xs(&result)[3..],
+            &[(0.0, 10.0), (0.0, 12.0), (0.0, 14.0), (0.0, 16.0)],
+        );
+    }
+
+    #[test]
+    fn resample_refuses_meshes() {
+        let mut geometry =
+            Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(0.0, 1.0)]);
+        geometry.push_mesh(0..3, &[0, 1, 2]);
+        assert!(resample(&geometry, 1.0, 4, false).is_err());
     }
 }

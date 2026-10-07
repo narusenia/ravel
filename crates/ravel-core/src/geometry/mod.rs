@@ -32,7 +32,7 @@ pub use ops::{
     AggregateMode, AttributeValue, ConnectInterpolation, ConnectMode, CurveUMode, GeometryOpError,
     PathArcTable, PathSample, SortMode, TransferMode, attribute_delete, attribute_set,
     attribute_set_in_group, attribute_transfer, blast, bounds_center, connect, curve_u,
-    drawn_bounds, element_hash, expand_instances, path_sample, promote_attribute, sort,
+    drawn_bounds, element_hash, expand_instances, path_sample, promote_attribute, resample, sort,
     stroke_reach,
 };
 pub use triangulate::Triangulator;

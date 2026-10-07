@@ -572,6 +572,17 @@ impl PathInterner {
             .collect()
     }
 
+    /// [`Self::ids_under`] for several prefixes in one pass over the table.
+    fn ids_under_any(&self, prefixes: &[&[PathSegment]]) -> HashSet<PathId> {
+        if prefixes.is_empty() {
+            return HashSet::new();
+        }
+        self.iter()
+            .filter(|(_, path)| prefixes.iter().any(|prefix| path.starts_with(prefix)))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
     /// Forget every path, keeping only the root.
     fn clear(&mut self) {
         *self = Self::default();
@@ -2516,13 +2527,12 @@ impl Evaluator {
             return;
         };
         let parent_path = self.paths.path(parent);
-        let mut under = HashSet::new();
-        for id in scopes {
-            let path = self.paths.path(*id);
-            if path.len() == parent_path.len() + 1 && path.starts_with(parent_path) {
-                under.extend(self.paths.ids_under(path));
-            }
-        }
+        let owned: Vec<&[PathSegment]> = scopes
+            .iter()
+            .map(|id| self.paths.path(*id))
+            .filter(|path| path.len() == parent_path.len() + 1 && path.starts_with(parent_path))
+            .collect();
+        let under = self.paths.ids_under_any(&owned);
         if under.is_empty() {
             return;
         }
@@ -2558,13 +2568,14 @@ impl Evaluator {
             return;
         }
         let live: HashSet<PathId> = self.time_shift_scopes.values().flatten().copied().collect();
-        let mut under = HashSet::new();
-        for id in std::mem::take(&mut self.retired_scopes) {
-            // Entered again since it was retired: it is live, keep it.
-            if !live.contains(&id) {
-                under.extend(self.paths.ids_under(self.paths.path(id)));
-            }
-        }
+        let retired = std::mem::take(&mut self.retired_scopes);
+        // Entered again since it was retired: it is live, keep it.
+        let dead: Vec<&[PathSegment]> = retired
+            .iter()
+            .filter(|id| !live.contains(id))
+            .map(|id| self.paths.path(*id))
+            .collect();
+        let under = self.paths.ids_under_any(&dead);
         self.store.retain(|k| !under.contains(&k.path));
         self.prune_scope_state(&under);
         // A nested scope of another owner can sit under a retired one.
@@ -7474,6 +7485,35 @@ mod tests {
         ev.mark_dirty(&graph, upstream());
 
         assert!(!ev.cache_contains(&shift_scope(9), upstream()));
+    }
+
+    #[test]
+    fn dirtying_the_owner_in_one_parent_keeps_the_other_parents_shifted_copies() {
+        let (mut ev, graph, _) = time_shift_setup(0);
+        ev.register(
+            shift(),
+            Arc::new(Follow {
+                graph: graph.clone(),
+            }),
+        );
+        let subnet = PathSegment::Subnet(NodeId::new(50));
+
+        // The same owner shifts under the root and under a subnet scope.
+        ev.evaluate(&graph, shift(), &ctx_at(3)).unwrap();
+        ev.evaluate_at(&[subnet], &graph, shift(), &ctx_at(3))
+            .unwrap();
+        let in_root = shift_scope(1003);
+        let in_subnet = vec![subnet, PathSegment::TimeShift(shift(), 1003)];
+        assert!(ev.cache_contains(&in_root, upstream()));
+        assert!(ev.cache_contains(&in_subnet, upstream()));
+
+        ev.mark_dirty(&graph, shift());
+
+        assert!(!ev.cache_contains(&in_root, upstream()));
+        assert!(
+            ev.cache_contains(&in_subnet, upstream()),
+            "dirtying in the root dropped another parent's shifted copy"
+        );
     }
 
     #[test]

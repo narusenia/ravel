@@ -8297,6 +8297,108 @@ mod tests {
         }
     }
 
+    /// Detail reaches every piece, other primitive columns follow their
+    /// primitives, and a point two pieces share is duplicated into each.
+    #[test]
+    fn split_by_piece_carries_detail_columns_and_duplicates_shared_points() {
+        // Primitive 0 (piece 1) runs over points 0..3, primitive 1 (piece 0)
+        // over 2..4: point 2 is shared across the two pieces.
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(1.0, 0.0),
+            Vec2(2.0, 0.0),
+            Vec2(3.0, 0.0),
+        ]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..3,
+            closed: false,
+        });
+        geometry.push_primitive(Primitive::Path {
+            verts: 2..4,
+            closed: false,
+        });
+        let prims = geometry.primitive_attrs_mut();
+        prims
+            .insert(names::PIECE, AttributeArray::I32(vec![1, 0]))
+            .unwrap();
+        prims
+            .insert("width", AttributeArray::F32(vec![10.0, 20.0]))
+            .unwrap();
+        prims
+            .insert("name", AttributeArray::Str(vec!["a".into(), "b".into()]))
+            .unwrap();
+        geometry
+            .detail_mut()
+            .insert("title", AttributeArray::Str(vec!["scene".into()]))
+            .unwrap();
+
+        let pieces = split_by_piece(&geometry, names::PIECE).unwrap();
+        assert_eq!(pieces.len(), 2);
+        for piece in &pieces {
+            assert_eq!(
+                piece
+                    .detail()
+                    .get("title")
+                    .unwrap()
+                    .as_str("title")
+                    .unwrap(),
+                ["scene"],
+                "detail must reach every piece"
+            );
+        }
+        // Ascending: piece 0 holds primitive 1, piece 1 holds primitive 0.
+        assert_eq!(
+            pieces[0]
+                .primitive_attrs()
+                .get("width")
+                .unwrap()
+                .as_f32("width")
+                .unwrap(),
+            [20.0]
+        );
+        assert_eq!(
+            pieces[1]
+                .primitive_attrs()
+                .get("width")
+                .unwrap()
+                .as_f32("width")
+                .unwrap(),
+            [10.0]
+        );
+        assert_eq!(
+            pieces[0]
+                .primitive_attrs()
+                .get("name")
+                .unwrap()
+                .as_str("name")
+                .unwrap(),
+            ["b"]
+        );
+        assert_eq!(
+            pieces[1]
+                .primitive_attrs()
+                .get("name")
+                .unwrap()
+                .as_str("name")
+                .unwrap(),
+            ["a"]
+        );
+        // The shared point (x = 2) is in both pieces.
+        let xs = |piece: &Geometry| -> Vec<f32> {
+            piece
+                .points()
+                .get(names::P)
+                .unwrap()
+                .as_vec2(names::P)
+                .unwrap()
+                .iter()
+                .map(|p| p.0)
+                .collect()
+        };
+        assert_eq!(xs(&pieces[0]), [2.0, 3.0]);
+        assert_eq!(xs(&pieces[1]), [0.0, 1.0, 2.0]);
+    }
+
     #[test]
     fn split_by_piece_refuses_instances_and_wrong_column_types() {
         let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0); 2]);

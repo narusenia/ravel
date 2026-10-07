@@ -181,6 +181,7 @@ with the decisions the user has to make; it has no units in `backlog.md` or
 |---|---|---|---|
 | `svg-import-plan.md` | Importing SVG: an `import.svg` node that turns the file into editable path geometry with style attributes (recommended for v1), versus one-shot conversion into `shape.custom_path` nodes or a raster asset via `resvg` | 提案 — 2026-10-07 | REQ-MEDIA-004（案） |
 | `ai-assistant-mcp-plan.md` | Letting a model-agnostic agent work on a project over MCP: a read, render and new-file authoring server over `ravel-cli` first, then live edits in the running app as undoable document commits sharing REQ-PLUGIN-006's edit layer, with an in-app assistant panel deferred | 方針決定 — 2026-10-07 | REQ-PLUGIN-007（案）, REQ-PLUGIN-006, REQ-INFRA-007 |
+| `edit-operations-plan.md` | The typed edit-operation layer (`ravel-core::edit`): `Document` → `Document` operations with typed errors, shared by the UI, MCP and automation; split into `AI-2a`–`AI-2d` | 計画 — 2026-10-07 | REQ-PLUGIN-006, REQ-PLUGIN-007 |
 
 ## Reference
 

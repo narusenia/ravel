@@ -179,6 +179,7 @@ ID は確定（backlog 登録済み）。
   `commit_document` も、将来の自動化スクリプトも、これを呼ぶ
 - 設計の範囲が複数クレートにまたがるので、着手前に `AGENTS.md` の Design gate に
   従って実装計画を別に書く
+- 詳細は `edit-operations-plan.md`（`AI-2a`〜`AI-2d` に割る）
 
 **完了条件**
 

@@ -175,6 +175,7 @@ Ravelは、タイムラインベース編集とプロシージャルノードグ
 | REQ-PLUGIN-004 | プラグインマネージャUI → オンラインレジストリ | Should | Draft |
 | REQ-PLUGIN-005 | プリセット/テンプレートシステム + コミュニティ配布 | Should | Draft |
 | REQ-PLUGIN-006 | 操作自動化 / バッチスクリプト（言語未定） | Could | Draft |
+| REQ-PLUGIN-007 | 外部エージェント（MCP）からの読み取り・書き出し・編集 | Should | Draft |
 
 ### PROJ — プロジェクト管理
 

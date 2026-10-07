@@ -36,6 +36,7 @@
 | VEC-4 | look-at・フロー場のゴールデン検証と文書（単位 1〜3・5〜8 が揃った） | `vector-field-plan.md` |
 | STYLE-4 | 変調との結合検証と文書（`MOD-1` ✅ で依存が解けた） | `style-attributes-plan.md` |
 | FX-6 | 文書と実機確認（新ノードの追加メニュー到達） | `effects-library-plan.md` |
+| AI-1 | `ravel-cli mcp`（stdio）: 列挙・検査・書き出し | `ai-assistant-mcp-plan.md` |
 | KIT-2 | gpui-component フォークの棚卸し（上流 PR は出さない。記録だけ） | `gpui-kit-migration-plan.md` |
 | KIT-4 | `ravel-dock`（2191 行）と `gpui-base` の `dock`（13251 行）の比較 | `gpui-kit-migration-plan.md` |
 | KIT-3 | 最初の Ravel コンポーネントを `gpui-base` で作り、作り方を `docs/dev/` に残す | `gpui-kit-migration-plan.md` |
@@ -1055,6 +1056,17 @@ CM-1〜5（自前の固定変換で骨格を作る単位）は #363 でマージ
 | PLUG-4 | ⬜ | プラグインマネージャ UI | PLUG-3 |
 | PLUG-5 | ⬜ | WASM ジオメトリノード | PLUG-2 |
 | PLUG-6 | ⬜ | 文書更新 | PLUG-4 |
+
+### AI アシスタントと MCP（REQ-PLUGIN-007）
+
+| ID | 状態 | 単位 | 依存 |
+|---|---|---|---|
+| AI-1 | 🟡 | `ravel-cli mcp`（stdio）: 列挙・検査・書き出し | — |
+| AI-2 | ⬜ | 編集操作の層（`REQ-PLUGIN-006` と共有）。**複数クレートにまたがるので着手前に実装計画** | — |
+| AI-3 | ⬜ | 新規ファイルへの組み立て（頭なし。既存ファイルは書き換えない） | AI-1, AI-2 |
+| AI-4 | ⬜ | アプリのローカル接続口（既定で閉じる） | AI-2 |
+| AI-5 | ⬜ | `ravel-cli mcp --attach` と削除・上書きの確認ダイアログ | AI-1, AI-4 |
+| AI-6 | ❓ | アプリ内アシスタントパネル（段階 2 の後に再判断） | AI-5 |
 
 ### GPU バックエンド内製化（REQ-INFRA-009）
 

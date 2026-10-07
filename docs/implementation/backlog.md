@@ -12,7 +12,7 @@
   持たない）ので、ロードマップがクラスタ単位で順序を決め、個票は `issues/` に
   置く。計画書が引き受けた issue だけ、該当単位の説明に ID が出る。
 
-最終更新: 2026-10-06
+最終更新: 2026-10-07
 
 ## 凡例
 
@@ -64,7 +64,7 @@
 | OFX-0 | OFX の前提検証と Windows 経路の判断（ゲート） | `ofx-host-plan.md` |
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
 | FX-1c | `color_correct` を総合グレーディングノードにする | `effects-library-plan.md` |
-| FX-3 | 生成とスタイライズ | `effects-library-plan.md` |
+| PSHADE-6 | 要素ごとのグラデーション塗り | `path-shading-plan.md` |
 | AUDIO-5 | 波形表示 | `audio-plan.md` |
 | AUDIO-6 | 解析ノード（RMS / ピーク。**FFT クレート追加は禁止**） | `audio-plan.md` |
 | 3D-4 | 三角形レンダラと `scene.render` | `3d-scene-plan.md` |
@@ -371,7 +371,7 @@ Global に載り、層ごとに独立した書き込み API（失敗は通知）
 | PSHADE-2 | ✅ | #587 線の頂点色補間（CPU / GPU）。`MED-GPU-08` の本体 | PSHADE-1 |
 | PSHADE-3 | ✅ | #588 `stroke_align`（`style-attributes-plan.md` 単位 1 からの繰り延べ） | PSHADE-1 |
 | PSHADE-5 | ✅ | #588 ゴールデンの拡張と文書、`MED-GPU-08` を閉じる | PSHADE-2, PSHADE-3 |
-| PSHADE-6 | ⬜ | **要素ごとのグラデーション塗り**（位置由来。軸は Primitive の Vec2 属性、評価はジオメトリ空間） | FX-3, STYLE-2 |
+| PSHADE-6 | 🟡 | **要素ごとのグラデーション塗り**（位置由来。軸は Primitive の Vec2 属性、評価はジオメトリ空間） | FX-3, STYLE-2 |
 
 `PSHADE-4`（塗りの頂点色）は案 A の採用により欠番。
 
@@ -1261,7 +1261,7 @@ CPU / GPU 両方）。グリフが穴を持つ最初の図形だったので、`
 | FX-1b | ❓ | LUT 適用（`.cube`。FX-1 から分離。ファイル参照をパス文字列にするか素材にするかの設計待ち） | FX-1 |
 | FX-1c | 🟡 | `color_correct` を総合グレーディングノード（Lumetri 相当）にする。単位 1 の段を再利用、既存パラメータは不変 | FX-1 |
 | FX-2 | ✅ #598 | ブラー / シャープ / ディストーション | — |
-| FX-3 | 🟡 | 生成とスタイライズ（グラデーションは PARAM-1 の `Ramp` を使う） | PARAM-1（グラデーションのみ） |
+| FX-3 | ✅ #600 | 生成とスタイライズ（グラデーションは PARAM-1 の `Ramp` を使う） | PARAM-1（グラデーションのみ） |
 | FX-3b | ✅ #596 | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | — |
 | FX-4 | ✅ #598 | トランスフォーム拡張と合成 | — |
 | FX-5 | ⬜ | 時間系（`SCOPE-2` の時間シフト経路に載る） | FX-1〜4, SCOPE-2 |

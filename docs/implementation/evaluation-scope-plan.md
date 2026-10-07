@@ -249,7 +249,7 @@ geometry ─→ iterate ────┼─ Iteration(node, 1) ─→ 部分ジ�
 - 内部の `net.in` の `geometry` / `index` ポートは固定ポート扱いにしていない
   （ユーザーが消せる）。消すと束縛が読まれないだけで評価は壊れない。
 
-### 単位 4: 要素スコープ規約の適用
+### 単位 4 ✅: 要素スコープ規約の適用
 
 - `group` パラメータを既存のジオメトリ op に追加:
   `attribute.set` / `attribute.promote` / `geometry.transform`。
@@ -266,7 +266,7 @@ geometry ─→ iterate ────┼─ Iteration(node, 1) ─→ 部分ジ�
 - 存在しない group 名 / Bool でない属性の扱いのテスト
   （エラーではなく「全要素」にフォールバックし警告）。
 
-### 単位 5: 文書更新
+### 単位 5 ✅: 文書更新
 
 - `docs/requirements/REQ-CORE.md`: REQ-CORE-013 の「採用しない」を
   撤回し、優先度と受入条件を書き直す。**撤回の理由を残す。**

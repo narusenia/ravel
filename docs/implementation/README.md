@@ -26,7 +26,7 @@ the design behind a unit.
 | File | Subject | Status | Related requirements |
 |---|---|---|---|
 | `audio-plan.md` | Audio layers, the sound bank, playback wiring, and analysis nodes | units 1–4 done — 2026-07-26 | REQ-MEDIA-002, REQ-MEDIA-003 |
-| `evaluation-scope-plan.md` | `PathSegment` scope axis, graph-internal iteration, group convention | units 1–3 done — 2026-10-07 | REQ-CORE-013, REQ-CORE-002/011 |
+| `evaluation-scope-plan.md` | `PathSegment` scope axis, graph-internal iteration, group convention | units 1–5 done — 2026-10-07 | REQ-CORE-013, REQ-CORE-002/011 |
 | `motion-blur-plan.md` | Continuous-time channels, quality tiers, sampled motion blur | unit 1 done — 2026-07-27 | REQ-RENDER-004 |
 | `gpu-compositing-plan.md` | GPU shell compositing, readback, and the viewer image path (responsiveness stage 2) | plan written — 2026-07-28 | REQ-LAYER-001/010, REQ-GPU-001 |
 | `developer-docs-plan.md` | Implementer how-to pages (`docs/dev/`) and the documentation index | units 1–8 done — 2026-07-30 | — |

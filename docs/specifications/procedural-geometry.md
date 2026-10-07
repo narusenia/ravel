@@ -295,7 +295,8 @@ Path 前提のノードが `Mesh` を受けたときの挙動は種別ごとに�
 | 分類 | 挙動 |
 |---|---|
 | 構造検査（`Geometry::validate`） | 対応する。`verts` の範囲検査に加え、インデックス列の範囲・3 の倍数・頂点数未満を検査 |
-| 要素操作系（`geometry.merge`、`geometry.blast` / `sort` / `switch`） | 種別非依存で素通しする。`Primitive::shifted` が両 variant を同じ 2 オフセットで再配置する |
+| 要素操作系（`geometry.merge`、`geometry.blast` / `switch`） | 種別非依存で素通しする。`Primitive::shifted` が両 variant を同じ 2 オフセットで再配置する |
+| `geometry.sort` | Primitive / Instance ドメインは種別非依存。**Point ドメインの並べ替えは Mesh で明示エラー**（`RequiresPathPrimitives`） |
 | 属性系（`attribute.set` / `.promote` / `.transfer`、`field.apply`） | 種別非依存で素通しする。列だけを触りトポロジを見ない |
 | 弧長・パス前提（`attribute.path_sample` / `scatter.path_array`、`geometry.resample` / `measure` の path 系、`attribute.curveu`） | **明示エラー**。Mesh に弧長は定義されない。黙って読み飛ばさない |
 | ラスタライズ（`rasterize`） | **明示エラー**。三角形は `scene.render` が描く（3D-4） |
@@ -618,7 +619,7 @@ group 専用の型は導入しない。**Bool 属性を group として扱う**
 |---|---|---|---|
 | `geometry.blast` | Geometry → Geometry | `domain`（point / primitive / instance）、`group`、`invert` | `group` の Bool が true の要素を消す。**空・解決できない `group` は何も消さない**（他ノードの「全要素」と逆。作った瞬間に空になるのを避ける）。参照点を 1 つでも失ったプリミティブは消える。プリミティブ削除は点を残す。Detail は素通し |
 | `geometry.sort` | Geometry (+ `path`) → Geometry | `domain`、`mode`（x / y / radial / along_path / random / attribute / reverse）、`center`、`seed`、`attribute` | 格納順を昇順に並べ替える（降順は `reverse` をもう 1 回）。属性モードのキーはベクタ・色なら第 1 成分。プリミティブドメインの位置基準はその重心。**Mesh のポイントドメイン並べ替えは明示エラー** |
-| `geometry.resample` | Geometry → Geometry | `length`、`segments`、`keep_corners` | 全パスを弧長等間隔で打ち直す。`length` > 0 が優先、0 なら `segments`。F32 / ベクタ / 色は線形補間、I32 / Bool / Str は近い側。`in_tan` / `out_tan` は捨てる。Mesh と 3D 位置は明示エラー。パスが無ければ素通し |
+| `geometry.resample` | Geometry → Geometry | `length`、`segments`、`keep_corners` | 全パスを弧長等間隔で打ち直す（`keep_corners` では角で区切った区間ごとに分割数を丸めるので、区間ごとに間隔が違う）。`length` > 0 が優先、0 なら `segments`。F32 / ベクタ / 色は線形補間、I32 / Bool / Str は近い側。`in_tan` / `out_tan` は捨てる。Mesh と 3D 位置は明示エラー。パスが無ければ素通し |
 | `geometry.measure` | Geometry → Geometry | `measure`（perimeter / area / curvature / segment_length / bounds / size）、`name` | 出力ドメインは値で固定: perimeter / area / size = Primitive、curvature / segment_length = Point、bounds = Detail。`area` は符号付き（反時計回りが正、開パスは閉じたとみなす）。`bounds` は `Vec4(min x, min y, max x, max y)`、`size` は `Vec2(幅, 高さ)`。パス系は平面 P のみ |
 | `geometry.switch` | Geometry ×可変 → Geometry | `index` | 範囲外は**接続済みの最後の入力**へクランプ。負は 0。入力が無ければ空。`Arc` のまま返す |
 | `geometry.null` | Geometry → Geometry | — | 恒等（`Arc` をそのまま返す） |
@@ -628,14 +629,14 @@ group 専用の型は導入しない。**Bool 属性を group として扱う**
 | `geometry.distribute` | Geometry → Geometry | `axis`（x / y）、`mode`（min / center / max / centers / gaps） | 要素のサイズ（bounds）を考慮した整列と等間隔。要素 = プリミティブ、無ければインスタンス。`centers` は中心間、`gaps` は隙間が等しい。3 個未満の等間隔は何も変えない |
 | `shape.line` | — → Geometry | `start`、`end`、`segments` | 開パス 1 本、`segments + 1` 点（中間点は `field.apply` の変調対象）。始点 = 終点でもエラーにしない |
 | `shape.grid` | — → Geometry | `center`、`size`、`rows`、`columns` | 行と列の線で `rows + columns` 本のパス。**点だけ欲しいときは `scatter.grid`**（こちらはパスを出す） |
-| `geometry.connect` | Geometry → Geometry | `mode`（order / nearest / group）、`group`、`interpolation`（linear / bezier）、`closed` | **点を増やさず**、パスを 1 本足す（入力のプリミティブは置き換え、Mesh は明示エラー）。点を並べ替えて張るので、`index` は振り直さない。`bezier` は `in_tan` / `out_tan` を隣接点の方向から書く |
+| `geometry.connect` | Geometry → Geometry | `mode`（order / nearest / group）、`group`、`interpolation`（linear / bezier）、`closed` | **点を増やさず**、パスを 1 本張る（入力のプリミティブは置き換え、Mesh は明示エラー）。接続対象が 2 点未満なら入力をそのまま返す。点を並べ替えて張るので、`index` は振り直さない。`bezier` は `in_tan` / `out_tan` を隣接点の方向から書く |
 | `attribute.curveu` | Geometry → Geometry | `mode`（by_arc_length / by_vertex_order） | 各点にパスパラメータ `u`（0..1）を書く。**primitive ごとに正規化**。標準属性 `u` を参照 |
 
 `geometry.sort` と `field.attribute("index")` の組で stagger の順序を
 「左から」「中心から」「ランダム」に変えられる。`geometry.group_index` が書いた
 Bool 列は `group` を取るノード（上の表）にそのまま渡せる。線に沿った
 グラデーションは
-`shape.line → attribute.curveu → field.attribute("u") → field.ramp → field.apply(Cd)`。
+`shape.line → attribute.curveu` を `field.apply(Cd)` の geometry 入力へ、`field.attribute("u") → field.ramp` を同じ `field.apply` の field 入力へつなぐ。
 
 **非対象**: Fuse（近接点統合）、メッシュの Divide / Subdivide / PolyBevel /
 PolyExtrude、group の AND / OR / NOT 合成、`shape.box`。

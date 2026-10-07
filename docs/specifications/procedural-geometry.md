@@ -588,7 +588,7 @@ group 専用の型は導入しない。**Bool 属性を group として扱う**
 | `attribute.set` | `domain` | 既存値（列が無ければ型の 0 / false / 空文字） |
 | `attribute.promote` | **ソース側**（`source_domain`）。集約に参加する元要素を絞る | — 該当要素が無ければターゲット列は既存値、無ければ型の 0。同一ドメインの複写と Detail ソースでは無視 |
 | `geometry.transform` | Point。インスタンスは Instance の同名列を**独立に**解決 | 位置・接線・配置がバイト等価。`use_centroid` の中心は対象要素の bbox 中心。Detail の `anchor` は動かさない |
-| `style.fill` / `style.stroke` | `domain` | `rasterize` の既定を書く |
+| `style.fill` / `style.stroke` | `domain` | 既存値。列がまだ無いときに `group` を指定すると評価エラー（先に group なしで適用して列を作る） |
 | `geometry.bend` / `twist` / `taper` | Point | 位置・接線とも不変 |
 
 `geometry.blast`（空 = **なし**。全削除を避けるため）と `geometry.connect`

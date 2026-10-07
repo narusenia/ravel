@@ -170,7 +170,7 @@ geometry ─→ iterate ────┼─ Iteration(node, 1) ─→ 部分ジ�
 - 新バリアントを含むパスで `NodeKey` が別エントリになるユニットテスト。
 - パス接頭辞での無効化が新バリアント配下も落とすテスト。
 
-### 単位 2: 時間シフト経路（FX-5 の土台）
+### 単位 2 ✅: 時間シフト経路（FX-5 の土台）
 
 - `EvalContext.frame` を差し替えて上流を pull するヘルパ。
   `path` に `TimeShift(node, f')` を積む。
@@ -197,7 +197,7 @@ geometry ─→ iterate ────┼─ Iteration(node, 1) ─→ 部分ジ�
 
 `effects-library-plan.md` の FX-5 はこの上に載る。
 
-### 単位 3: `geometry.iterate` ノード
+### 単位 3 ✅: `geometry.iterate` ノード
 
 - piece 分割（整数属性の値ごと）。`max_iterations` 上限と超過エラー。
 - 内部ネットワーク（`net.in` / `net.out`）。`subnet` の実装を流用。

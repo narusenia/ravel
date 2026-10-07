@@ -209,6 +209,8 @@ pub enum RavelIcon {
     NodeGeometryGroupIndex,
     /// Node header/menu: `geometry.repeat`.
     NodeGeometryRepeat,
+    /// Node header/menu: `geometry.distribute`.
+    NodeGeometryDistribute,
     /// Node header/menu: `geometry.bend`.
     NodeGeometryBend,
     /// Node header/menu: `geometry.twist`.
@@ -520,6 +522,7 @@ impl RavelIcon {
             "geometry.sort" => Self::NodeGeometrySort,
             "geometry.group_index" => Self::NodeGeometryGroupIndex,
             "geometry.repeat" => Self::NodeGeometryRepeat,
+            "geometry.distribute" => Self::NodeGeometryDistribute,
             "geometry.bend" => Self::NodeGeometryBend,
             "geometry.twist" => Self::NodeGeometryTwist,
             "geometry.taper" => Self::NodeGeometryTaper,
@@ -717,6 +720,7 @@ impl RavelIcon {
             Self::NodeGeometrySort => "icons/arrow-down-up.svg",
             Self::NodeGeometryGroupIndex => "icons/hash.svg",
             Self::NodeGeometryRepeat => "icons/layers.svg",
+            Self::NodeGeometryDistribute => "icons/align-horizontal-distribute-center.svg",
             Self::NodeGeometryBend => "icons/spline.svg",
             Self::NodeGeometryTwist => "icons/orbit.svg",
             Self::NodeGeometryTaper => "icons/maximize-2.svg",

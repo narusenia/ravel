@@ -12,6 +12,7 @@ use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::Geometry;
 use ravel_core::geometry::deform::{DeformAxis, DeformSpec, Deformer, deform};
+use ravel_core::geometry::distribute::{DistributeAxis, DistributeMode, distribute};
 use ravel_core::geometry::index_group::group_index;
 use ravel_core::geometry::repeat::{repeat, repeat_step};
 use ravel_core::graph::Node;
@@ -96,6 +97,36 @@ impl NodeProcessor for GeometryRepeatProcessor {
         let step = repeat_step(Vec2(tx, ty), params.f32_or("rotate", 0.0), Vec2(sx, sy));
         let count = params.i32_or("count", 5).max(0) as usize;
         Ok(Arc::new(repeat(source, count, step)?))
+    }
+}
+
+/// `geometry.distribute`: `mode` is `min` / `center` / `max` (bounding-box
+/// alignment), `centers` (equal centre distance) or `gaps` (equal edge gap);
+/// `axis` picks x or y.
+pub struct GeometryDistributeProcessor;
+
+impl NodeProcessor for GeometryDistributeProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let geometry = geometry_input(inputs, 0, "geometry.distribute")?;
+        let axis = match params.str_or("axis", "x") {
+            "y" => DistributeAxis::Y,
+            _ => DistributeAxis::X,
+        };
+        let mode = match params.str_or("mode", "gaps") {
+            "min" => DistributeMode::AlignMin,
+            "center" => DistributeMode::AlignCenter,
+            "max" => DistributeMode::AlignMax,
+            "centers" => DistributeMode::SpaceCenters,
+            _ => DistributeMode::SpaceGaps,
+        };
+        Ok(Arc::new(distribute(geometry, axis, mode)?))
     }
 }
 
@@ -269,6 +300,40 @@ mod tests {
         let bare = run(&GeometryRepeatProcessor, vec![], &[]).unwrap();
         assert_eq!(bare.instance_count(), 5);
         assert!(bare.instance_source().is_none());
+    }
+
+    #[test]
+    fn distribute_node_reads_axis_and_mode() {
+        use ravel_core::geometry::Primitive;
+        let mut g = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(10.0, 0.0),
+            Vec2(20.0, 0.0),
+            Vec2(50.0, 0.0),
+            Vec2(80.0, 0.0),
+            Vec2(100.0, 0.0),
+        ]);
+        for i in 0..3 {
+            g.push_primitive(Primitive::Path {
+                verts: i * 2..i * 2 + 2,
+                closed: false,
+            });
+        }
+        let g: Arc<dyn NodeData> = Arc::new(g);
+        let xs = |mode: &str, axis: &str| {
+            let out = run(
+                &GeometryDistributeProcessor,
+                vec![g.clone()],
+                &[("mode", s(mode)), ("axis", s(axis))],
+            )
+            .unwrap();
+            let p = out.points().get("P").unwrap().as_vec2("P").unwrap();
+            p.iter().map(|v| v.0).collect::<Vec<_>>()
+        };
+        assert_eq!(xs("gaps", "x"), [0.0, 10.0, 30.0, 60.0, 80.0, 100.0]);
+        assert_eq!(xs("min", "x"), [0.0, 10.0, 0.0, 30.0, 0.0, 20.0]);
+        // Nothing varies on y, so the y axis leaves x alone.
+        assert_eq!(xs("gaps", "y"), [0.0, 10.0, 20.0, 50.0, 80.0, 100.0]);
     }
 
     #[test]

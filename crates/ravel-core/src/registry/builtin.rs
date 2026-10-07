@@ -180,6 +180,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(geometry_sort());
     reg.register(geometry_group_index());
     reg.register(geometry_repeat());
+    reg.register(geometry_distribute());
     reg.register(geometry_deformer("geometry.bend", "Bend", 90.0));
     reg.register(geometry_deformer("geometry.twist", "Twist", 90.0));
     reg.register(geometry_deformer("geometry.taper", "Taper", 0.5));
@@ -1798,6 +1799,18 @@ fn geometry_deformer(type_key: &str, label: &str, amount: f32) -> NodeTemplate {
         .with_param_range("start", -1e9..=1e9, -500.0..=500.0)
         .with_param_range("end", -1e9..=1e9, -500.0..=500.0)
         .with_param_range("amount", -1e6..=1e6, -360.0..=360.0)
+}
+
+/// `geometry.distribute`: align or space the elements by their extents. Moves
+/// primitives when the geometry has any, otherwise instances.
+fn geometry_distribute() -> NodeTemplate {
+    NodeTemplate::new("geometry.distribute", "Distribute", NodeCategory::Geometry)
+        .with_input(geometry_input("geometry"))
+        .with_output(geometry_output())
+        .with_param(string_parameter("axis", "x"))
+        .with_param_options("axis", ["x", "y"])
+        .with_param(string_parameter("mode", "gaps"))
+        .with_param_options("mode", ["min", "center", "max", "centers", "gaps"])
 }
 
 /// `geometry.sort`: reorder the elements of one domain and renumber `index`.
@@ -3511,14 +3524,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 132);
+        assert_eq!(reg.all_templates().count(), 133);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 39);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 40);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
@@ -4553,6 +4566,7 @@ mod tests {
             "geometry.blast",
             "geometry.connect",
             "geometry.bend",
+            "geometry.distribute",
             "geometry.group_index",
             "geometry.repeat",
             "geometry.measure",

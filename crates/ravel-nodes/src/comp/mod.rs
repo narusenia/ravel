@@ -10,7 +10,7 @@
 //!
 //! The exception is the user-placed image nodes `comp.solid`, `comp.fill`,
 //! `comp.tint` and `comp.alpha` (`solid`, `colorize`, `alpha`; the effect nodes
-//! `distort`, `tile`, `key`, `mask`, `grade`, `generate` and `stylize` follow the same
+//! `distort`, `tile`, `key`, `mask`, `grade`, `generate`, `stylize` and `time` follow the same
 //! rule): they are
 //! ordinary nodes, take their values from their parameters, and neither decode
 //! a node id nor read the `Document`. They live here because they work on the
@@ -31,6 +31,7 @@ mod opacity;
 mod solid;
 mod stylize;
 mod tile;
+mod time;
 mod transform;
 
 pub use alpha::{CompAlphaProcessor, comp_alpha_mode_is_known};
@@ -48,6 +49,7 @@ pub use opacity::{CompOpacityGpuProcessor, CompOpacityProcessor};
 pub use solid::CompSolidProcessor;
 pub use stylize::{CompStylizeProcessor, StylizeKind, comp_stroke_position_is_known};
 pub use tile::{CompTileProcessor, TileKind, comp_mirror_mode_is_known};
+pub use time::{CompTimeProcessor, TimeKind, comp_time_remap_interpolation_is_known};
 pub use transform::{CompTransformGpuProcessor, CompTransformProcessor};
 
 use ravel_core::composition::compile::{NodeRole, decode_deterministic_node_id};

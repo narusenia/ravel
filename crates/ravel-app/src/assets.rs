@@ -296,6 +296,12 @@ pub enum RavelIcon {
     NodeCompStroke,
     /// Node header/menu: `comp.emboss`.
     NodeCompEmboss,
+    /// Node header/menu: `comp.time_remap`.
+    NodeCompTimeRemap,
+    /// Node header/menu: `comp.freeze_frame`.
+    NodeCompFreezeFrame,
+    /// Node header/menu: `comp.frame_blend`.
+    NodeCompFrameBlend,
     /// Node header/menu: `rasterize`.
     NodeRasterize,
     /// Node header/menu: `shape.rect`.
@@ -550,6 +556,9 @@ impl RavelIcon {
             "comp.tile" => Self::NodeCompTile,
             "comp.mask" => Self::NodeCompMask,
             "comp.key" => Self::NodeCompKey,
+            "comp.time_remap" => Self::NodeCompTimeRemap,
+            "comp.freeze_frame" => Self::NodeCompFreezeFrame,
+            "comp.frame_blend" => Self::NodeCompFrameBlend,
             "comp.gradient" => Self::NodeCompGradient,
             "comp.noise" => Self::NodeCompNoise,
             "comp.fractal" => Self::NodeCompFractal,
@@ -744,6 +753,9 @@ impl RavelIcon {
             Self::NodeCompTile => "icons/grid-3x3.svg",
             Self::NodeCompMask => "icons/shapes.svg",
             Self::NodeCompKey => "icons/eraser.svg",
+            Self::NodeCompTimeRemap => "icons/clock.svg",
+            Self::NodeCompFreezeFrame => "icons/pause.svg",
+            Self::NodeCompFrameBlend => "icons/film.svg",
             Self::NodeCompGradient => "icons/contrast.svg",
             Self::NodeCompNoise => "icons/audio-waveform.svg",
             Self::NodeCompFractal => "icons/hexagon.svg",

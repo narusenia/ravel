@@ -435,6 +435,24 @@ pub fn processor_for_node(
             shaders,
             pool.clone(),
         ))),
+        "comp.time_remap" => Some(Arc::new(comp::CompTimeProcessor::new(
+            comp::TimeKind::Remap,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.freeze_frame" => Some(Arc::new(comp::CompTimeProcessor::new(
+            comp::TimeKind::Freeze,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.frame_blend" => Some(Arc::new(comp::CompTimeProcessor::new(
+            comp::TimeKind::FrameBlend,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
         "comp.mask" => Some(Arc::new(comp::CompMaskProcessor::new(
             ctx.clone(),
             shaders,
@@ -644,6 +662,9 @@ mod tests {
             "comp.drop_shadow",
             "comp.stroke",
             "comp.emboss",
+            "comp.time_remap",
+            "comp.freeze_frame",
+            "comp.frame_blend",
             "comp.transform",
             "comp.merge.normal",
             "comp.merge.adjustment",
@@ -944,7 +965,7 @@ mod tests {
 
     /// The image-effect nodes of the effects library (blur / distortion, then
     /// mirror / tile / mask / key).
-    const FX_NODES: [&str; 10] = [
+    const FX_NODES: [&str; 13] = [
         "comp.directional_blur",
         "comp.radial_blur",
         "comp.sharpen",
@@ -955,6 +976,9 @@ mod tests {
         "comp.tile",
         "comp.mask",
         "comp.key",
+        "comp.time_remap",
+        "comp.freeze_frame",
+        "comp.frame_blend",
     ];
 
     /// Every effect node, built from the registry's own template, evaluates
@@ -1030,7 +1054,8 @@ mod tests {
 
     /// Every numeric parameter of an FX-2 node is a unified animation channel
     /// (`Float` / `Channel2` / `Channel4`), none a plain value the animation system cannot
-    /// reach; the strings are the one dropdown.
+    /// reach; the strings are the dropdowns, and the time remap's curve is the
+    /// one structural value.
     #[test]
     fn distort_parameters_are_animation_channels() {
         let mut reg = ravel_core::registry::NodeRegistry::new();
@@ -1043,10 +1068,12 @@ mod tests {
                     | ParameterValue::Channel4(_) => {}
                     // The dropdowns and the switches are not animatable.
                     ParameterValue::String(_) => assert!(
-                        p.key == "mode",
+                        p.key == "mode" || p.key == "interpolation",
                         "{type_key}.{} is a string but not a dropdown",
                         p.key
                     ),
+                    // `comp.time_remap`'s curve is edited structurally.
+                    ParameterValue::Curve(_) => assert_eq!(p.key, "curve"),
                     ParameterValue::Bool(_) => assert_eq!(p.key, "invert"),
                     ref other => panic!("{type_key}.{} is {other:?}", p.key),
                 }
@@ -1291,6 +1318,24 @@ mod tests {
         }
         for mode in offered("comp.key") {
             assert!(comp::comp_key_mode_is_known(&mode), "{mode}");
+        }
+    }
+
+    /// The dropdown values the time remap template offers are exactly the ones
+    /// the processor understands.
+    #[test]
+    fn comp_time_remap_template_interpolations_are_all_known_to_the_processor() {
+        let mut reg = ravel_core::registry::NodeRegistry::new();
+        builtin::register_builtins(&mut reg);
+        let offered = reg
+            .param_options("comp.time_remap", "interpolation")
+            .expect("interpolation options");
+        assert_eq!(offered, builtin::COMP_TIME_REMAP_INTERPOLATIONS);
+        for value in offered {
+            assert!(
+                comp::comp_time_remap_interpolation_is_known(value),
+                "{value}"
+            );
         }
     }
 

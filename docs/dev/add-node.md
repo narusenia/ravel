@@ -203,6 +203,12 @@ impl NodeProcessor for NoiseFieldProcessor {
 - ネストしたグラフ（ネットワーク境界 / Subnet）や Document 参照が必要なときは
   `scope` を使う。自前で評価器を作らない
 - エラーは `anyhow::Result` で返す。`unwrap` で落とさない（評価はワーカースレッド上）
+- **上流を別のフレームで読むノード（時間系）** は `pulls_inputs_itself() = true`
+  にして `scope.evaluate_input_at(node, port, frame, ctx)` で引く。`false` のままだと
+  評価器が先に現在フレームで上流を評価してしまう（`comp/time.rs` が例）。
+  このとき入力スロットは `None` で届き、上流の鮮度は見えない（編集は `mark_dirty`
+  で届く）。端数フレームは引けない（`TimeShift` は整数キー）ので、丸めるか混ぜるかを
+  ノード側で決めて文書にする
 
 ## 3. 配線する
 

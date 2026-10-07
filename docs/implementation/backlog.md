@@ -46,9 +46,6 @@
 | OPS-3 | `geometry.resample` | `geometry-ops-plan.md` |
 | OPS-4 | `geometry.measure` | `geometry-ops-plan.md` |
 | OPS-5 | `geometry.switch` / `geometry.null` | `geometry-ops-plan.md` |
-| OPS-6 | `geometry.group_index`（index で要素指定） | `geometry-ops-plan.md` |
-| OPS-7 | `geometry.repeat`（トランスフォームリピータ） | `geometry-ops-plan.md` |
-| OPS-8 | デフォーマ（bend / twist / taper） | `geometry-ops-plan.md` |
 | SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-6 | レイヤー殻プロパティの式入力 UI（`EXPR-4` 完了で着手可能） | `layer-shell-wiring-plan.md` |
@@ -339,9 +336,9 @@ Global に載り、層ごとに独立した書き込み API（失敗は通知）
 | OPS-3 | 🟡 | `geometry.resample` | — |
 | OPS-4 | 🟡 | `geometry.measure`（bounds / size 含む） | — |
 | OPS-5 | 🟡 | `geometry.switch` / `geometry.null` | — |
-| OPS-6 | 🟡 | `geometry.group_index`（index で要素指定） | — |
-| OPS-7 | 🟡 | `geometry.repeat`（トランスフォームリピータ） | — |
-| OPS-8 | 🟡 | デフォーマ（bend / twist / taper） | — |
+| OPS-6 | ✅ #604 | `geometry.group_index`（index で要素指定） | — |
+| OPS-7 | ✅ #604 | `geometry.repeat`（トランスフォームリピータ） | — |
+| OPS-8 | ✅ #604 | デフォーマ（bend / twist / taper） | — |
 | OPS-9 | ⬜ | `geometry.distribute`（要素サイズ考慮の分布） | OPS-4 |
 | OPS-11 | ✅ | `shape.line` / `shape.grid`（表の「生成 ✅」は誤りだった）（#406） | — |
 | OPS-12 | ✅ | `geometry.connect`（要素をベジエ/直線で結ぶ。Add SOP 相当）（#406） | — |

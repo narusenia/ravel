@@ -11,6 +11,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::Geometry;
+use ravel_core::geometry::deform::{DeformAxis, DeformSpec, Deformer, deform};
 use ravel_core::geometry::index_group::group_index;
 use ravel_core::geometry::repeat::{repeat, repeat_step};
 use ravel_core::graph::Node;
@@ -95,6 +96,57 @@ impl NodeProcessor for GeometryRepeatProcessor {
         let step = repeat_step(Vec2(tx, ty), params.f32_or("rotate", 0.0), Vec2(sx, sy));
         let count = params.i32_or("count", 5).max(0) as usize;
         Ok(Arc::new(repeat(source, count, step)?))
+    }
+}
+
+/// `geometry.bend` / `geometry.twist` / `geometry.taper`: one processor, three
+/// deformers, because the axis, range and group handling is the same.
+pub struct GeometryDeformProcessor {
+    deformer: Deformer,
+}
+
+impl GeometryDeformProcessor {
+    pub fn bend() -> Self {
+        Self {
+            deformer: Deformer::Bend,
+        }
+    }
+
+    pub fn twist() -> Self {
+        Self {
+            deformer: Deformer::Twist,
+        }
+    }
+
+    pub fn taper() -> Self {
+        Self {
+            deformer: Deformer::Taper,
+        }
+    }
+}
+
+impl NodeProcessor for GeometryDeformProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let geometry = geometry_input(inputs, 0, "geometry deformer")?;
+        let spec = DeformSpec {
+            deformer: self.deformer,
+            axis: match params.str_or("axis", "x") {
+                "y" => DeformAxis::Y,
+                _ => DeformAxis::X,
+            },
+            start: params.f32_or("start", 0.0),
+            end: params.f32_or("end", 100.0),
+            amount: params.f32_or("amount", 0.0),
+            group: params.str_or("group", ""),
+        };
+        Ok(Arc::new(deform(geometry, &spec)?))
     }
 }
 
@@ -217,6 +269,44 @@ mod tests {
         let bare = run(&GeometryRepeatProcessor, vec![], &[]).unwrap();
         assert_eq!(bare.instance_count(), 5);
         assert!(bare.instance_source().is_none());
+    }
+
+    #[test]
+    fn deformer_nodes_read_axis_range_amount_and_group() {
+        let g: Arc<dyn NodeData> = Arc::new(Geometry::from_points(vec![
+            Vec2(10.0, 8.0),
+            Vec2(60.0, 8.0),
+            Vec2(8.0, 60.0),
+        ]));
+        let positions = |g: &Geometry| g.points().get("P").unwrap().as_vec2("P").unwrap().to_vec();
+        // Taper along x over 0..100 by half: the point at x = 60 narrows to
+        // 8 * (1 - 0.5 * 0.6) = 5.6; the one before `start` would not move.
+        let out = run(
+            &GeometryDeformProcessor::taper(),
+            vec![g.clone()],
+            &[
+                ("amount", ResolvedValue::Float(0.5)),
+                ("start", ResolvedValue::Float(20.0)),
+                ("end", ResolvedValue::Float(100.0)),
+            ],
+        )
+        .unwrap();
+        let p = positions(&out);
+        assert_eq!(p[0], Vec2(10.0, 8.0));
+        assert!((p[1].1 - 8.0 * (1.0 - 0.5 * 0.5)).abs() < 1e-5);
+        // axis = y reads the other coordinate: x = 8 narrows at y = 60.
+        let out = run(
+            &GeometryDeformProcessor::taper(),
+            vec![g.clone()],
+            &[("amount", ResolvedValue::Float(0.5)), ("axis", s("y"))],
+        )
+        .unwrap();
+        assert!((positions(&out)[2].0 - 8.0 * (1.0 - 0.5 * 0.6)).abs() < 1e-5);
+        // Each node type is its own deformer.
+        let amount = [("amount", ResolvedValue::Float(90.0))];
+        let bent = run(&GeometryDeformProcessor::bend(), vec![g.clone()], &amount).unwrap();
+        let twisted = run(&GeometryDeformProcessor::twist(), vec![g], &amount).unwrap();
+        assert_ne!(positions(&bent), positions(&twisted));
     }
 
     fn run_apply(geometry: &Geometry, group: &str) -> Geometry {

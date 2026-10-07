@@ -209,6 +209,12 @@ pub enum RavelIcon {
     NodeGeometryGroupIndex,
     /// Node header/menu: `geometry.repeat`.
     NodeGeometryRepeat,
+    /// Node header/menu: `geometry.bend`.
+    NodeGeometryBend,
+    /// Node header/menu: `geometry.twist`.
+    NodeGeometryTwist,
+    /// Node header/menu: `geometry.taper`.
+    NodeGeometryTaper,
     NodeGeometryFromImage,
     /// Node header/menu: `scene.add`.
     NodeSceneAdd,
@@ -496,6 +502,9 @@ impl RavelIcon {
             "geometry.sort" => Self::NodeGeometrySort,
             "geometry.group_index" => Self::NodeGeometryGroupIndex,
             "geometry.repeat" => Self::NodeGeometryRepeat,
+            "geometry.bend" => Self::NodeGeometryBend,
+            "geometry.twist" => Self::NodeGeometryTwist,
+            "geometry.taper" => Self::NodeGeometryTaper,
             "geometry.from_image" => Self::NodeGeometryFromImage,
             "scene.add" => Self::NodeSceneAdd,
             "scene.merge" => Self::NodeSceneMerge,
@@ -681,6 +690,9 @@ impl RavelIcon {
             Self::NodeGeometrySort => "icons/arrow-down-up.svg",
             Self::NodeGeometryGroupIndex => "icons/hash.svg",
             Self::NodeGeometryRepeat => "icons/layers.svg",
+            Self::NodeGeometryBend => "icons/spline.svg",
+            Self::NodeGeometryTwist => "icons/orbit.svg",
+            Self::NodeGeometryTaper => "icons/maximize-2.svg",
             Self::NodeGeometryFromImage => "icons/image.svg",
             Self::NodeSceneAdd => "icons/box.svg",
             Self::NodeSceneMerge => "icons/group.svg",

@@ -177,6 +177,9 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(geometry_sort());
     reg.register(geometry_group_index());
     reg.register(geometry_repeat());
+    reg.register(geometry_deformer("geometry.bend", "Bend", 90.0));
+    reg.register(geometry_deformer("geometry.twist", "Twist", 90.0));
+    reg.register(geometry_deformer("geometry.taper", "Taper", 0.5));
     reg.register(geometry_from_image());
     reg.register(scene_add());
     reg.register(scene_merge());
@@ -1748,6 +1751,24 @@ fn geometry_repeat() -> NodeTemplate {
         .with_param_range("scale", -1e6..=1e6, -2.0..=2.0)
 }
 
+/// `geometry.bend` / `geometry.twist` / `geometry.taper`: the controlled
+/// deformers. They share every parameter, so one template builder serves all
+/// three; `amount` is degrees for bend and twist, a width fraction for taper.
+fn geometry_deformer(type_key: &str, label: &str, amount: f32) -> NodeTemplate {
+    NodeTemplate::new(type_key, label, NodeCategory::Geometry)
+        .with_input(geometry_input("geometry"))
+        .with_output(geometry_output())
+        .with_param(string_parameter("axis", "x"))
+        .with_param_options("axis", ["x", "y"])
+        .with_param(float_parameter("start", 0.0))
+        .with_param(float_parameter("end", 100.0))
+        .with_param(float_parameter("amount", amount))
+        .with_param(string_parameter("group", ""))
+        .with_param_range("start", -1e9..=1e9, -500.0..=500.0)
+        .with_param_range("end", -1e9..=1e9, -500.0..=500.0)
+        .with_param_range("amount", -1e6..=1e6, -360.0..=360.0)
+}
+
 /// `geometry.sort`: reorder the elements of one domain and renumber `index`.
 ///
 /// The `path` input is only read by `mode = "along_path"`, and `center` /
@@ -3278,14 +3299,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 120);
+        assert_eq!(reg.all_templates().count(), 123);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 30);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 33);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
@@ -4318,10 +4339,13 @@ mod tests {
             "attribute.transfer",
             "field.apply",
             "geometry.connect",
+            "geometry.bend",
             "geometry.group_index",
             "geometry.repeat",
             "geometry.sort",
+            "geometry.taper",
             "geometry.transform",
+            "geometry.twist",
             "style.dash",
             "style.fill",
             "style.stroke",

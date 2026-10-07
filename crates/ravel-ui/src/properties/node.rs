@@ -970,9 +970,9 @@ mod tests {
 
     #[test]
     fn sections_for_node_returns_info_and_params() {
-        let node = Node::new(NodeId::new(1), "color_correct")
-            .with_param("brightness", ParameterValue::Float(0.0))
-            .with_param("contrast", ParameterValue::Float(1.0));
+        // A type that declares no groups: one section holding every parameter.
+        let node =
+            Node::new(NodeId::new(1), "blur").with_param("radius", ParameterValue::Float(5.0));
         let sections = sections_for_node(
             &node,
             &registry(),

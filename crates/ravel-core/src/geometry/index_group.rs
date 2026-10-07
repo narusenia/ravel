@@ -68,10 +68,19 @@ pub fn select_indices(ranges: &[IndexRange], count: usize) -> Vec<bool> {
                 "index range reaches past the domain; ignoring the excess"
             );
         }
+        // A zero step (only reachable by building an `IndexRange` by hand;
+        // the parser refuses it) selects nothing rather than looping forever.
+        if range.step == 0 {
+            continue;
+        }
         let mut index = range.start;
         while index <= range.end && index < count {
             flags[index] = true;
-            index += range.step;
+            // Stop on overflow instead of wrapping or panicking.
+            let Some(next) = index.checked_add(range.step) else {
+                break;
+            };
+            index = next;
         }
     }
     flags
@@ -151,6 +160,19 @@ mod tests {
         assert_eq!(parse_index_ranges("0-9:0"), [], "zero stride");
         assert_eq!(parse_index_ranges("-3"), [], "negative");
         assert_eq!(selected("2,bogus,4", 10), [2, 4]);
+    }
+
+    #[test]
+    fn a_huge_stride_or_a_zero_step_cannot_overflow_or_hang() {
+        let max = usize::MAX;
+        assert_eq!(selected(&format!("1-{max}:{max}"), 2), [1]);
+        assert_eq!(selected(&format!("0-{max}:{max}"), 3), [0]);
+        let zero = IndexRange {
+            start: 0,
+            end: 5,
+            step: 0,
+        };
+        assert_eq!(select_indices(&[zero], 4), [false; 4]);
     }
 
     #[test]

@@ -63,7 +63,6 @@
 | GPUBK-16 | ブロッキング読み戻しの 1 ms 切り上げを回収（`VRES-1` ✅ で条件は揃った） | `gpu-backend-plan.md` |
 | OFX-0 | OFX の前提検証と Windows 経路の判断（ゲート） | `ofx-host-plan.md` |
 | PLUG-1 | `ProcessorRegistry` と組み込みの移設 | `plugin-system-plan.md` |
-| FX-1c | `color_correct` を総合グレーディングノードにする | `effects-library-plan.md` |
 | PSHADE-6 | 要素ごとのグラデーション塗り | `path-shading-plan.md` |
 | AUDIO-5 | 波形表示 | `audio-plan.md` |
 | AUDIO-6 | 解析ノード（RMS / ピーク。**FFT クレート追加は禁止**） | `audio-plan.md` |
@@ -1259,7 +1258,7 @@ CPU / GPU 両方）。グリフが穴を持つ最初の図形だったので、`
 |---|---|---|---|
 | FX-1 | ✅ #597 | カラー調整とカラーグレーディング（トーンカーブは PARAM-1 の型を使う。LUT は FX-1b へ分離） | PARAM-1（トーンカーブのみ） |
 | FX-1b | ❓ | LUT 適用（`.cube`。FX-1 から分離。ファイル参照をパス文字列にするか素材にするかの設計待ち） | FX-1 |
-| FX-1c | 🟡 | `color_correct` を総合グレーディングノード（Lumetri 相当）にする。単位 1 の段を再利用、既存パラメータは不変 | FX-1 |
+| FX-1c | ✅ #602 | `color_correct` を総合グレーディングノード（Lumetri 相当）にする。単位 1 の段を再利用、既存パラメータは不変 | FX-1 |
 | FX-2 | ✅ #598 | ブラー / シャープ / ディストーション | — |
 | FX-3 | ✅ #600 | 生成とスタイライズ（グラデーションは PARAM-1 の `Ramp` を使う） | PARAM-1（グラデーションのみ） |
 | FX-3b | ✅ #596 | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | — |

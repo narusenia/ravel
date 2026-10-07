@@ -87,7 +87,7 @@ mod tests {
     use super::*;
     use crate::geometry::GeometryTransformProcessor;
     use ravel_core::eval::Evaluator;
-    use ravel_core::geometry::names;
+    use ravel_core::geometry::{AttributeArray, names};
     use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::registry::TRANSFORM_SECTION_PARAMS;
@@ -242,6 +242,32 @@ mod tests {
             .expect("the chain evaluates");
 
         assert_eq!(positions(&sectioned), positions(&chained));
+    }
+
+    /// `group` belongs to `geometry.transform`, not to the section: a node
+    /// carrying the section may own a `group` of its own meaning
+    /// (`geometry.connect`), and it must not narrow the section's transform.
+    #[test]
+    fn the_section_ignores_a_group_parameter_of_its_node() {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0)]);
+        geometry
+            .points_mut()
+            .insert("pick", AttributeArray::Bool(vec![true, false]))
+            .expect("pick");
+        let node = section_node(1, &[("translate", ParameterValue::vec3(5.0, 0.0, 0.0))])
+            .with_param("group", ParameterValue::String("pick".into()));
+        let graph = Graph::new().add_node(node).expect("source");
+        let mut ev = Evaluator::new();
+        ev.register(
+            NodeId::new(1),
+            Arc::new(TransformSection {
+                inner: Arc::new(Fixed(Arc::new(geometry))),
+            }),
+        );
+        let out = ev
+            .evaluate(&graph, NodeId::new(1), &ctx())
+            .expect("the section evaluates");
+        assert_eq!(positions(&out), [Vec2(5.0, 0.0), Vec2(6.0, 0.0)]);
     }
 
     /// Identity is fixed at **`Arc` identity**, not merely equal contents: a

@@ -1197,13 +1197,28 @@ mod tests {
             "outside: bit-exact"
         );
         assert_eq!((after[0], after[2]), (0.0, 0.0), "inside: written");
-        // No existing column: outside elements read the type's zero.
-        let fresh = run_with(
-            "attribute.set",
-            &[("name", "fresh"), ("group", "pick")],
-            grouped(vec![true, false, true]),
+        // No existing column: outside elements read the type's zero. A nonzero
+        // value tells the written elements apart from the seeded ones.
+        let mut node = registered_node("attribute.set", 1);
+        set_string_param(&mut node, "name", "fresh");
+        set_string_param(&mut node, "group", "pick");
+        set_string_param(&mut node, "type", "i32");
+        node.parameters
+            .iter_mut()
+            .find(|parameter| parameter.key == "int_value")
+            .expect("int_value")
+            .value = ParameterValue::Int(5);
+        let out = run_attribute_node(&node, &[Arc::new(grouped(vec![true, false, true]))]);
+        let fresh = out.downcast_ref::<Geometry>().unwrap();
+        assert_eq!(
+            fresh
+                .points()
+                .get("fresh")
+                .unwrap()
+                .as_i32("fresh")
+                .unwrap(),
+            [5, 0, 5]
         );
-        assert_eq!(f32_column(&fresh, Domain::Point, "fresh"), [0.0; 3]);
     }
 
     #[test]

@@ -266,7 +266,7 @@ group 規約（`evaluation-scope-plan.md`）は Bool 属性を group として�
 - 変換はソースの**原点まわり**。`scatter.*` の `center_input`（ソースの重心を
   原点に寄せる）は持たない — コピー 0 が「元と同じ位置」であることを優先した。
   螺旋の中心を動かしたいときは後段に `geometry.transform` を置く
-- 転送セクション（`with_transform_section`）は宣言しない。1 コピーあたりの
+- 変換セクション（`with_transform_section`）は宣言しない。1 コピーあたりの
   変換がこのノードの配置そのもの
 - ソース入力は任意。無ければ `scatter.*` と同様にインスタンス点だけを出す
 - `count` は 100000 で頭打ち（ユーザーが入力する値が無制限の確保にならないように）

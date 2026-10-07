@@ -333,6 +333,89 @@ jobs:
             ~/.cargo/git/db/
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
 
+  # The shipped configuration is `--features ffmpeg` (without it no video is
+  # read), and the `check` job never enables it, so everything behind
+  # `#[cfg(feature = "ffmpeg")]` used to merge without being type-checked.
+  # This job compiles and tests exactly that code.
+  #
+  # macOS only. `ffmpeg-the-third` 6 binds FFmpeg 9 and detects the installed
+  # version, so the runner needs a development FFmpeg, and Homebrew's `ffmpeg`
+  # formula is the one source that reliably ships 9 headers, `pkg-config`
+  # files and the `ffmpeg` CLI the tests use to synthesise footage. Windows has
+  # no equally dependable way to install FFmpeg 9 development files (vcpkg
+  # builds it from source, the prebuilt archives are not versioned stably), and
+  # an unreliable job is worse than a missing one; add it when one exists.
+  #
+  # Homebrew installs the current release and cannot pin one, so the versions
+  # that were actually used are printed: a red run after an FFmpeg bump reads
+  # differently from a red run after a code change.
+  ffmpeg:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: jdx/mise-action@v2
+
+      # Gated exactly like the check job: a fork's pull request has no secrets
+      # and has to build without sccache rather than fail.
+      - name: Install sccache
+        if: env.SCCACHE_ENABLED == 'true'
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: "v0.17.0"
+
+      - name: Enable sccache
+        if: env.SCCACHE_ENABLED == 'true'
+        shell: bash
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -eu
+          {
+            echo "RUSTC_WRAPPER=sccache"
+            echo "SCCACHE_BUCKET=ravel-ci-cache"
+            echo "SCCACHE_ENDPOINT=https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+            echo "SCCACHE_REGION=auto"
+            echo "SCCACHE_IDLE_TIMEOUT=0"
+            echo "AWS_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}"
+            echo "AWS_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}"
+          } >> "$GITHUB_ENV"
+
+      # Same `~/.cargo` generation as the check job, read-only; the path list
+      # must match theirs for the cache version to line up.
+      - uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Install FFmpeg
+        shell: bash
+        run: |
+          set -eu
+          brew install ffmpeg pkg-config
+          ffmpeg -version | head -n 1
+          echo "libavcodec $(pkg-config --modversion libavcodec)"
+
+      - name: Clippy (ffmpeg)
+        run: mise exec -- cargo clippy -p ravel-media -p ravel-audio -p ravel-nodes -p ravel-cli --features ffmpeg --all-targets -- -D warnings
+
+      - name: Test (ffmpeg)
+        run: mise exec -- cargo test -p ravel-media -p ravel-audio -p ravel-nodes -p ravel-cli --features ffmpeg
+
+      - name: sccache statistics
+        if: ${{ !cancelled() && env.SCCACHE_ENABLED == 'true' }}
+        shell: bash
+        run: ${SCCACHE_PATH} --show-stats
+
   # Benchmarks only gate main, not pull requests. `mise run clippy` already
   # builds every bench target through --all-targets, so a PR that breaks a
   # benchmark still fails the check job; this job exists to confirm the bench

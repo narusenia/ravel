@@ -151,8 +151,9 @@ mod ffmpeg_tests {
     #[test]
     fn applying_a_media_declaration_changes_the_decoded_frame() {
         let dir = tempfile::tempdir().expect("a temporary project root");
+        // Hex, not "green": the colour name is lavfi's #008000, half as bright.
         let original = generate(dir.path(), "original.mp4", "red");
-        generate(dir.path(), "replacement.mp4", "green");
+        generate(dir.path(), "replacement.mp4", "0x00ff00");
 
         let before = centre_pixel(&decode_first_frame(&document(&original)));
         assert!(

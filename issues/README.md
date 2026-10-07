@@ -10,7 +10,7 @@
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
 | high | 1 | 34 | [high/](high/) — 1件1ファイル |
-| medium | 14 | 75 | [medium/](medium/) — 領域別5ファイル |
+| medium | 13 | 76 | [medium/](medium/) — 領域別5ファイル |
 | low | 43 | 13 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
 解決済みの項目は個票を **[closed/](closed/)** へ移す。個票の中身は起票時のまま

@@ -270,8 +270,19 @@ fn probe_asset(entry: &MediaAssetEntry) -> Option<String> {
         return Some(format!("{}: {error}", path.display()));
     }
     #[cfg(feature = "ffmpeg")]
-    if let Err(error) = ravel_media::format::probe(path) {
-        return Some(format!("{}: {error}", path.display()));
+    match ravel_media::format::probe(path) {
+        Err(error) => return Some(format!("{}: {error}", path.display())),
+        // The still-image demuxer is chosen by extension, so a file that is not
+        // an image opens fine and yields a video stream with no size. That is
+        // not a frame the render can produce.
+        Ok(info)
+            if info
+                .first_video()
+                .is_some_and(|v| v.width == 0 || v.height == 0) =>
+        {
+            return Some(format!("{}: no decodable video frame", path.display()));
+        }
+        Ok(_) => {}
     }
     None
 }

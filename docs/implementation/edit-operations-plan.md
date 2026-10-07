@@ -220,7 +220,7 @@ pub fn apply_batch(doc: &Document, ops: &[EditOp], cx: &EditContext) -> Result<A
 - **UI と食い違う点（2026-10-07 決定。末尾の「決定済みの未決事項」1）**: キーフレーム済みで
   `local_frame` が無いとき、現 UI は**定数で潰す**（`param_edit.rs:10` の
   `edited_channel` の `None` 腕）。UI にはプレイヘッドが必ずあるので起きないが、
-  ヘッドレスの呼び出しでは「アニメを黙って消す」ことになる。推奨は
+  ヘッドレスの呼び出しでは「アニメを黙って消す」ことになる。この層では
   `AnimatedParameter` エラーにして、呼び出し側に「キーを打つフレーム」か
   「アニメを捨てる明示の操作」を選ばせる
 - 未知のキーは `UnknownParameter` エラー。`Graph::set_params` の「無視する」

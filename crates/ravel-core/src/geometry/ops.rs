@@ -2132,6 +2132,9 @@ pub fn instance_extents(geometry: &Geometry) -> Option<Vec<Rect>> {
     let source_indices = instances
         .get(names::SOURCE_INDEX)
         .and_then(|column| column.as_i32(names::SOURCE_INDEX).ok());
+    let widths = instances
+        .get(names::STROKE_WIDTH)
+        .and_then(|column| column.as_f32(names::STROKE_WIDTH).ok());
     let miter = root_miter(geometry);
     Some(
         offsets
@@ -2139,13 +2142,18 @@ pub fn instance_extents(geometry: &Geometry) -> Option<Vec<Rect>> {
             .enumerate()
             .map(|(index, offset)| {
                 let placement = columns.placement(index, *offset);
+                // The instance's own `stroke_width` narrows onto what it
+                // stamps, as in `instance_bounds`.
+                let width = widths
+                    .and_then(|values| values.get(index).copied())
+                    .unwrap_or(0.0);
                 let rect = if sources.is_empty() {
                     None
                 } else {
                     match &sources[source_slot(sources.len(), source_indices, index)] {
                         InstanceSource::Image(image) => placed_rect(image.rect(), placement),
                         InstanceSource::Geometry(source) => {
-                            drawn_bounds_at(source, 1, placement, 0.0, miter)
+                            drawn_bounds_at(source, 1, placement, width, miter)
                         }
                     }
                 };

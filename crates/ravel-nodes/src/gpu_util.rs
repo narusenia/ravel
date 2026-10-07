@@ -37,6 +37,16 @@ pub fn with_premultiplied_helpers(body: &str) -> String {
     format!("{PREMULTIPLIED_HELPERS}\n{body}")
 }
 
+/// The colour-grading stages shared by `comp.*` grade nodes and `color_correct`.
+const GRADE_STAGES: &str = include_str!("shaders/grade_stages.wgsl");
+
+/// Prefix a shader with [`GRADE_STAGES`] (same reasoning as
+/// [`with_premultiplied_helpers`]): a `color_correct` section and the matching
+/// `comp.*` node run the one set of stage functions.
+pub fn with_grade_stages(body: &str) -> String {
+    format!("{GRADE_STAGES}\n{body}")
+}
+
 /// A frame adapted to GPU representation for one dispatch.
 pub enum GpuImage<'a> {
     /// Input was already GPU-resident; borrow its texture.
@@ -252,7 +262,7 @@ pub fn uniform_layout_entry(binding: u32) -> BindingDesc {
 /// compiles.
 #[cfg(test)]
 mod shader_translation {
-    use super::with_premultiplied_helpers;
+    use super::{with_grade_stages, with_premultiplied_helpers};
     use ravel_gpu::{ShaderTarget, translate_wgsl};
     use std::path::{Path, PathBuf};
 
@@ -267,6 +277,11 @@ mod shader_translation {
     /// helpers prefixed. The four filtering shaders already carry this line for
     /// the reader's sake, so nothing new has to be remembered when one is added.
     const NEEDS_HELPERS: &str = "Prepend `premultiplied.wgsl`";
+
+    /// Same for the grading stages, and the marker `grade_stages.wgsl` itself
+    /// carries: it is a fragment, not a module, so the walk skips it.
+    const NEEDS_GRADE_STAGES: &str = "Prepend `grade_stages.wgsl`";
+    const IS_FRAGMENT: &str = "Not a module:";
 
     /// How many built-in WGSL files exist. Pinned so that adding one is a
     /// visible change here rather than a silent gap: the walk above picks a new
@@ -284,6 +299,9 @@ mod shader_translation {
                     .map(|entry| entry.expect("dir entry").path())
             })
             .filter(|path| path.extension().is_some_and(|ext| ext == "wgsl"))
+            .filter(|path| {
+                !std::fs::read_to_string(path).is_ok_and(|raw| raw.contains(IS_FRAGMENT))
+            })
             .collect();
         files.sort();
         files
@@ -300,6 +318,8 @@ mod shader_translation {
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
         if raw.contains(NEEDS_HELPERS) {
             with_premultiplied_helpers(&raw)
+        } else if raw.contains(NEEDS_GRADE_STAGES) {
+            with_grade_stages(&raw)
         } else {
             raw
         }

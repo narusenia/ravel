@@ -30,7 +30,6 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| FX-5 | 時間系（`SCOPE-2` の時間シフト経路に載る） | `effects-library-plan.md` |
 | SCOPE-4 | 要素スコープ（group）規約の適用 | `evaluation-scope-plan.md` |
 | SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
 | BLUR-4 | `comp.motion_blur` と殻フィールド（BLUR-3 完了で着手可能） | `motion-blur-plan.md` |
@@ -1257,8 +1256,8 @@ CPU / GPU 両方）。グリフが穴を持つ最初の図形だったので、`
 | FX-3 | ✅ #600 | 生成とスタイライズ（グラデーションは PARAM-1 の `Ramp` を使う） | PARAM-1（グラデーションのみ） |
 | FX-3b | ✅ #596 | `comp.solid` / `comp.fill` / `comp.tint` / `comp.alpha` | — |
 | FX-4 | ✅ #598 | トランスフォーム拡張と合成 | — |
-| FX-5 | 🟡 | 時間系（`SCOPE-2` の時間シフト経路に載る） | FX-1〜4, SCOPE-2 |
-| FX-6 | ⬜ | 文書と実機確認（登録・ロケールは各単位が持つ） | FX-1〜5, FX-3b |
+| FX-5 | ✅ #608 | 時間系（`SCOPE-2` の時間シフト経路に載る） | FX-1〜4, SCOPE-2 |
+| FX-6 | 🟡 | 文書と実機確認（登録・ロケールは各単位が持つ） | FX-1〜5, FX-3b |
 
 FX-3b は raster 側に**生成ノードが 1 つも無い**ことへの対応
 （`crates/ravel-nodes/src/comp/` は merge / opacity / transform のみ、

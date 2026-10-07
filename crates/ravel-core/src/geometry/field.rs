@@ -1970,11 +1970,7 @@ pub fn apply_field(
 ///
 /// Shared with the attribute writes in [`ops`](super::ops) so that every node
 /// taking a `group` parameter resolves it the same way.
-pub(super) fn group_selection(
-    attributes: &AttributeSet,
-    group: &str,
-    length: usize,
-) -> Option<Vec<bool>> {
+pub fn group_selection(attributes: &AttributeSet, group: &str, length: usize) -> Option<Vec<bool>> {
     if group.is_empty() {
         return None;
     }

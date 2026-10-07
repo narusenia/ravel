@@ -27,13 +27,13 @@ pub use field::{
     ExpressionField, FalloffField, FalloffShape, Field, FieldApply, FieldError,
     FieldExpressionError, FieldSample, FieldValue, GradientField, ImageSamplerField, LengthField,
     MaxField, MultiplyField, NoiseField, RadialField, RampField, TimeField, TimeMode, apply_field,
-    component_index,
+    component_index, group_selection,
 };
 pub use ops::{
     AggregateMode, AttributeValue, ConnectInterpolation, ConnectMode, CurveUMode, GeometryOpError,
     Measure, PathArcTable, PathSample, SortMode, TransferMode, attribute_delete, attribute_set,
     attribute_set_in_group, attribute_transfer, blast, bounds_center, connect, curve_u,
     drawn_bounds, element_hash, expand_instances, measure, path_sample, promote_attribute,
-    resample, sort, split_by_piece, stroke_reach,
+    promote_attribute_in_group, resample, sort, split_by_piece, stroke_reach,
 };
 pub use triangulate::Triangulator;

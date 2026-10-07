@@ -14,7 +14,7 @@ use ravel_core::geometry::absent::absent_column;
 use ravel_core::geometry::{
     AttributeArray, AttributeSet, ConnectInterpolation, ConnectMode, Domain, Geometry,
     InstanceColumns, InstanceImage, InstanceSource, InstanceTransform, Measure, SortMode, blast,
-    bounds_center, connect, measure, names, resample, sort,
+    bounds_center, connect, group_selection, measure, names, resample, sort,
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{NodeData, Vec2, Vec3};
@@ -70,7 +70,11 @@ impl NodeProcessor for GeometryTransformProcessor {
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
         let geometry = geometry_input(inputs, 0, "geometry.transform")?;
-        Ok(match apply_transform(geometry, params)? {
+        // `group` is this node's own parameter. It is read here and passed in
+        // rather than inside `apply_transform`, because the other nodes that
+        // carry a transform section may use `group` for something else.
+        let group = params.str_or("group", "");
+        Ok(match apply_transform_in_group(geometry, params, group)? {
             // Identity: share the input wholesale.
             Cow::Borrowed(_) => inputs[0].as_ref().expect("checked above").clone(),
             Cow::Owned(out) => Arc::new(out),
@@ -90,6 +94,22 @@ pub fn apply_transform<'a>(
     geometry: &'a Geometry,
     params: &ResolvedParams,
 ) -> anyhow::Result<Cow<'a, Geometry>> {
+    apply_transform_in_group(geometry, params, "")
+}
+
+/// [`apply_transform`] restricted to the elements `group` flags (element-scope
+/// convention, REQ-CORE-013).
+///
+/// The point domain and the instance domain each resolve `group` against
+/// their own `Bool` column. Elements outside keep their position, tangents and
+/// placement exactly; the `use_centroid` pivot is taken over the flagged
+/// elements. The Detail `anchor` belongs to no element, so it stays put while a
+/// group is in effect.
+pub fn apply_transform_in_group<'a>(
+    geometry: &'a Geometry,
+    params: &ResolvedParams,
+    group: &str,
+) -> anyhow::Result<Cow<'a, Geometry>> {
     let [tx, ty, tz] = params.vec3_or("translate", [0.0, 0.0, 0.0]);
     let translate = Vec2(tx, ty);
     let euler = params.vec3_or("rotation", [0.0, 0.0, 0.0]);
@@ -107,8 +127,26 @@ pub fn apply_transform<'a>(
         return Ok(Cow::Borrowed(geometry));
     }
 
+    let resolve = |domain: Domain, count: usize| {
+        if count == 0 {
+            None
+        } else {
+            group_selection(geometry.attribute_set(domain), group, count)
+        }
+    };
+    let point_sel = resolve(Domain::Point, geometry.point_count());
+    let instance_sel = resolve(Domain::Instance, geometry.instance_count());
+    let in_point = |index: usize| point_sel.as_ref().is_none_or(|flags| flags[index]);
+    let in_instance = |index: usize| instance_sel.as_ref().is_none_or(|flags| flags[index]);
+    let scoped = point_sel.is_some() || instance_sel.is_some();
+
     let pivot3 = if params.bool_or("use_centroid", true) {
-        bounds_center(geometry).unwrap_or(Vec3(0.0, 0.0, 0.0))
+        if scoped {
+            selected_bounds_center(geometry, &in_point, &in_instance)
+        } else {
+            bounds_center(geometry)
+        }
+        .unwrap_or(Vec3(0.0, 0.0, 0.0))
     } else {
         let [px, py, pz] = params.vec3_or("pivot", [0.0, 0.0, 0.0]);
         Vec3(px, py, pz)
@@ -147,7 +185,7 @@ pub fn apply_transform<'a>(
 
     let mut out = geometry.clone();
     if out.points().get(names::P).is_some() {
-        transform_positions(out.points_mut(), &apply, &apply3)?;
+        transform_positions(out.points_mut(), &apply, &apply3, &in_point)?;
     }
     // Bezier tangents are **offsets from their point**, so they take the
     // linear part of the transform and none of the translation — the same
@@ -173,12 +211,20 @@ pub fn apply_transform<'a>(
             if out.points().get(name).is_none() {
                 continue;
             }
-            for tangent in out.points_mut().make_mut(name)?.as_vec2_mut(name)? {
-                *tangent = linear.apply_vector(*tangent);
+            for (index, tangent) in out
+                .points_mut()
+                .make_mut(name)?
+                .as_vec2_mut(name)?
+                .iter_mut()
+                .enumerate()
+            {
+                if in_point(index) {
+                    *tangent = linear.apply_vector(*tangent);
+                }
             }
         }
     }
-    if out.detail().get(names::ANCHOR).is_some() {
+    if !scoped && out.detail().get(names::ANCHOR).is_some() {
         for anchor in out
             .detail_mut()
             .make_mut(names::ANCHOR)?
@@ -189,7 +235,7 @@ pub fn apply_transform<'a>(
     }
     if out.instance_count() > 0 {
         if out.instances().get(names::P).is_some() {
-            transform_positions(out.instances_mut(), &apply, &apply3)?;
+            transform_positions(out.instances_mut(), &apply, &apply3, &in_instance)?;
         }
         // The node's transform is the outer placement of every instance:
         // its position went through `transform_positions` above, and the
@@ -202,7 +248,12 @@ pub fn apply_transform<'a>(
             let columns = InstanceColumns::of(instances)?;
             let placements: Vec<InstanceTransform> = (0..out.instance_count())
                 .map(|index| {
-                    InstanceTransform::compose(linear, columns.placement(index, Vec2(0.0, 0.0)))
+                    let own = columns.placement(index, Vec2(0.0, 0.0));
+                    if in_instance(index) {
+                        InstanceTransform::compose(linear, own)
+                    } else {
+                        own
+                    }
                 })
                 .collect();
             // A column is written when it is already there or something now
@@ -252,15 +303,55 @@ fn has_spatial_positions(geometry: &Geometry) -> anyhow::Result<bool> {
     Ok(false)
 }
 
+/// [`bounds_center`] over the flagged elements: the first domain (points, then
+/// instances) with at least one flagged element, `None` when there is none.
+fn selected_bounds_center(
+    geometry: &Geometry,
+    in_point: &impl Fn(usize) -> bool,
+    in_instance: &impl Fn(usize) -> bool,
+) -> Option<Vec3> {
+    for (domain, selected) in [
+        (Domain::Point, in_point as &dyn Fn(usize) -> bool),
+        (Domain::Instance, in_instance as &dyn Fn(usize) -> bool),
+    ] {
+        let Some(Ok(positions)) = geometry.positions(domain) else {
+            continue;
+        };
+        let mut bounds: Option<(Vec3, Vec3)> = None;
+        for (_, p) in positions.iter3().enumerate().filter(|(i, _)| selected(*i)) {
+            let (min, max) = bounds.get_or_insert((p, p));
+            *min = Vec3(min.0.min(p.0), min.1.min(p.1), min.2.min(p.2));
+            *max = Vec3(max.0.max(p.0), max.1.max(p.1), max.2.max(p.2));
+        }
+        if let Some((min, max)) = bounds {
+            return Some(Vec3(
+                (min.0 + max.0) * 0.5,
+                (min.1 + max.1) * 0.5,
+                (min.2 + max.2) * 0.5,
+            ));
+        }
+    }
+    None
+}
+
 /// Rewrites a domain's `P` with the transform of its own dimension.
 fn transform_positions(
     attributes: &mut AttributeSet,
     apply: &impl Fn(Vec2) -> Vec2,
     apply3: &impl Fn(Vec3) -> Vec3,
+    selected: &impl Fn(usize) -> bool,
 ) -> anyhow::Result<()> {
     match attributes.make_mut(names::P)? {
-        AttributeArray::Vec2(values) => values.iter_mut().for_each(|p| *p = apply(*p)),
-        AttributeArray::Vec3(values) => values.iter_mut().for_each(|p| *p = apply3(*p)),
+        AttributeArray::Vec2(values) => values
+            .iter_mut()
+            .enumerate()
+            .filter(|(index, _)| selected(*index))
+            .for_each(|(_, p)| *p = apply(*p)),
+        AttributeArray::Vec3(values) => values
+            .iter_mut()
+            .enumerate()
+            .filter(|(index, _)| selected(*index))
+            .for_each(|(_, p)| *p = apply3(*p)),
         other => anyhow::bail!(
             "geometry.transform: P is {}, expected Vec2 or Vec3",
             other.attr_type()
@@ -3031,5 +3122,195 @@ mod tests {
         assert_eq!(primitive_f32(&out, "perimeter"), [14.0]);
         let out = eval_measure(&[("measure", text("area")), ("name", text("a"))]);
         assert_eq!(primitive_f32(&out, "a"), [12.0]);
+    }
+
+    // -----------------------------------------------------------------------
+    // geometry.transform: the `group` element scope
+    // -----------------------------------------------------------------------
+
+    fn warnings_from(f: impl FnOnce()) -> String {
+        #[derive(Clone, Default)]
+        struct Sink(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Self;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+        let sink = Sink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        String::from_utf8(sink.0.lock().unwrap().clone()).unwrap()
+    }
+
+    fn group_param(name: &str) -> (&'static str, ParameterValue) {
+        ("group", ParameterValue::String(name.into()))
+    }
+
+    fn point_bits(g: &Geometry) -> Vec<(u32, u32)> {
+        g.points()
+            .get(names::P)
+            .unwrap()
+            .as_vec2(names::P)
+            .unwrap()
+            .iter()
+            .map(|p| (p.0.to_bits(), p.1.to_bits()))
+            .collect()
+    }
+
+    fn grouped_points() -> Geometry {
+        let mut g = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0), Vec2(100.0, 0.0)]);
+        g.points_mut()
+            .insert(
+                names::OUT_TAN,
+                AttributeArray::Vec2(vec![Vec2(4.0, 1.0); 3]),
+            )
+            .unwrap();
+        g.points_mut()
+            .insert("pick", AttributeArray::Bool(vec![true, true, false]))
+            .unwrap();
+        g.points_mut()
+            .insert("not_bool", AttributeArray::F32(vec![1.0; 3]))
+            .unwrap();
+        g
+    }
+
+    #[test]
+    fn transform_group_moves_only_flagged_points_and_keeps_the_rest_bit_exact() {
+        let input = grouped_points();
+        let out = transformed(
+            &[
+                ("translate", ParameterValue::vec3(7.0, 3.0, 0.0)),
+                ("rotation", ParameterValue::vec3(0.0, 0.0, 90.0)),
+                ("use_centroid", ParameterValue::Bool(false)),
+                group_param("pick"),
+            ],
+            input.clone(),
+        );
+        let (before, after) = (point_bits(&input), point_bits(&out));
+        assert_ne!(after[0], before[0]);
+        assert_ne!(after[1], before[1]);
+        assert_eq!(after[2], before[2], "point outside the group is bit-exact");
+        let tangents = |g: &Geometry| {
+            g.points()
+                .get(names::OUT_TAN)
+                .unwrap()
+                .as_vec2(names::OUT_TAN)
+                .unwrap()
+                .to_vec()
+        };
+        assert_ne!(
+            tangents(&out)[0],
+            tangents(&input)[0],
+            "flagged tangent turns"
+        );
+        assert_eq!(tangents(&out)[2], tangents(&input)[2]);
+    }
+
+    #[test]
+    fn transform_group_pivots_on_the_flagged_elements() {
+        // Flagged points span x = 0..10, so the centroid is 5. Scale 2 about
+        // it gives -5 and 15; whole-geometry centroid (50) would not.
+        let out = transformed(
+            &[
+                ("scale", ParameterValue::vec3(2.0, 2.0, 1.0)),
+                group_param("pick"),
+            ],
+            grouped_points(),
+        );
+        let p = out
+            .points()
+            .get(names::P)
+            .unwrap()
+            .as_vec2(names::P)
+            .unwrap();
+        assert_eq!((p[0].0, p[1].0, p[2].0), (-5.0, 15.0, 100.0));
+    }
+
+    #[test]
+    fn transform_group_resolves_instances_on_their_own_column() {
+        let mut g = Geometry::new();
+        g.instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0)]),
+            )
+            .unwrap();
+        g.instances_mut()
+            .insert(names::ROT, AttributeArray::F32(vec![0.25, 0.5]))
+            .unwrap();
+        g.instances_mut()
+            .insert("pick", AttributeArray::Bool(vec![false, true]))
+            .unwrap();
+        let out = transformed(
+            &[
+                ("rotation", ParameterValue::vec3(0.0, 0.0, 90.0)),
+                ("use_centroid", ParameterValue::Bool(false)),
+                group_param("pick"),
+            ],
+            g.clone(),
+        );
+        let bits = |g: &Geometry, name: &str| -> Vec<u32> {
+            g.instances()
+                .get(name)
+                .unwrap()
+                .as_f32(name)
+                .unwrap()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect()
+        };
+        assert_eq!(bits(&out, names::ROT)[0], bits(&g, names::ROT)[0]);
+        assert_ne!(bits(&out, names::ROT)[1], bits(&g, names::ROT)[1]);
+        let p = out
+            .instances()
+            .get(names::P)
+            .unwrap()
+            .as_vec2(names::P)
+            .unwrap();
+        assert_eq!(p[0], Vec2(0.0, 0.0));
+        assert_ne!(p[1], Vec2(10.0, 0.0));
+    }
+
+    #[test]
+    fn transform_unusable_group_falls_back_to_every_element_and_warns() {
+        let params = |group: Option<&str>| {
+            let mut v = vec![
+                ("translate", ParameterValue::vec3(7.0, 3.0, 0.0)),
+                ("use_centroid", ParameterValue::Bool(false)),
+            ];
+            v.extend(group.map(group_param));
+            v
+        };
+        let everything = point_bits(&transformed(&params(None), grouped_points()));
+        for name in ["typo", "not_bool"] {
+            let mut moved = Vec::new();
+            let logged = warnings_from(|| {
+                moved = point_bits(&transformed(&params(Some(name)), grouped_points()));
+            });
+            assert_eq!(moved, everything, "{name}");
+            assert!(logged.contains(name), "{name}: {logged}");
+        }
+        // An empty name is no group at all and says nothing.
+        let logged = warnings_from(|| {
+            assert_eq!(
+                point_bits(&transformed(&params(Some("")), grouped_points())),
+                everything
+            );
+        });
+        assert!(logged.is_empty(), "{logged}");
     }
 }

@@ -598,6 +598,8 @@ fn attribute_set() -> NodeTemplate {
             value: ParameterValue::Bool(false),
         })
         .with_param(string_parameter("string_value", ""))
+        // Empty writes every element; otherwise a Bool column of `domain`.
+        .with_param(string_parameter("group", ""))
         // `value` is the same `Channel4` for `color` and for `vec4`; only the
         // first is a colour, so the declaration reads `type`.
         .with_color_param_when("value", "type", "color")
@@ -610,6 +612,7 @@ fn attribute_set() -> NodeTemplate {
             "value",
             ["value", "int_value", "bool_value", "string_value"],
         )
+        .with_param_group("scope", ["group"])
 }
 
 /// Writes the fill attributes (`fill`, `Cd`) onto the chosen domain.
@@ -712,6 +715,9 @@ fn attribute_promote() -> NodeTemplate {
     .with_param(string_parameter("name", "value"))
     .with_param(string_parameter("aggregate", "average"))
     .with_param_options("aggregate", ATTRIBUTE_AGGREGATES)
+    // Empty aggregates every source element; otherwise a Bool column of
+    // `source_domain` that narrows which of them contribute.
+    .with_param(string_parameter("group", ""))
 }
 
 fn attribute_transfer() -> NodeTemplate {
@@ -1663,6 +1669,12 @@ fn geometry_transform() -> NodeTemplate {
     .with_param_range("rotation", -1e9..=1e9, -360.0..=360.0)
     .with_param_range("scale", -1e9..=1e9, -10.0..=10.0)
     .with_param_range("pivot", -1e9..=1e9, -1000.0..=1000.0)
+    // Empty moves every element; otherwise a Bool column of the point domain
+    // (and of the instance domain, resolved on its own).
+    .with_param(string_parameter("group", ""))
+    .with_param_group("placement", ["translate", "rotation", "scale"])
+    .with_param_group("pivot", ["use_centroid", "pivot"])
+    .with_param_group("scope", ["group"])
 }
 
 fn geometry_merge() -> NodeTemplate {

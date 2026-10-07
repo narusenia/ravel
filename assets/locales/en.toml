@@ -1024,6 +1024,11 @@ rotation = "Euler angles in degrees. A 2D rotation is about Z."
 scale = "Scale factor per axis."
 use_centroid = "Rotate and scale around the geometry's centroid instead of the pivot."
 pivot = "Transform origin when use_centroid is off."
+group = "Name of a bool attribute limiting the moved points (and, on its own, instances) (empty for all). The centroid then covers the flagged elements only."
+[node."geometry.transform".group]
+placement = "Placement"
+pivot = "Pivot"
+scope = "Scope"
 
 [node."geometry.merge"]
 label = "Geometry Merge"
@@ -1714,9 +1719,11 @@ value = "Value for the float, vector, and color types."
 int_value = "Value for the i32 type."
 bool_value = "Value for the bool type."
 string_value = "Value for the string type."
+group = "Name of a bool attribute of the domain limiting the written elements (empty for all). Elements outside keep their value; a new attribute leaves them at the type's zero."
 [node."attribute.set".group]
 target = "Target"
 value = "Value"
+scope = "Scope"
 
 [node."style.fill"]
 label = "Style Fill"
@@ -1765,6 +1772,7 @@ source_domain = "Domain to read the attribute from."
 target_domain = "Domain to write the aggregated value to."
 name = "Attribute name."
 aggregate = "Reduction over the source elements: average, max, or first."
+group = "Name of a bool attribute of the source domain limiting which elements contribute (empty for all). With none flagged, the target keeps its value or the type's zero."
 
 [node."attribute.transfer"]
 label = "Attribute Transfer"

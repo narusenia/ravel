@@ -137,6 +137,7 @@ CPU 経路は texel を読むので、GPU 常駐フレームで来た画像は�
 | `join` | Detail | I32 | 角の形。0=miter / 1=round / 2=bevel。未設定は round（`style.stroke` が書く） | round（同上） |
 | `age` / `life` | Point | F32 | パーティクル経過/寿命 | —（`field.attribute` の `default`） |
 | `velocity` | Point | Vec2 | 速度（sim） | —（同上） |
+| `piece` | Primitive | I32 | ピース番号（どの破片に属するか）。`geometry.iterate` が既定でこの列の値ごとにジオメトリを割る（REQ-CORE-013）。fracture が書く | —（`geometry.iterate` は列が無いとエラー） |
 | `u` | Point | F32 | パスパラメータ 0..1。**primitive ごとに正規化**する（`attribute.curveu` が書く。閉パスは閉じる区間の分だけ終点が 1 に届かない） | —（同上） |
 
 ### 欠けた列の埋め方（無いときの値）
@@ -573,10 +574,27 @@ group 専用の型は導入しない。**Bool 属性を group として扱う**
 - 空文字列 = 全要素（既定）
 - 属性名 = その Bool 属性が true の要素のみに作用
 - 対象外の要素は入力の値をそのまま通す（削除しない）
-- 存在しない名前・Bool でない属性は全要素にフォールバックして警告
+- 存在しない名前・Bool でない属性・長さの違う列は全要素にフォールバックして警告
+  （`field::group_selection` が解決する。**group を取るノードは全部これを使う**）
 - **列そのものが無いときは通す値も無い**ので、属性を書く op は「未設定と
   同じ意味の値」を group 外へ置く（`style.fill` なら `fill` に `rasterize`
   のパラメータ既定）。`attribute_set_in_group` の `unset` 引数がそれ
+
+### group を取るノード
+
+| ノード | `group` を読むドメイン | 対象外の要素 |
+|---|---|---|
+| `field.apply` | `domain` | 既存値（列が無ければ未設定時の値） |
+| `attribute.set` | `domain` | 既存値（列が無ければ型の 0 / false / 空文字） |
+| `attribute.promote` | **ソース側**（`source_domain`）。集約に参加する元要素を絞る | — 該当要素が無ければターゲット列は既存値、無ければ型の 0。同一ドメインの複写と Detail ソースでは無視 |
+| `geometry.transform` | Point。インスタンスは Instance の同名列を**独立に**解決 | 位置・接線・配置がバイト等価。`use_centroid` の中心は対象要素の bbox 中心。Detail の `anchor` は動かさない |
+| `style.fill` / `style.stroke` | `domain` | 既存値。列がまだ無いときに `group` を指定すると評価エラー（先に group なしで適用して列を作る） |
+| `geometry.bend` / `twist` / `taper` | Point | 位置・接線とも不変 |
+
+`geometry.blast`（空 = **なし**。全削除を避けるため）と `geometry.connect`
+（`mode = "group"` の点集合）は別の意味で `group` を持つ。`geometry.transform`
+の transform section を共有する他ノードは `group` を読まない（section は
+`apply_transform`、group 付きは `apply_transform_in_group`）。
 
 フィールドの `amount` は soft な重み付け、`group` は hard な適用可否で、
 両者は直交する。両方指定した場合は「group 内の要素にのみ amount を適用」。

@@ -183,6 +183,18 @@ geometry ─→ iterate ────┼─ Iteration(node, 1) ─→ 部分ジ�
 - `f` 側の pull が `f'` 側のエントリを壊さないテスト。
 - 時間シフトノードを dirty にすると配下の全スコープが落ちるテスト。
 
+**実装メモ**
+
+- ヘルパは `EvalScope::evaluate_time_shifted(shift_node, frame, graph,
+  upstream, ctx)`。`evaluate_sub` の上に載り、`ctx` を `EvalContext::at_frame`
+  で差し替え、外側スコープの bindings を引き継ぐ。新しいキャッシュ表は無い。
+- `PathInterner` の成長: 所有ノードごとに `TimeShift` スコープを最大 64 個
+  保持し、最近入っていないものから退役させる。退役した ID は pull の途中では
+  解放せず（進行中の pull が `NodeKey` で参照しうる）、次のトップレベル
+  pull の冒頭でキャッシュ・スコープ状態ごと落として ID を再利用する。
+- `mark_dirty_at` は dirty になった時間シフトノードの全シフトスコープを落とす
+  （上流の編集は辺を伝ってシフトノードに届くので、シフト側の複製も落ちる）。
+
 `effects-library-plan.md` の FX-5 はこの上に載る。
 
 ### 単位 3: `geometry.iterate` ノード

@@ -1110,6 +1110,176 @@ fn within_runs(order: &[usize], runs: &[Range<usize>]) -> Vec<usize> {
     placed
 }
 
+/// Deletes the elements of one domain that `group` selects (or, with `invert`,
+/// the ones it does not), and everything that would dangle without them.
+///
+/// `group` follows the element-scope convention (REQ-CORE-013) with one
+/// deliberate difference: **nothing selected is nothing deleted**. Elsewhere an
+/// empty or unresolvable group means "every element", which for a deletion
+/// would empty the geometry on a half-typed name. Here an empty name, a missing
+/// column, a non-`Bool` one, or one of the wrong length returns the input
+/// unchanged (the last three already warn through the shared resolver). To
+/// delete everything, flag everything, or `invert` an empty selection.
+///
+/// What goes with a deleted element:
+///
+/// - **Points**: every primitive that referenced one of them. A path is a
+///   contiguous run of points, so a path with a hole is not the same shape;
+///   it goes whole (Houdini's rule). Surviving primitives have their `verts`
+///   re-packed onto the shorter point list, and their attribute rows follow.
+///   A deleted mesh leaves its triangles in the shared index buffer, unread.
+/// - **Primitives**: nothing else. Their points stay, because other primitives
+///   or a point cloud may still want them.
+/// - **Instances**: sources no surviving instance stamps are dropped and
+///   `source_index` renumbered, so the list does not carry geometry nobody
+///   draws. Without a `source_index` column every instance stamps the first
+///   source, which is then only dropped when no instance is left.
+///
+/// Every column of the blasted domain is selected through the same keep mask,
+/// so the survivors are byte-identical to what they were; `index` is
+/// renumbered to `0..n` (when the domain carries one) and `id` is not touched.
+/// The detail domain has no elements to delete and passes through.
+pub fn blast(
+    geometry: &Geometry,
+    domain: Domain,
+    group: &str,
+    invert: bool,
+) -> Result<Geometry, GeometryOpError> {
+    let count = domain_count(geometry, domain);
+    if domain == Domain::Detail || count == 0 {
+        return Ok(geometry.clone());
+    }
+    let Some(selected) =
+        super::field::group_selection(geometry.attribute_set(domain), group, count)
+    else {
+        return Ok(geometry.clone());
+    };
+    // Selected elements go unless inverted; unselected ones go only if inverted.
+    let keep: Vec<bool> = selected.iter().map(|inside| *inside == invert).collect();
+
+    let mut result = geometry.clone();
+    match domain {
+        Domain::Point => {
+            // `before[i]` is how many points survive ahead of point `i`, which
+            // is both a survivor's new position and a run's new boundary.
+            let mut before = Vec::with_capacity(count + 1);
+            let mut kept = 0;
+            before.push(0);
+            for survives in &keep {
+                kept += usize::from(*survives);
+                before.push(kept);
+            }
+            let (mut primitives, mut primitive_keep) = (Vec::new(), Vec::new());
+            for primitive in geometry.primitives() {
+                let verts = primitive.verts();
+                let intact = keep[verts.clone()].iter().all(|survives| *survives);
+                primitive_keep.push(intact);
+                if intact {
+                    let verts = before[verts.start]..before[verts.end];
+                    primitives.push(match primitive {
+                        Primitive::Path { closed, .. } => Primitive::Path {
+                            verts,
+                            closed: *closed,
+                        },
+                        Primitive::Mesh { indices, .. } => Primitive::Mesh {
+                            verts,
+                            indices: indices.clone(),
+                        },
+                    });
+                }
+            }
+            retain_rows(&mut result, Domain::Point, &keep)?;
+            retain_rows(&mut result, Domain::Primitive, &primitive_keep)?;
+            result.set_primitives(primitives);
+        }
+        Domain::Primitive => {
+            retain_rows(&mut result, Domain::Primitive, &keep)?;
+            let primitives = geometry
+                .primitives()
+                .iter()
+                .zip(&keep)
+                .filter(|(_, survives)| **survives)
+                .map(|(primitive, _)| primitive.clone())
+                .collect();
+            result.set_primitives(primitives);
+        }
+        Domain::Instance => {
+            retain_rows(&mut result, Domain::Instance, &keep)?;
+            prune_sources(geometry, &mut result, &keep)?;
+        }
+        Domain::Detail => unreachable!("returned above"),
+    }
+    for domain in [Domain::Point, Domain::Primitive, Domain::Instance] {
+        renumber_index(&mut result, domain)?;
+    }
+    result.validate()?;
+    Ok(result)
+}
+
+/// Replaces `domain`'s columns with their rows where `keep` is set. A domain
+/// with no columns has nothing to select.
+fn retain_rows(
+    geometry: &mut Geometry,
+    domain: Domain,
+    keep: &[bool],
+) -> Result<(), GeometryOpError> {
+    let mut retained = AttributeSet::new();
+    for (name, column) in geometry.attribute_set(domain).iter() {
+        let rows = keep
+            .iter()
+            .enumerate()
+            .filter(|(_, survives)| **survives)
+            .map(|(row, _)| row);
+        retained.insert(name.as_str(), select_values(column, rows))?;
+    }
+    *geometry.attribute_set_mut(domain) = retained;
+    Ok(())
+}
+
+/// Drops the instance sources that no surviving instance stamps.
+///
+/// `original` is the geometry before the rows were removed, since the
+/// surviving rows' `source_index` values are read from it.
+fn prune_sources(
+    original: &Geometry,
+    result: &mut Geometry,
+    keep: &[bool],
+) -> Result<(), GeometryOpError> {
+    let sources = original.sources();
+    if sources.is_empty() {
+        return Ok(());
+    }
+    if !keep.iter().any(|survives| *survives) {
+        result.set_sources(Vec::new());
+        return Ok(());
+    }
+    let Some(column) = original.instances().get(names::SOURCE_INDEX) else {
+        return Ok(());
+    };
+    let indices = column.as_i32(names::SOURCE_INDEX)?;
+    let slots: Vec<usize> = keep
+        .iter()
+        .enumerate()
+        .filter(|(_, survives)| **survives)
+        .map(|(row, _)| source_slot(sources.len(), Some(indices), row))
+        .collect();
+    let mut used: Vec<usize> = slots.clone();
+    used.sort_unstable();
+    used.dedup();
+    if used.len() == sources.len() {
+        return Ok(());
+    }
+    result.set_sources(used.iter().map(|slot| sources[*slot].clone()).collect());
+    let renumbered = slots
+        .iter()
+        .map(|slot| used.binary_search(slot).expect("every slot is used") as i32)
+        .collect();
+    result
+        .instances_mut()
+        .insert(names::SOURCE_INDEX, AttributeArray::I32(renumbered))?;
+    Ok(())
+}
+
 /// Bounding-box center of point positions, falling back to instance positions
 /// for instance-only geometry. Returns `None` when both are empty.
 ///
@@ -6461,5 +6631,448 @@ mod tests {
         assert_eq!(expanded.point_count(), 1);
         assert_eq!(expanded.instance_count(), 0);
         assert!(expanded.sources().is_empty());
+    }
+
+    // ----- blast ---------------------------------------------------------------
+
+    /// One column of every attribute type, each value a pure function of the
+    /// **original** row number, so what a row should hold after a deletion is
+    /// computed from the survivors' row numbers rather than by running the
+    /// code under test again.
+    fn typed_rows(rows: &[usize]) -> Vec<(&'static str, AttributeArray)> {
+        let f = |row: usize| row as f32 * 0.5 + 1.0;
+        vec![
+            (
+                "t_f32",
+                AttributeArray::F32(rows.iter().map(|r| f(*r)).collect()),
+            ),
+            (
+                "t_vec2",
+                AttributeArray::Vec2(rows.iter().map(|r| Vec2(f(*r), -f(*r))).collect()),
+            ),
+            (
+                "t_vec3",
+                AttributeArray::Vec3(rows.iter().map(|r| Vec3(f(*r), 2.0, 3.0)).collect()),
+            ),
+            (
+                "t_vec4",
+                AttributeArray::Vec4(rows.iter().map(|r| Vec4(f(*r), 2.0, 3.0, 4.0)).collect()),
+            ),
+            (
+                "t_color",
+                AttributeArray::Color(
+                    rows.iter()
+                        .map(|r| Color::new(f(*r), 0.1, 0.2, 0.3))
+                        .collect(),
+                ),
+            ),
+            (
+                "t_i32",
+                AttributeArray::I32(rows.iter().map(|r| 1000 + *r as i32).collect()),
+            ),
+            (
+                "t_bool",
+                AttributeArray::Bool(rows.iter().map(|r| r % 3 == 0).collect()),
+            ),
+            (
+                "t_str",
+                AttributeArray::Str(rows.iter().map(|r| format!("row{r}")).collect()),
+            ),
+            (
+                names::ID,
+                AttributeArray::I32(rows.iter().map(|r| 500 + *r as i32).collect()),
+            ),
+        ]
+    }
+
+    fn insert_all(set: &mut AttributeSet, columns: Vec<(&'static str, AttributeArray)>) {
+        for (name, column) in columns {
+            set.insert(name, column).unwrap();
+        }
+    }
+
+    /// 8 points in four 2-point paths, 4 primitives, 5 instances stamping
+    /// three distinct sources, a detail column, and every attribute type on
+    /// each of the three element domains.
+    fn blast_subject() -> Geometry {
+        let mut geometry =
+            Geometry::from_points((0..8).map(|i| Vec2(i as f32, i as f32 * 2.0)).collect());
+        insert_all(
+            geometry.points_mut(),
+            typed_rows(&(0..8).collect::<Vec<_>>()),
+        );
+        for i in 0..4 {
+            geometry.push_primitive(Primitive::Path {
+                verts: 2 * i..2 * i + 2,
+                closed: i % 2 == 1,
+            });
+        }
+        insert_all(
+            geometry.primitive_attrs_mut(),
+            typed_rows(&(0..4).collect::<Vec<_>>()),
+        );
+        geometry
+            .primitive_attrs_mut()
+            .insert(names::INDEX, AttributeArray::I32((0..4).collect()))
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2((0..5).map(|i| Vec2(i as f32, 0.0)).collect()),
+            )
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert(names::INDEX, AttributeArray::I32((0..5).collect()))
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert(
+                names::SOURCE_INDEX,
+                AttributeArray::I32(vec![0, 2, 2, 1, 0]),
+            )
+            .unwrap();
+        insert_all(
+            geometry.instances_mut(),
+            typed_rows(&(0..5).collect::<Vec<_>>()),
+        );
+        geometry.set_instance_sources(
+            (1..=3)
+                .map(|n| Arc::new(Geometry::from_points(vec![Vec2(0.0, 0.0); n])))
+                .collect(),
+        );
+        geometry
+            .detail_mut()
+            .insert("note", AttributeArray::Str(vec!["keep me".into()]))
+            .unwrap();
+        geometry
+    }
+
+    /// `subject` with a `g` Bool group on `domain` flagging `rows`.
+    fn grouped(mut subject: Geometry, domain: Domain, rows: &[usize]) -> Geometry {
+        let count = domain_count(&subject, domain);
+        subject
+            .attribute_set_mut(domain)
+            .insert(
+                "g",
+                AttributeArray::Bool((0..count).map(|row| rows.contains(&row)).collect()),
+            )
+            .unwrap();
+        subject
+    }
+
+    fn column<'a>(geometry: &'a Geometry, domain: Domain, name: &str) -> &'a AttributeArray {
+        geometry.attribute_set(domain).get(name).unwrap_or_else(|| {
+            panic!("{domain:?} lacks {name}");
+        })
+    }
+
+    /// Every domain x every attribute type: the group's rows disappear from
+    /// the blasted domain and every other row of every column survives with
+    /// its value, which is what a column left behind by the deletion would
+    /// break.
+    #[test]
+    fn blast_deletes_the_group_and_leaves_every_survivor_value_untouched() {
+        for (domain, doomed, count) in [
+            (Domain::Point, vec![1, 6], 8),
+            (Domain::Primitive, vec![0, 3], 4),
+            (Domain::Instance, vec![1, 4], 5),
+        ] {
+            let result = blast(
+                &grouped(blast_subject(), domain, &doomed),
+                domain,
+                "g",
+                false,
+            )
+            .unwrap();
+            let survivors: Vec<usize> = (0..count).filter(|row| !doomed.contains(row)).collect();
+            assert_eq!(domain_count(&result, domain), survivors.len(), "{domain:?}");
+            for (name, expected) in typed_rows(&survivors) {
+                assert_eq!(
+                    column(&result, domain, name),
+                    &expected,
+                    "{domain:?} column {name}"
+                );
+            }
+            // The group column itself is just another column: it is filtered
+            // and so reads false on every survivor.
+            assert_eq!(
+                column(&result, domain, "g"),
+                &AttributeArray::Bool(vec![false; survivors.len()])
+            );
+            assert_eq!(
+                column(&result, Domain::Detail, "note"),
+                &AttributeArray::Str(vec!["keep me".into()])
+            );
+            assert_eq!(result.validate(), Ok(()), "{domain:?}");
+        }
+    }
+
+    #[test]
+    fn blast_leaves_the_other_domains_alone() {
+        let subject = blast_subject();
+        let by_primitive = blast(
+            &grouped(subject.clone(), Domain::Primitive, &[1]),
+            Domain::Primitive,
+            "g",
+            false,
+        )
+        .unwrap();
+        assert_eq!(by_primitive.point_count(), 8, "points stay");
+        assert_eq!(by_primitive.instance_count(), 5);
+        let by_instance = blast(
+            &grouped(subject, Domain::Instance, &[0]),
+            Domain::Instance,
+            "g",
+            false,
+        )
+        .unwrap();
+        assert_eq!(by_instance.point_count(), 8);
+        assert_eq!(by_instance.primitive_count(), 4);
+    }
+
+    #[test]
+    fn invert_deletes_the_complement_of_the_group() {
+        let result = blast(
+            &grouped(blast_subject(), Domain::Point, &[0, 1, 2, 3]),
+            Domain::Point,
+            "g",
+            true,
+        )
+        .unwrap();
+        // The kept half is exactly the flagged half: points 0..4, both paths.
+        assert_eq!(result.point_count(), 4);
+        assert_eq!(
+            column(&result, Domain::Point, "t_i32"),
+            &AttributeArray::I32(vec![1000, 1001, 1002, 1003])
+        );
+        assert_eq!(result.primitive_count(), 2);
+    }
+
+    /// Deleting a point takes every primitive that referenced it, and the
+    /// primitives after it are re-packed onto the shorter point list with
+    /// their attribute rows alongside.
+    #[test]
+    fn deleting_a_point_removes_its_primitives_and_repacks_verts() {
+        // Point 3 sits in path 1 (2..4); point 7 in path 3 (6..8).
+        let result = blast(
+            &grouped(blast_subject(), Domain::Point, &[3, 7]),
+            Domain::Point,
+            "g",
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.point_count(), 6);
+        assert_eq!(
+            result.primitives(),
+            &[
+                Primitive::Path {
+                    verts: 0..2,
+                    closed: false
+                },
+                // Was 4..6; point 3 ahead of it is gone.
+                Primitive::Path {
+                    verts: 3..5,
+                    closed: false
+                },
+            ],
+            "paths 0 and 2 survive"
+        );
+        assert_eq!(
+            column(&result, Domain::Primitive, "t_i32"),
+            &AttributeArray::I32(vec![1000, 1002])
+        );
+        // The shifted path still spans the points it spanned before.
+        let points = column(&result, Domain::Point, "t_i32")
+            .as_i32("t_i32")
+            .unwrap();
+        assert_eq!(points, &[1000, 1001, 1002, 1004, 1005, 1006]);
+        assert_eq!(&points[3..5], &[1004, 1005]);
+    }
+
+    #[test]
+    fn deleting_every_element_leaves_a_valid_empty_geometry() {
+        for domain in [Domain::Point, Domain::Primitive, Domain::Instance] {
+            let count = domain_count(&blast_subject(), domain);
+            let everything: Vec<usize> = (0..count).collect();
+            let result = blast(
+                &grouped(blast_subject(), domain, &everything),
+                domain,
+                "g",
+                false,
+            )
+            .unwrap();
+            assert_eq!(domain_count(&result, domain), 0, "{domain:?}");
+            assert_eq!(result.validate(), Ok(()), "{domain:?}");
+        }
+        // Emptying the points takes every path with them.
+        let no_points = blast(
+            &grouped(blast_subject(), Domain::Point, &(0..8).collect::<Vec<_>>()),
+            Domain::Point,
+            "g",
+            false,
+        )
+        .unwrap();
+        assert_eq!(no_points.primitive_count(), 0);
+        assert_eq!(no_points.primitive_attrs().element_count(), 0);
+        // Inverting an empty selection deletes everything too.
+        let inverted = blast(
+            &grouped(blast_subject(), Domain::Instance, &[]),
+            Domain::Instance,
+            "g",
+            true,
+        )
+        .unwrap();
+        assert_eq!(inverted.instance_count(), 0);
+        assert!(inverted.sources().is_empty());
+    }
+
+    #[test]
+    fn index_is_repacked_and_id_survives_a_deletion() {
+        for (domain, doomed) in [
+            (Domain::Point, vec![0, 3]),
+            (Domain::Primitive, vec![1]),
+            (Domain::Instance, vec![0, 2]),
+        ] {
+            let subject = grouped(blast_subject(), domain, &doomed);
+            let original_ids = column(&subject, domain, names::ID)
+                .as_i32(names::ID)
+                .unwrap()
+                .to_vec();
+            let result = blast(&subject, domain, "g", false).unwrap();
+            let n = domain_count(&result, domain) as i32;
+            if let Some(index) = result.attribute_set(domain).get(names::INDEX) {
+                assert_eq!(
+                    index.as_i32(names::INDEX).unwrap(),
+                    (0..n).collect::<Vec<_>>(),
+                    "{domain:?}"
+                );
+            } else {
+                panic!("{domain:?} lost its index column");
+            }
+            let expected_ids: Vec<i32> = original_ids
+                .iter()
+                .enumerate()
+                .filter(|(row, _)| !doomed.contains(row))
+                .map(|(_, id)| *id)
+                .collect();
+            assert_eq!(
+                column(&result, domain, names::ID)
+                    .as_i32(names::ID)
+                    .unwrap(),
+                expected_ids,
+                "{domain:?}"
+            );
+        }
+    }
+
+    /// Instances 1 and 2 stamp source 2, instance 3 source 1, instances 0
+    /// and 4 source 0. Deleting both stampers of source 2 drops it and
+    /// renumbers the rest; deleting nobody who matters drops nothing.
+    #[test]
+    fn deleting_instances_drops_the_sources_nobody_stamps_any_more() {
+        let result = blast(
+            &grouped(blast_subject(), Domain::Instance, &[1, 2]),
+            Domain::Instance,
+            "g",
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.sources().len(), 2);
+        // The remaining instances are old rows 0, 3, 4 -> sources 0, 1, 0.
+        assert_eq!(
+            column(&result, Domain::Instance, names::SOURCE_INDEX),
+            &AttributeArray::I32(vec![0, 1, 0])
+        );
+        let point_counts: Vec<usize> = result
+            .sources()
+            .iter()
+            .map(|source| source.geometry().unwrap().point_count())
+            .collect();
+        assert_eq!(point_counts, [1, 2], "sources 0 and 1 kept, in order");
+
+        // Source 0's two stampers go; sources 1 and 2 stay and shift down.
+        let result = blast(
+            &grouped(blast_subject(), Domain::Instance, &[0, 4]),
+            Domain::Instance,
+            "g",
+            false,
+        )
+        .unwrap();
+        let point_counts: Vec<usize> = result
+            .sources()
+            .iter()
+            .map(|source| source.geometry().unwrap().point_count())
+            .collect();
+        assert_eq!(point_counts, [2, 3]);
+        assert_eq!(
+            column(&result, Domain::Instance, names::SOURCE_INDEX),
+            &AttributeArray::I32(vec![1, 1, 0])
+        );
+
+        let untouched = blast(
+            &grouped(blast_subject(), Domain::Instance, &[4]),
+            Domain::Instance,
+            "g",
+            false,
+        )
+        .unwrap();
+        assert_eq!(untouched.sources().len(), 3);
+    }
+
+    /// A deletion is only as dangerous as its selection is precise, so an
+    /// empty or unresolvable group deletes nothing rather than everything.
+    #[test]
+    fn an_empty_or_unresolvable_group_deletes_nothing() {
+        let subject = grouped(blast_subject(), Domain::Point, &[0]);
+        for group in ["", "nope", "t_f32"] {
+            for invert in [false, true] {
+                let result = blast(&subject, Domain::Point, group, invert).unwrap();
+                assert_eq!(result.point_count(), 8, "{group:?} invert={invert}");
+                assert_eq!(result.primitive_count(), 4);
+            }
+        }
+    }
+
+    #[test]
+    fn blast_is_deterministic_and_detail_has_nothing_to_delete() {
+        let subject = grouped(blast_subject(), Domain::Point, &[2, 5]);
+        let first = blast(&subject, Domain::Point, "g", false).unwrap();
+        let second = blast(&subject, Domain::Point, "g", false).unwrap();
+        assert_eq!(first.primitives(), second.primitives());
+        for domain in [Domain::Point, Domain::Primitive, Domain::Instance] {
+            let (a, b) = (first.attribute_set(domain), second.attribute_set(domain));
+            assert_eq!(a.describe().len(), b.describe().len());
+            for (name, column) in a.iter() {
+                assert_eq!(Some(column), b.get(name), "{domain:?} {name}");
+            }
+        }
+        let detail = blast(&subject, Domain::Detail, "g", false).unwrap();
+        assert_eq!(detail.point_count(), 8);
+    }
+
+    #[test]
+    fn blasting_points_keeps_surviving_meshes_valid() {
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(1.0, 0.0),
+            Vec2(0.0, 1.0),
+            Vec2(5.0, 5.0),
+            Vec2(6.0, 5.0),
+            Vec2(5.0, 6.0),
+        ]);
+        geometry.push_mesh(0..3, &[0, 1, 2]);
+        geometry.push_mesh(3..6, &[0, 1, 2]);
+        let result = blast(
+            &grouped(geometry, Domain::Point, &[0]),
+            Domain::Point,
+            "g",
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.primitive_count(), 1, "the first mesh lost a vertex");
+        assert_eq!(result.primitives()[0].verts(), &(2..5));
+        assert_eq!(result.validate(), Ok(()));
     }
 }

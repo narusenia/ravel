@@ -258,6 +258,22 @@ pub enum RavelIcon {
     NodeCompMask,
     /// Node header/menu: `comp.key`.
     NodeCompKey,
+    /// Node header/menu: `comp.gradient`.
+    NodeCompGradient,
+    /// Node header/menu: `comp.noise`.
+    NodeCompNoise,
+    /// Node header/menu: `comp.fractal`.
+    NodeCompFractal,
+    /// Node header/menu: `comp.checkerboard`.
+    NodeCompCheckerboard,
+    /// Node header/menu: `comp.glow`.
+    NodeCompGlow,
+    /// Node header/menu: `comp.drop_shadow`.
+    NodeCompDropShadow,
+    /// Node header/menu: `comp.stroke`.
+    NodeCompStroke,
+    /// Node header/menu: `comp.emboss`.
+    NodeCompEmboss,
     /// Node header/menu: `rasterize`.
     NodeRasterize,
     /// Node header/menu: `shape.rect`.
@@ -501,6 +517,14 @@ impl RavelIcon {
             "comp.tile" => Self::NodeCompTile,
             "comp.mask" => Self::NodeCompMask,
             "comp.key" => Self::NodeCompKey,
+            "comp.gradient" => Self::NodeCompGradient,
+            "comp.noise" => Self::NodeCompNoise,
+            "comp.fractal" => Self::NodeCompFractal,
+            "comp.checkerboard" => Self::NodeCompCheckerboard,
+            "comp.glow" => Self::NodeCompGlow,
+            "comp.drop_shadow" => Self::NodeCompDropShadow,
+            "comp.stroke" => Self::NodeCompStroke,
+            "comp.emboss" => Self::NodeCompEmboss,
             "rasterize" => Self::NodeRasterize,
             "shape.rect" => Self::NodeShapeRect,
             "shape.ellipse" => Self::NodeShapeEllipse,
@@ -676,6 +700,14 @@ impl RavelIcon {
             Self::NodeCompTile => "icons/grid-3x3.svg",
             Self::NodeCompMask => "icons/shapes.svg",
             Self::NodeCompKey => "icons/eraser.svg",
+            Self::NodeCompGradient => "icons/contrast.svg",
+            Self::NodeCompNoise => "icons/audio-waveform.svg",
+            Self::NodeCompFractal => "icons/hexagon.svg",
+            Self::NodeCompCheckerboard => "icons/square-square.svg",
+            Self::NodeCompGlow => "icons/sparkles.svg",
+            Self::NodeCompDropShadow => "icons/droplet.svg",
+            Self::NodeCompStroke => "icons/paintbrush.svg",
+            Self::NodeCompEmboss => "icons/diamond.svg",
             Self::NodeRasterize => "icons/image-down.svg",
             Self::NodeShapeRect => "icons/square.svg",
             Self::NodeShapeEllipse => "icons/circle.svg",

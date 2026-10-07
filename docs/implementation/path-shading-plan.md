@@ -161,7 +161,7 @@ Illustrator や Figma の普通のグラデーション）とは別物。混同�
 per-pixel 評価器にも三角形分割にも依存しない**。
 
 - **フレーム全体に 1 枚**でよいなら `effects-library-plan.md` の **`FX-3`**
-  （`comp.gradient`、🟡 着手可能）が post-process で覆う。rasterize への
+  （`comp.gradient`、実装済み）が post-process で覆う。rasterize への
   変更はゼロ。AE と同じ形
 - **要素ごとに別のグラデーション**が要るなら rasterize の中でやるしかない。
   それが `PSHADE-6`（下記）

@@ -171,6 +171,16 @@ metadata, which a texture handle is not) and `cache-plan.md` (`CACHE-3` has to
 charge an image-carrying geometry to VRAM). `3d-scene-plan.md` unit 4 keeps its
 textured-rectangle behaviour; only the route to it changes.
 
+## Proposals
+
+Not yet approved. A proposal frames the problem, compares the options and ends
+with the decisions the user has to make; it has no units in `backlog.md` or
+`roadmap.md` until it is approved.
+
+| File | Subject | Status | Related requirements |
+|---|---|---|---|
+| `svg-import-plan.md` | Importing SVG: an `import.svg` node that turns the file into editable path geometry with style attributes (recommended for v1), versus one-shot conversion into `shape.custom_path` nodes or a raster asset via `resvg` | 提案 — 2026-10-07 | REQ-MEDIA-004（案） |
+
 ## Reference
 
 | File | Subject |

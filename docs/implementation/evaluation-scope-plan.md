@@ -217,6 +217,38 @@ geometry ─→ iterate ────┼─ Iteration(node, 1) ─→ 部分ジ�
 - 同一入力で 2 回評価して同一結果（決定性）テスト。
 - 上流編集で全反復スコープが落ちるテスト。
 
+**実装メモ**
+
+- ノードは `geometry.iterate`（`crates/ravel-nodes/src/iterate.rs`）。内部
+  ネットワークは**そのノードの `Node::subnet`** で、subnet と同じ永続化・
+  `register_all_processors` の再帰・ノードエディタのダイブ（`subnet.is_some()`
+  で判定）がそのまま効く。`type_key` は subnet でないので `sync_subnet_pins`
+  の対象外で、ピンはテンプレート固定（`geometry` 入出力）。内部の `net.in` は
+  `geometry`（そのピース）と `index`（反復番号、`Scalar`）、`net.out` は
+  `geometry`。`registry` の `create_node` が `network::seed_iterate_node` で
+  素通しの内部を種まきする。
+- 分割は `ops::split_by_piece`: **Primitive ドメインの I32 属性**（既定
+  `names::PIECE` = `piece`、`geometry-fracture-plan.md` と同じ）の値の
+  **昇順**（`BTreeMap`。`HashMap` 順に依存しない）。ピースは自分のプリミティブ・
+  プリミティブ属性・それが走るポイント（プリミティブごとに複製）・detail を
+  持つ。どのプリミティブにも属さないポイントはどのピースにも入らない。
+  インスタンスを持つジオメトリはエラー（黙って落とさない）。プリミティブが無ければ
+  ピース 0 個 = 空ジオメトリ。
+- 結合は `geometry.merge` の関数 `merge_pair` を共有し、釣り合いの取れた
+  二分木で畳む（左から順に畳むと蓄積側を毎回コピーして二乗になるため）。順序は
+  左畳みと同じ。
+- ネスト検出は `scope.path()` に `Iteration` があるかで判定し、内部から
+  別の `geometry.iterate` に入るとエラー（subnet 越しでも同じ）。
+- 上流編集: `mark_dirty_at` が dirty にしたノードの全 `Iteration` スコープの
+  キャッシュを落とす（`Evaluator::drop_iteration_scopes`。`scope_owners` から
+  所有者を引く）。束縛の差分だけでは、ピース数が減ったとき使われなくなった
+  反復と、束縛を読まない内部ノードが残る。
+- `max_iterations` の既定は 256。1 評価は 10 / 100 / 1000 ピースで
+  約 0.04 / 0.4 / 11 ms（自明な内部。`perf-baseline.md`）で、1000 は 1 フレーム
+  の予算に近いので既定には置かず、範囲の上限（100000）までは明示的な引き上げ。
+- 内部の `net.in` の `geometry` / `index` ポートは固定ポート扱いにしていない
+  （ユーザーが消せる）。消すと束縛が読まれないだけで評価は壊れない。
+
 ### 単位 4: 要素スコープ規約の適用
 
 - `group` パラメータを既存のジオメトリ op に追加:

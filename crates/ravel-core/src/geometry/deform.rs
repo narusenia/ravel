@@ -242,7 +242,11 @@ mod tests {
             .insert(names::OUT_TAN, AttributeArray::Vec2(out_tan))
             .unwrap();
         g.points_mut()
-            .insert(names::IN_TAN, AttributeArray::Vec2(vec![Vec2(0.0, 0.0); n]))
+            // Distinct from `out_tan`, so one moved without the other shows.
+            .insert(
+                names::IN_TAN,
+                AttributeArray::Vec2(vec![Vec2(-3.0, 2.0); n]),
+            )
             .unwrap();
         g
     }
@@ -373,30 +377,43 @@ mod tests {
                         Vec2(v.1, v.0)
                     }
                 };
-                let g = with_tangents(
+                let mut g = with_tangents(
                     anchors.iter().map(|p| swap(*p)).collect(),
                     tangents.iter().map(|t| swap(*t)).collect(),
                 );
+                g.points_mut()
+                    .insert(
+                        names::IN_TAN,
+                        AttributeArray::Vec2(vec![swap(Vec2(-3.0, 2.0)); anchors.len()]),
+                    )
+                    .unwrap();
                 let out = deform(&g, &spec).unwrap();
+                let eps = 1e-3f32;
+                for name in [names::OUT_TAN, names::IN_TAN] {
+                    let column = out.points().get(name).unwrap().as_vec2(name).unwrap();
+                    for i in 0..anchors.len() {
+                        let p = swap(anchors[i]);
+                        let t = if name == names::OUT_TAN {
+                            swap(tangents[i])
+                        } else {
+                            swap(Vec2(-3.0, 2.0))
+                        };
+                        let a = deform_point(&spec, p);
+                        let b = deform_point(&spec, Vec2(p.0 + eps * t.0, p.1 + eps * t.1));
+                        let fd = ((b.0 - a.0) / eps, (b.1 - a.1) / eps);
+                        assert!(
+                            (column[i].0 - fd.0).abs() < 0.05 && (column[i].1 - fd.1).abs() < 0.05,
+                            "{kind:?} {axis:?} {name} anchor {i}: {:?} vs finite difference {fd:?}",
+                            column[i]
+                        );
+                    }
+                }
                 let out_tan = out
                     .points()
                     .get(names::OUT_TAN)
                     .unwrap()
                     .as_vec2(names::OUT_TAN)
                     .unwrap();
-                let eps = 1e-3f32;
-                for i in 0..anchors.len() {
-                    let p = swap(anchors[i]);
-                    let t = swap(tangents[i]);
-                    let a = deform_point(&spec, p);
-                    let b = deform_point(&spec, Vec2(p.0 + eps * t.0, p.1 + eps * t.1));
-                    let fd = ((b.0 - a.0) / eps, (b.1 - a.1) / eps);
-                    assert!(
-                        (out_tan[i].0 - fd.0).abs() < 0.05 && (out_tan[i].1 - fd.1).abs() < 0.05,
-                        "{kind:?} {axis:?} anchor {i}: {:?} vs finite difference {fd:?}",
-                        out_tan[i]
-                    );
-                }
                 // And they really moved: a deformer that left them alone would
                 // pass a comparison against itself, not this one.
                 assert_ne!(

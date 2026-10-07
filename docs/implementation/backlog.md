@@ -36,7 +36,8 @@
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
 | VEC-4 | look-at・フロー場のゴールデン検証と文書（単位 1〜3・5〜8 が揃った） | `vector-field-plan.md` |
 | STYLE-4 | 変調との結合検証と文書（`MOD-1` ✅ で依存が解けた） | `style-attributes-plan.md` |
-| OPS-9 | `geometry.distribute`（要素サイズ考慮の分布） | `geometry-ops-plan.md` |
+| OPS-10 | レジストリ / ロケール / 文書（登録とロケールは各単位で済み。文書の掃き出しのみ） | `geometry-ops-plan.md` |
+| FX-6 | 文書と実機確認（新ノードの追加メニュー到達） | `effects-library-plan.md` |
 | KIT-2 | gpui-component フォークの棚卸し（上流 PR は出さない。記録だけ） | `gpui-kit-migration-plan.md` |
 | KIT-4 | `ravel-dock`（2191 行）と `gpui-base` の `dock`（13251 行）の比較 | `gpui-kit-migration-plan.md` |
 | KIT-3 | 最初の Ravel コンポーネントを `gpui-base` で作り、作り方を `docs/dev/` に残す | `gpui-kit-migration-plan.md` |
@@ -335,11 +336,11 @@ Global に載り、層ごとに独立した書き込み API（失敗は通知）
 | OPS-6 | ✅ #604 | `geometry.group_index`（index で要素指定） | — |
 | OPS-7 | ✅ #604 | `geometry.repeat`（トランスフォームリピータ） | — |
 | OPS-8 | ✅ #604 | デフォーマ（bend / twist / taper） | — |
-| OPS-9 | 🟡 | `geometry.distribute`（要素サイズ考慮の分布） | OPS-4 |
+| OPS-9 | ✅ #609 | `geometry.distribute`（要素サイズ考慮の分布） | OPS-4 |
 | OPS-11 | ✅ | `shape.line` / `shape.grid`（表の「生成 ✅」は誤りだった）（#406） | — |
 | OPS-12 | ✅ | `geometry.connect`（要素をベジエ/直線で結ぶ。Add SOP 相当）（#406） | — |
 | OPS-13 | ✅ | `attribute.curveu`（パスパラメータ `u` の予約と書き込み）（#406） | — |
-| OPS-10 | ⬜ | レジストリ / ロケール / 文書 | OPS-1〜9, OPS-11〜13 |
+| OPS-10 | 🟡 | レジストリ / ロケール / 文書 | OPS-1〜9, OPS-11〜13 |
 
 ### 塗り・線のスタイル属性化
 

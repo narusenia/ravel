@@ -19,6 +19,9 @@ use crate::scene::camera;
 /// downsampled or multi-pass approximation instead of an unbounded shader loop.
 pub const MAX_BLUR_RADIUS: f32 = 64.0;
 
+/// Default `max_iterations` of `geometry.iterate`.
+pub const MAX_ITERATIONS_DEFAULT: i32 = 256;
+
 /// Built-in types whose template declares the transform section
 /// ([`NodeTemplate::with_transform_section`]).
 ///
@@ -186,6 +189,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(geometry_switch());
     reg.register(geometry_null());
     reg.register(geometry_from_image());
+    reg.register(geometry_iterate());
     reg.register(scene_add());
     reg.register(scene_merge());
     reg.register(scene_camera());
@@ -1666,6 +1670,25 @@ fn geometry_merge() -> NodeTemplate {
         // are — so the section's `translate` is the one and takes the role.
         .with_transform_section()
         .with_param_role("translate", ParamRole::Position)
+}
+
+/// `geometry.iterate`: run the body network once per distinct value of an
+/// integer primitive attribute and merge the results (REQ-CORE-013).
+///
+/// The body is the node's own inner graph, seeded at creation
+/// ([`crate::network::seed_iterate_node`]). `max_iterations` is a ceiling,
+/// not a truncation: a geometry with more pieces is an evaluation error.
+fn geometry_iterate() -> NodeTemplate {
+    NodeTemplate::new(
+        crate::network::ITERATE_TYPE_KEY,
+        "Iterate",
+        NodeCategory::Geometry,
+    )
+    .with_input(geometry_input("geometry"))
+    .with_output(geometry_output())
+    .with_param(string_parameter("attribute", crate::geometry::names::PIECE))
+    .with_param(int_parameter("max_iterations", MAX_ITERATIONS_DEFAULT))
+    .with_param_range("max_iterations", 1.0..=100_000.0, 1.0..=1000.0)
 }
 
 /// `geometry.from_image`: a frame buffer as one instance stamping it.
@@ -3450,14 +3473,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 128);
+        assert_eq!(reg.all_templates().count(), 129);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 38);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 39);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
@@ -4497,6 +4520,7 @@ mod tests {
             "geometry.measure",
             "geometry.null",
             "geometry.resample",
+            "geometry.iterate",
             "geometry.sort",
             "geometry.taper",
             "geometry.null",

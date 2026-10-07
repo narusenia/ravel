@@ -225,6 +225,8 @@ pub enum RavelIcon {
     NodeGeometrySwitch,
     /// Node header/menu: `geometry.null`.
     NodeGeometryNull,
+    /// Node header/menu: `geometry.iterate`.
+    NodeGeometryIterate,
     NodeGeometryFromImage,
     /// Node header/menu: `scene.add`.
     NodeSceneAdd,
@@ -520,6 +522,7 @@ impl RavelIcon {
             "geometry.measure" => Self::NodeGeometryMeasure,
             "geometry.switch" => Self::NodeGeometrySwitch,
             "geometry.null" => Self::NodeGeometryNull,
+            "geometry.iterate" => Self::NodeGeometryIterate,
             "geometry.from_image" => Self::NodeGeometryFromImage,
             "scene.add" => Self::NodeSceneAdd,
             "scene.merge" => Self::NodeSceneMerge,
@@ -713,6 +716,7 @@ impl RavelIcon {
             Self::NodeGeometryMeasure => "icons/ruler.svg",
             Self::NodeGeometrySwitch => "icons/arrow-right-left.svg",
             Self::NodeGeometryNull => "icons/circle-dashed.svg",
+            Self::NodeGeometryIterate => "icons/repeat.svg",
             Self::NodeGeometryFromImage => "icons/image.svg",
             Self::NodeSceneAdd => "icons/box.svg",
             Self::NodeSceneMerge => "icons/group.svg",

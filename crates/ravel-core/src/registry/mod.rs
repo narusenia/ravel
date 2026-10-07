@@ -954,6 +954,8 @@ impl NodeTemplate {
         }
         if self.type_key == crate::network::SUBNET_TYPE_KEY {
             crate::network::seed_subnet_node(&mut node);
+        } else if self.type_key == crate::network::ITERATE_TYPE_KEY {
+            crate::network::seed_iterate_node(&mut node);
         }
         node
     }

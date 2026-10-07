@@ -1142,6 +1142,13 @@ index = "Which input to pass through, counting from 0."
 label = "Null"
 description = "Passes its input through unchanged. For tidying a graph and giving links a stable place to point at."
 
+[node."geometry.iterate"]
+label = "Iterate"
+description = "Runs the network inside it once per piece and merges the results. The geometry is split by an integer primitive attribute, one piece per value in ascending order; the body gets the piece and its iteration index."
+[node."geometry.iterate".params]
+attribute = "Name of the integer primitive attribute the geometry is split by."
+max_iterations = "Most pieces allowed. More is an error, never a truncation. Raise it only when the body is cheap."
+
 [node."geometry.from_image"]
 label = "Image to Geometry"
 description = "Wraps an image as one instance that stamps it, so geometry nodes can repeat and place it. The rectangle is the source's pixel size, centred on the origin; scaling a copy up makes it blurry."

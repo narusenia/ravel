@@ -214,7 +214,8 @@ pen ツールが現状の主な生成源であることを踏まえると優先�
   明示エラー
 - 弧長は `path_parameters` と共有する `vertex_arc_lengths`
   （`path_sample` と同じ `push_segment`）から取る
-- 1 区間の分割数は 2^20 で頭打ち（`length` の入力ミスで無制限に確保しない）
+- 分割数は**パス 1 本あたり**合計 2^20 で頭打ち（`length` の入力ミスで無制限に
+  確保しない）。`keep_corners` の区間には要求数に比例して配り、最低 1
 - アイコンは `waypoints.svg`
 
 ### 単位 4: `geometry.measure`

@@ -743,10 +743,12 @@ fn vertex_arc_lengths(path: &[Vec2], closed: bool) -> (Vec<f32>, f32) {
 // Resample
 // ---------------------------------------------------------------------------
 
-/// Segments a single span may be divided into. A tiny `length` on a long path
-/// would otherwise ask for billions of points; the cap is far above anything a
-/// drawn path needs and turns a runaway parameter into a coarse result.
-const MAX_SPAN_SEGMENTS: usize = 1 << 20;
+/// Segments one **path** may be divided into, across all its `keep_corners`
+/// spans together (each span's share is scaled down in proportion, never below
+/// one). A tiny `length` would otherwise ask for billions of points; the cap is
+/// far above anything a drawn path needs and turns a runaway parameter into a
+/// coarse result.
+const MAX_PATH_SEGMENTS: usize = 1 << 20;
 
 /// A turn sharper than this at a vertex (cosine of 1 degree) is a corner.
 const CORNER_COS: f32 = 0.999_847_7;
@@ -851,7 +853,8 @@ fn path_samples(
     } else {
         anchors.len() - 1
     };
-    let mut samples = Vec::new();
+    // `(from anchor, arc length at it, span length, wanted segments)` per span.
+    let mut plan = Vec::with_capacity(spans);
     for span in 0..spans {
         let (a, b) = (anchors[span], anchors[(span + 1) % anchors.len()]);
         let begin = at_vertex[a];
@@ -860,17 +863,26 @@ fn path_samples(
         } else {
             total - begin + at_vertex[b]
         };
+        let wanted = if span_length <= f32::EPSILON {
+            0.0
+        } else if length > 0.0 {
+            f64::from(span_length / length).round()
+        } else {
+            (segments as f64 * f64::from(span_length / total)).round()
+        };
+        plan.push((a, begin, span_length, wanted.max(1.0)));
+    }
+    // One budget for the whole path, shared out in proportion to what each
+    // span asked for: a per-span cap would still allow corners x cap points.
+    let asked: f64 = plan.iter().map(|span| span.3).sum();
+    let scale = (MAX_PATH_SEGMENTS as f64 / asked).min(1.0);
+    let mut samples = Vec::new();
+    for (a, begin, span_length, wanted) in plan {
+        samples.push((a, a, 0.0));
         if span_length <= f32::EPSILON {
-            samples.push((a, a, 0.0));
             continue;
         }
-        let count = if length > 0.0 {
-            (span_length / length).round()
-        } else {
-            (segments as f32 * span_length / total).round()
-        }
-        .clamp(1.0, MAX_SPAN_SEGMENTS as f32) as usize;
-        samples.push((a, a, 0.0));
+        let count = ((wanted * scale).floor() as usize).max(1);
         for step in 1..count {
             let distance = begin + span_length * step as f32 / count as f32;
             samples.push(locate(&at_vertex, total, vertices, closed, distance));
@@ -7778,7 +7790,20 @@ mod tests {
         );
         // A tiny length is capped rather than allocating without bound.
         let long = path_geometry(vec![Vec2(0.0, 0.0), Vec2(1.0e6, 0.0)], false);
-        assert!(resample(&long, 1.0e-6, 0, false).unwrap().point_count() <= MAX_SPAN_SEGMENTS + 1);
+        assert!(resample(&long, 1.0e-6, 0, false).unwrap().point_count() <= MAX_PATH_SEGMENTS + 1);
+    }
+
+    /// The budget is per path, not per corner-to-corner span.
+    #[test]
+    fn many_corners_and_a_tiny_length_stay_within_the_path_budget() {
+        let zigzag: Vec<Vec2> = (0..200)
+            .map(|i| Vec2(i as f32 * 1000.0, if i % 2 == 0 { 0.0 } else { 1000.0 }))
+            .collect();
+        let geometry = path_geometry(zigzag, false);
+        let result = resample(&geometry, 1.0e-4, 0, true).unwrap();
+        assert!(result.point_count() <= MAX_PATH_SEGMENTS + 200);
+        assert!(result.point_count() > 200, "still resampled, just coarser");
+        assert_eq!(result.validate(), Ok(()));
     }
 
     #[test]

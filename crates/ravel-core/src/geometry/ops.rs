@@ -983,6 +983,219 @@ fn interpolate_samples(column: &AttributeArray, samples: &[(usize, usize, f32)])
 }
 
 // ---------------------------------------------------------------------------
+// Measure
+// ---------------------------------------------------------------------------
+
+/// What [`measure`] writes. Each quantity lives on the domain it describes,
+/// which is what lets a field read it back with `field.attribute`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Measure {
+    /// Primitive, `F32`: the length of the path, closing segment included for
+    /// a closed one.
+    Perimeter,
+    /// Primitive, `F32`: the **signed** enclosed area. Positive when the path
+    /// runs counter-clockwise in the coordinates it is written in, negative
+    /// clockwise. A path that crosses itself sums its lobes by winding, so a
+    /// figure of eight can read 0 — take the absolute value for "how much
+    /// ink". An **open** path is measured as if closed: the area between it
+    /// and the chord from its last point back to its first.
+    Area,
+    /// Point, `F32`: the signed Menger curvature `1 / R` of the circle through
+    /// the point and its two neighbours (exact on a circle, positive for a
+    /// left turn). The ends of an open path, and any point with a coincident
+    /// neighbour, read 0.
+    Curvature,
+    /// Point, `F32`: the length of the segment leaving the point towards the
+    /// next one. The last point of an open path has none and reads 0; the last
+    /// point of a closed path owns the closing segment.
+    SegmentLength,
+    /// Detail, `Vec4`: `(min x, min y, max x, max y)` of the point positions —
+    /// the instance positions when there are no points, all zero when there is
+    /// nothing at all.
+    Bounds,
+    /// Primitive, `Vec2`: `(width, height)` of the box around the primitive's
+    /// own points.
+    Size,
+}
+
+impl Measure {
+    /// The domain this measurement is written on.
+    pub fn domain(self) -> Domain {
+        match self {
+            Self::Perimeter | Self::Area | Self::Size => Domain::Primitive,
+            Self::Curvature | Self::SegmentLength => Domain::Point,
+            Self::Bounds => Domain::Detail,
+        }
+    }
+
+    /// The attribute name used when the caller gives none.
+    pub fn default_name(self) -> &'static str {
+        match self {
+            Self::Perimeter => "perimeter",
+            Self::Area => "area",
+            Self::Curvature => "curvature",
+            Self::SegmentLength => "segment_length",
+            Self::Bounds => "bounds",
+            Self::Size => "size",
+        }
+    }
+}
+
+/// Writes one geometric measurement as an attribute (empty `name` takes
+/// [`Measure::default_name`]), replacing a column of that name on the target
+/// domain. Everything else passes through, sharing its columns.
+///
+/// The path measurements are planar and refuse meshes for the reasons
+/// [`path_sample`] does; `Bounds` and `Size` read the xy of 2D or 3D
+/// positions.
+pub fn measure(
+    geometry: &Geometry,
+    what: Measure,
+    name: &str,
+) -> Result<Geometry, GeometryOpError> {
+    let name = if name.is_empty() {
+        what.default_name()
+    } else {
+        name
+    };
+    let column = match what {
+        Measure::Bounds | Measure::Size => measure_extent(geometry, what)?,
+        _ => measure_paths(geometry, what)?,
+    };
+    let mut result = geometry.clone();
+    result
+        .attribute_set_mut(what.domain())
+        .insert(name, column)?;
+    result.validate()?;
+    Ok(result)
+}
+
+/// The path-based measurements, one value per primitive or per point.
+fn measure_paths(geometry: &Geometry, what: Measure) -> Result<AttributeArray, GeometryOpError> {
+    let points = match geometry.positions(Domain::Point) {
+        Some(positions) => positions?.require_planar("geometry.measure")?,
+        None => &[],
+    };
+    geometry.require_paths("geometry.measure")?;
+    let mut per_point = vec![0.0f32; points.len()];
+    let mut per_primitive = Vec::with_capacity(geometry.primitive_count());
+    for primitive in geometry.primitives() {
+        let Primitive::Path { verts, closed } = primitive else {
+            continue;
+        };
+        let path = points
+            .get(verts.clone())
+            .ok_or(GeometryOpError::InvalidPath)?;
+        // The vertex a segment leaving `index` arrives at, if it has one.
+        let next = |index: usize| match (index + 1 < path.len(), *closed && path.len() > 1) {
+            (true, _) => Some(path[index + 1]),
+            (false, true) => Some(path[0]),
+            _ => None,
+        };
+        per_primitive.push(match what {
+            Measure::Perimeter => (0..path.len())
+                .filter_map(|i| next(i).map(|n| planar_distance_squared(path[i], n).sqrt()))
+                .sum(),
+            Measure::Area => {
+                (0..path.len())
+                    .map(|i| {
+                        let (a, b) = (path[i], path[(i + 1) % path.len()]);
+                        a.0 * b.1 - b.0 * a.1
+                    })
+                    .sum::<f32>()
+                    / 2.0
+            }
+            _ => 0.0,
+        });
+        for (offset, slot) in per_point[verts.clone()].iter_mut().enumerate() {
+            *slot = match what {
+                Measure::SegmentLength => {
+                    next(offset).map_or(0.0, |n| planar_distance_squared(path[offset], n).sqrt())
+                }
+                Measure::Curvature => {
+                    let before = match (offset, *closed) {
+                        (0, true) => path.last().copied(),
+                        (0, false) => None,
+                        _ => Some(path[offset - 1]),
+                    };
+                    match (before, next(offset)) {
+                        (Some(a), Some(c)) => menger_curvature(a, path[offset], c),
+                        _ => 0.0,
+                    }
+                }
+                _ => 0.0,
+            };
+        }
+    }
+    Ok(AttributeArray::F32(match what {
+        Measure::Perimeter | Measure::Area => per_primitive,
+        _ => per_point,
+    }))
+}
+
+/// Signed `1 / R` of the circle through three points; 0 when any two coincide
+/// or the three are collinear.
+fn menger_curvature(a: Vec2, b: Vec2, c: Vec2) -> f32 {
+    let (ab, bc, ac) = (
+        planar_distance_squared(a, b).sqrt(),
+        planar_distance_squared(b, c).sqrt(),
+        planar_distance_squared(a, c).sqrt(),
+    );
+    let denominator = ab * bc * ac;
+    if denominator <= f32::EPSILON {
+        return 0.0;
+    }
+    let cross = (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0);
+    2.0 * cross / denominator
+}
+
+/// `Bounds` (one `Vec4` for the detail) and `Size` (one `Vec2` per primitive).
+fn measure_extent(geometry: &Geometry, what: Measure) -> Result<AttributeArray, GeometryOpError> {
+    let corners = |points: &[Vec2]| {
+        points.iter().fold(None, |extent: Option<(Vec2, Vec2)>, p| {
+            Some(match extent {
+                None => (*p, *p),
+                Some((low, high)) => (
+                    Vec2(low.0.min(p.0), low.1.min(p.1)),
+                    Vec2(high.0.max(p.0), high.1.max(p.1)),
+                ),
+            })
+        })
+    };
+    let xy = |domain| -> Result<Cow<'_, [Vec2]>, GeometryOpError> {
+        Ok(match geometry.positions(domain) {
+            Some(positions) => positions?.projected(),
+            None => Cow::Borrowed(&[]),
+        })
+    };
+    if what == Measure::Bounds {
+        let points = xy(Domain::Point)?;
+        let extent = if points.is_empty() {
+            corners(&xy(Domain::Instance)?)
+        } else {
+            corners(&points)
+        };
+        let (low, high) = extent.unwrap_or((Vec2(0.0, 0.0), Vec2(0.0, 0.0)));
+        return Ok(AttributeArray::Vec4(vec![Vec4(
+            low.0, low.1, high.0, high.1,
+        )]));
+    }
+    let points = xy(Domain::Point)?;
+    geometry
+        .primitives()
+        .iter()
+        .map(|primitive| {
+            let run = points
+                .get(primitive.verts().clone())
+                .ok_or(GeometryOpError::InvalidPath)?;
+            let (low, high) = corners(run).unwrap_or((Vec2(0.0, 0.0), Vec2(0.0, 0.0)));
+            Ok(Vec2(high.0 - low.0, high.1 - low.1))
+        })
+        .collect::<Result<Vec<_>, GeometryOpError>>()
+        .map(AttributeArray::Vec2)
+}
+
+// ---------------------------------------------------------------------------
 // Sort
 // ---------------------------------------------------------------------------
 
@@ -7611,5 +7824,318 @@ mod tests {
             Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(0.0, 1.0)]);
         geometry.push_mesh(0..3, &[0, 1, 2]);
         assert!(resample(&geometry, 1.0, 4, false).is_err());
+    }
+
+    // ----- measure -------------------------------------------------------------
+
+    fn f32_column(geometry: &Geometry, domain: Domain, name: &str) -> Vec<f32> {
+        geometry
+            .attribute_set(domain)
+            .get(name)
+            .unwrap_or_else(|| panic!("{domain:?} lacks {name}"))
+            .as_f32(name)
+            .unwrap()
+            .to_vec()
+    }
+
+    fn close(actual: &[f32], expected: &[f32], tolerance: f32) {
+        assert_eq!(actual.len(), expected.len(), "{actual:?}");
+        for (a, e) in actual.iter().zip(expected) {
+            assert!((a - e).abs() <= tolerance, "{actual:?} vs {expected:?}");
+        }
+    }
+
+    fn rectangle(closed: bool) -> Geometry {
+        path_geometry(
+            vec![
+                Vec2(0.0, 0.0),
+                Vec2(4.0, 0.0),
+                Vec2(4.0, 3.0),
+                Vec2(0.0, 3.0),
+            ],
+            closed,
+        )
+    }
+
+    /// A counter-clockwise regular polygon close enough to a circle that the
+    /// analytic values hold to the tolerance used below.
+    fn circle(radius: f32, sides: usize) -> Geometry {
+        path_geometry(
+            (0..sides)
+                .map(|i| {
+                    let angle = i as f32 / sides as f32 * std::f32::consts::TAU;
+                    Vec2(radius * angle.cos(), radius * angle.sin())
+                })
+                .collect(),
+            true,
+        )
+    }
+
+    #[test]
+    fn measure_matches_the_analytic_values_of_a_rectangle() {
+        let rect = rectangle(true);
+        let perimeter = measure(&rect, Measure::Perimeter, "").unwrap();
+        close(
+            &f32_column(&perimeter, Domain::Primitive, "perimeter"),
+            &[14.0],
+            1e-5,
+        );
+        let area = measure(&rect, Measure::Area, "").unwrap();
+        close(&f32_column(&area, Domain::Primitive, "area"), &[12.0], 1e-5);
+        let lengths = measure(&rect, Measure::SegmentLength, "").unwrap();
+        close(
+            &f32_column(&lengths, Domain::Point, "segment_length"),
+            &[4.0, 3.0, 4.0, 3.0],
+            1e-5,
+        );
+        let sized = measure(&rect, Measure::Size, "").unwrap();
+        assert_eq!(
+            sized
+                .primitive_attrs()
+                .get("size")
+                .unwrap()
+                .as_vec2("size")
+                .unwrap(),
+            [Vec2(4.0, 3.0)]
+        );
+        let bounds = measure(&rect, Measure::Bounds, "").unwrap();
+        assert_eq!(
+            bounds
+                .detail()
+                .get("bounds")
+                .unwrap()
+                .as_vec4("bounds")
+                .unwrap(),
+            [Vec4(0.0, 0.0, 4.0, 3.0)]
+        );
+        // The rectangle's own columns are untouched and shared.
+        assert!(Arc::ptr_eq(
+            perimeter.points().get(names::P).unwrap(),
+            rect.points().get(names::P).unwrap()
+        ));
+    }
+
+    #[test]
+    fn measure_matches_the_analytic_values_of_a_circle() {
+        let (radius, sides) = (5.0f32, 720);
+        let round = circle(radius, sides);
+        let tau = std::f32::consts::TAU;
+        // A regular polygon's exact values, which the circle's are the limit of.
+        let n = sides as f32;
+        let perimeter = f32_column(
+            &measure(&round, Measure::Perimeter, "").unwrap(),
+            Domain::Primitive,
+            "perimeter",
+        );
+        close(
+            &perimeter,
+            &[n * 2.0 * radius * (tau / n / 2.0).sin()],
+            1e-3,
+        );
+        close(&perimeter, &[tau * radius], 0.01);
+        let area = f32_column(
+            &measure(&round, Measure::Area, "").unwrap(),
+            Domain::Primitive,
+            "area",
+        );
+        close(&area, &[std::f32::consts::PI * radius * radius], 0.01);
+        // Curvature is 1 / R at every point, positive for a counter-clockwise
+        // loop and negative for the same loop run backwards.
+        let curvature = measure(&round, Measure::Curvature, "").unwrap();
+        close(
+            &f32_column(&curvature, Domain::Point, "curvature"),
+            &vec![0.2; sides],
+            1e-3,
+        );
+        let mut backwards = xs(&round);
+        backwards.reverse();
+        let backwards = path_geometry(backwards, true);
+        let curvature = measure(&backwards, Measure::Curvature, "").unwrap();
+        close(
+            &f32_column(&curvature, Domain::Point, "curvature"),
+            &vec![-0.2; sides],
+            1e-3,
+        );
+        let area = f32_column(
+            &measure(&backwards, Measure::Area, "").unwrap(),
+            Domain::Primitive,
+            "area",
+        );
+        assert!(area[0] < 0.0, "a clockwise loop is negative: {area:?}");
+    }
+
+    /// The area is the signed shoelace sum, so lobes of opposite winding
+    /// cancel: this path runs one lobe clockwise and the other
+    /// counter-clockwise, and reads -4 where the ink covers more.
+    #[test]
+    fn the_area_of_a_self_crossing_path_is_the_signed_winding_sum() {
+        let crossing = path_geometry(
+            vec![
+                Vec2(0.0, 0.0),
+                Vec2(4.0, 4.0),
+                Vec2(4.0, 0.0),
+                Vec2(0.0, 2.0),
+            ],
+            true,
+        );
+        let area = f32_column(
+            &measure(&crossing, Measure::Area, "").unwrap(),
+            Domain::Primitive,
+            "area",
+        );
+        close(&area, &[-4.0], 1e-5);
+        // A symmetric bowtie cancels exactly.
+        let bowtie = path_geometry(
+            vec![
+                Vec2(0.0, 0.0),
+                Vec2(2.0, 2.0),
+                Vec2(2.0, 0.0),
+                Vec2(0.0, 2.0),
+            ],
+            true,
+        );
+        let area = f32_column(
+            &measure(&bowtie, Measure::Area, "").unwrap(),
+            Domain::Primitive,
+            "area",
+        );
+        close(&area, &[0.0], 1e-5);
+    }
+
+    /// An open path's area is that of the shape its chord closes, and its
+    /// perimeter is only the way along it.
+    #[test]
+    fn an_open_path_is_measured_for_area_as_if_it_were_closed() {
+        let open = path_geometry(vec![Vec2(0.0, 0.0), Vec2(4.0, 0.0), Vec2(4.0, 3.0)], false);
+        let closed = path_geometry(vec![Vec2(0.0, 0.0), Vec2(4.0, 0.0), Vec2(4.0, 3.0)], true);
+        let area = |geometry: &Geometry| {
+            f32_column(
+                &measure(geometry, Measure::Area, "").unwrap(),
+                Domain::Primitive,
+                "area",
+            )
+        };
+        close(&area(&open), &[6.0], 1e-5);
+        assert_eq!(area(&open), area(&closed));
+        let perimeter = |geometry: &Geometry| {
+            f32_column(
+                &measure(geometry, Measure::Perimeter, "").unwrap(),
+                Domain::Primitive,
+                "perimeter",
+            )
+        };
+        close(&perimeter(&open), &[7.0], 1e-5);
+        close(&perimeter(&closed), &[12.0], 1e-5);
+        // The open path's last point has no segment leaving it, its ends no
+        // curvature.
+        let lengths = measure(&open, Measure::SegmentLength, "").unwrap();
+        close(
+            &f32_column(&lengths, Domain::Point, "segment_length"),
+            &[4.0, 3.0, 0.0],
+            1e-5,
+        );
+        let curvature = measure(&open, Measure::Curvature, "").unwrap();
+        let curvature = f32_column(&curvature, Domain::Point, "curvature");
+        assert_eq!((curvature[0], curvature[2]), (0.0, 0.0));
+        assert!(curvature[1] > 0.0, "a left turn: {curvature:?}");
+    }
+
+    #[test]
+    fn measure_writes_each_quantity_on_its_domain_under_the_requested_name() {
+        let rect = rectangle(true);
+        for (what, domain) in [
+            (Measure::Perimeter, Domain::Primitive),
+            (Measure::Area, Domain::Primitive),
+            (Measure::Size, Domain::Primitive),
+            (Measure::Curvature, Domain::Point),
+            (Measure::SegmentLength, Domain::Point),
+            (Measure::Bounds, Domain::Detail),
+        ] {
+            assert_eq!(what.domain(), domain);
+            let named = measure(&rect, what, "mine").unwrap();
+            assert!(
+                named.attribute_set(domain).get("mine").is_some(),
+                "{what:?}"
+            );
+            assert!(
+                named
+                    .attribute_set(domain)
+                    .get(what.default_name())
+                    .is_none(),
+                "{what:?}"
+            );
+            let default = measure(&rect, what, "").unwrap();
+            assert!(
+                default
+                    .attribute_set(domain)
+                    .get(what.default_name())
+                    .is_some()
+            );
+        }
+        // Two primitives get one value each, in primitive order.
+        let mut two = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(4.0, 0.0),
+            Vec2(4.0, 3.0),
+            Vec2(0.0, 3.0),
+            Vec2(10.0, 10.0),
+            Vec2(11.0, 10.0),
+            Vec2(11.0, 12.0),
+        ]);
+        two.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        two.push_primitive(Primitive::Path {
+            verts: 4..7,
+            closed: true,
+        });
+        let sized = measure(&two, Measure::Size, "").unwrap();
+        assert_eq!(
+            sized
+                .primitive_attrs()
+                .get("size")
+                .unwrap()
+                .as_vec2("size")
+                .unwrap(),
+            [Vec2(4.0, 3.0), Vec2(1.0, 2.0)]
+        );
+    }
+
+    #[test]
+    fn measure_copes_with_degenerate_and_empty_geometry() {
+        let single = path_geometry(vec![Vec2(3.0, 4.0)], false);
+        for what in [
+            Measure::Perimeter,
+            Measure::Area,
+            Measure::Curvature,
+            Measure::SegmentLength,
+            Measure::Size,
+            Measure::Bounds,
+        ] {
+            let measured = measure(&single, what, "").unwrap();
+            assert_eq!(measured.validate(), Ok(()), "{what:?}");
+            let empty = measure(&Geometry::new(), what, "").unwrap();
+            assert_eq!(empty.validate(), Ok(()), "{what:?}");
+        }
+        let bounds = measure(&Geometry::new(), Measure::Bounds, "").unwrap();
+        assert_eq!(
+            bounds
+                .detail()
+                .get("bounds")
+                .unwrap()
+                .as_vec4("bounds")
+                .unwrap(),
+            [Vec4(0.0, 0.0, 0.0, 0.0)]
+        );
+        // Coincident points have no curvature rather than NaN.
+        let stacked = path_geometry(vec![Vec2(1.0, 1.0); 3], true);
+        let curvature = measure(&stacked, Measure::Curvature, "").unwrap();
+        assert_eq!(f32_column(&curvature, Domain::Point, "curvature"), [0.0; 3]);
+        let mut mesh = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(0.0, 1.0)]);
+        mesh.push_mesh(0..3, &[0, 1, 2]);
+        assert!(measure(&mesh, Measure::Area, "").is_err());
+        // But a mesh has an extent.
+        assert!(measure(&mesh, Measure::Size, "").is_ok());
     }
 }

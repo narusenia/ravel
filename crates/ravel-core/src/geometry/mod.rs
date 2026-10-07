@@ -10,6 +10,7 @@ mod field;
 pub mod index_group;
 pub mod names;
 pub mod ops;
+pub mod repeat;
 pub mod rotation;
 pub mod triangulate;
 

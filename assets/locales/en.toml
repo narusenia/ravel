@@ -1056,6 +1056,59 @@ center = "Center the radial mode measures the distance from."
 seed = "Seed of the random mode. The same seed gives the same order."
 attribute = "Name of the attribute the attribute mode sorts by. A vector or color sorts by its first component."
 
+[node."geometry.group_index"]
+label = "Group by Index"
+description = "Writes a boolean group attribute that flags elements by index. Feed it to any node with a group parameter."
+
+[node."geometry.group_index".params]
+range = "Indices to flag: 3, 3-7 (inclusive), 3,5,9, or a stride such as 0-20:2. Indices past the end are ignored with a warning."
+domain = "Which elements the indices count."
+name = "Name of the boolean attribute that is written."
+invert = "Flag every element except the ones the range names."
+
+[node."geometry.repeat"]
+label = "Repeat"
+description = "Makes count copies of the input. Copy i is placed by the per-copy transform applied i times, so spirals and nested layouts build up. The output is instances, like the scatter nodes."
+
+[node."geometry.repeat".params]
+count = "Number of copies. The first copy is the input where it is."
+translate = "Offset added by each step, in the previous copy's own turned and scaled space."
+rotate = "Turn added by each step, in degrees."
+scale = "Scale multiplied in by each step. A scale of 0 collapses every copy after the first."
+
+[node."geometry.bend"]
+label = "Bend"
+description = "Bends the axis into an arc. Points before the range stay, points past it follow the end of the arc straight on. Bezier tangents are carried along, so curves stay smooth."
+
+[node."geometry.bend".params]
+axis = "The axis the bend runs along. The other axis is the direction it curls toward."
+start = "Where along the axis the bend begins."
+end = "Where along the axis the bend ends."
+amount = "Total bend angle in degrees across the range. Positive curls toward the positive perpendicular."
+group = "Name of a boolean point attribute. Only flagged points move. Empty moves every point."
+
+[node."geometry.twist"]
+label = "Twist"
+description = "Rotates points around the axis in proportion to their position along it. In the plane this shows as the shape narrowing toward the axis and mirroring past a half turn. Bezier tangents are carried along."
+
+[node."geometry.twist".params]
+axis = "The axis the twist runs along."
+start = "Where along the axis the twist begins."
+end = "Where along the axis the twist reaches its full angle."
+amount = "Total twist in degrees across the range."
+group = "Name of a boolean point attribute. Only flagged points move. Empty moves every point."
+
+[node."geometry.taper"]
+label = "Taper"
+description = "Narrows the shape along the axis. The width at the end of the range is one minus the amount of the original. Bezier tangents are carried along."
+
+[node."geometry.taper".params]
+axis = "The axis the taper runs along."
+start = "Where along the axis the taper begins."
+end = "Where along the axis the taper reaches its final width."
+amount = "How much width is lost by the end of the range. 0 leaves it alone, 1 closes it to a point, negative widens."
+group = "Name of a boolean point attribute. Only flagged points move. Empty moves every point."
+
 [node."geometry.from_image"]
 label = "Image to Geometry"
 description = "Wraps an image as one instance that stamps it, so geometry nodes can repeat and place it. The rectangle is the source's pixel size, centred on the origin; scaling a copy up makes it blurry."

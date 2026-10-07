@@ -205,6 +205,16 @@ pub enum RavelIcon {
     NodeGeometryConnect,
     /// Node header/menu: `geometry.sort`.
     NodeGeometrySort,
+    /// Node header/menu: `geometry.group_index`.
+    NodeGeometryGroupIndex,
+    /// Node header/menu: `geometry.repeat`.
+    NodeGeometryRepeat,
+    /// Node header/menu: `geometry.bend`.
+    NodeGeometryBend,
+    /// Node header/menu: `geometry.twist`.
+    NodeGeometryTwist,
+    /// Node header/menu: `geometry.taper`.
+    NodeGeometryTaper,
     NodeGeometryFromImage,
     /// Node header/menu: `scene.add`.
     NodeSceneAdd,
@@ -490,6 +500,11 @@ impl RavelIcon {
             "geometry.merge" => Self::NodeGeometryMerge,
             "geometry.connect" => Self::NodeGeometryConnect,
             "geometry.sort" => Self::NodeGeometrySort,
+            "geometry.group_index" => Self::NodeGeometryGroupIndex,
+            "geometry.repeat" => Self::NodeGeometryRepeat,
+            "geometry.bend" => Self::NodeGeometryBend,
+            "geometry.twist" => Self::NodeGeometryTwist,
+            "geometry.taper" => Self::NodeGeometryTaper,
             "geometry.from_image" => Self::NodeGeometryFromImage,
             "scene.add" => Self::NodeSceneAdd,
             "scene.merge" => Self::NodeSceneMerge,
@@ -673,6 +688,11 @@ impl RavelIcon {
             Self::NodeGeometryMerge => "icons/combine.svg",
             Self::NodeGeometryConnect => "icons/network.svg",
             Self::NodeGeometrySort => "icons/arrow-down-up.svg",
+            Self::NodeGeometryGroupIndex => "icons/hash.svg",
+            Self::NodeGeometryRepeat => "icons/layers.svg",
+            Self::NodeGeometryBend => "icons/spline.svg",
+            Self::NodeGeometryTwist => "icons/orbit.svg",
+            Self::NodeGeometryTaper => "icons/maximize-2.svg",
             Self::NodeGeometryFromImage => "icons/image.svg",
             Self::NodeSceneAdd => "icons/box.svg",
             Self::NodeSceneMerge => "icons/group.svg",

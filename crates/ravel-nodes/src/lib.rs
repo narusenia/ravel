@@ -21,6 +21,7 @@ pub use eval_hooks::GpuEvalHooks;
 pub mod field;
 pub mod flatten;
 pub mod geometry;
+pub mod geometry_ops;
 mod gpu_util;
 pub use gpu_util::{GpuImage, begin_upload_scope, clone_frame_value, ensure_cpu, ensure_gpu};
 pub mod layer_info;
@@ -255,6 +256,15 @@ pub fn processor_for_node(
             node,
         ))),
         "geometry.sort" => Some(Arc::new(geometry::GeometrySortProcessor::from_node(node))),
+        "geometry.group_index" => Some(Arc::new(
+            geometry_ops::GeometryGroupIndexProcessor::from_node(node),
+        )),
+        "geometry.repeat" => Some(Arc::new(geometry_ops::GeometryRepeatProcessor::from_node(
+            node,
+        ))),
+        "geometry.bend" => Some(Arc::new(geometry_ops::GeometryDeformProcessor::bend())),
+        "geometry.twist" => Some(Arc::new(geometry_ops::GeometryDeformProcessor::twist())),
+        "geometry.taper" => Some(Arc::new(geometry_ops::GeometryDeformProcessor::taper())),
         "geometry.from_image" => Some(Arc::new(geometry::GeometryFromImageProcessor::from_node(
             node,
         ))),

@@ -1109,6 +1109,16 @@ end = "Where along the axis the taper reaches its final width."
 amount = "How much width is lost by the end of the range. 0 leaves it alone, 1 closes it to a point, negative widens."
 group = "Name of a boolean point attribute. Only flagged points move. Empty moves every point."
 
+[node."geometry.switch"]
+label = "Switch"
+description = "Passes one of its geometry inputs through, picked by index. An index past the last connected input picks the last one."
+[node."geometry.switch".params]
+index = "Which input to pass through, counting from 0."
+
+[node."geometry.null"]
+label = "Null"
+description = "Passes its input through unchanged. For tidying a graph and giving links a stable place to point at."
+
 [node."geometry.from_image"]
 label = "Image to Geometry"
 description = "Wraps an image as one instance that stamps it, so geometry nodes can repeat and place it. The rectangle is the source's pixel size, centred on the origin; scaling a copy up makes it blurry."

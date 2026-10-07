@@ -180,6 +180,8 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(geometry_deformer("geometry.bend", "Bend", 90.0));
     reg.register(geometry_deformer("geometry.twist", "Twist", 90.0));
     reg.register(geometry_deformer("geometry.taper", "Taper", 0.5));
+    reg.register(geometry_switch());
+    reg.register(geometry_null());
     reg.register(geometry_from_image());
     reg.register(scene_add());
     reg.register(scene_merge());
@@ -1806,6 +1808,24 @@ fn geometry_sort() -> NodeTemplate {
         .with_param_role("center", ParamRole::Position)
 }
 
+/// `geometry.switch`: pass one of the variadic inputs through, picked by
+/// `index`. Out-of-range clamps to the last connected input.
+fn geometry_switch() -> NodeTemplate {
+    NodeTemplate::new("geometry.switch", "Switch", NodeCategory::Geometry)
+        .with_variadic_input_group(geometry_input("geometry"))
+        .with_output(geometry_output())
+        .with_param(int_parameter("index", 0))
+        .with_param_range("index", 0.0..=1e6, 0.0..=16.0)
+}
+
+/// `geometry.null`: the identity. Hands the input on untouched, for tidying a
+/// graph and for giving links a stable place to point at.
+fn geometry_null() -> NodeTemplate {
+    NodeTemplate::new("geometry.null", "Null", NodeCategory::Geometry)
+        .with_input(geometry_input("geometry"))
+        .with_output(geometry_output())
+}
+
 fn scene_input(name: &str) -> InputPort {
     InputPort {
         name: name.into(),
@@ -3368,14 +3388,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 123);
+        assert_eq!(reg.all_templates().count(), 125);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 33);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 35);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
@@ -4413,6 +4433,8 @@ mod tests {
             "geometry.repeat",
             "geometry.sort",
             "geometry.taper",
+            "geometry.null",
+            "geometry.switch",
             "geometry.transform",
             "geometry.twist",
             "style.dash",

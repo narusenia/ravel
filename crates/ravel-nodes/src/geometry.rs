@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Geometry-level operations (CPU-only): `geometry.transform`,
-//! `geometry.merge`, `geometry.connect`, `geometry.sort`, and
-//! `geometry.from_image`.
+//! `geometry.merge`, `geometry.connect`, `geometry.sort`,
+//! `geometry.switch`, `geometry.null`, and `geometry.from_image`.
 //!
 //! Operate on whole [`Geometry`] values with copy-on-write attribute
 //! columns — untouched columns keep sharing their `Arc` with the input.
@@ -534,6 +534,53 @@ impl NodeProcessor for GeometrySortProcessor {
             _ => SortMode::X,
         };
         Ok(Arc::new(sort(geometry, domain, mode)?))
+    }
+}
+
+/// `geometry.switch`: pass one of the variadic inputs through, picked by
+/// `index`. The index clamps to the last connected input, so a typo or an
+/// animated overshoot never reads past the wired ones; a slot picked while
+/// unconnected yields an empty geometry.
+pub struct GeometrySwitchProcessor;
+
+impl NodeProcessor for GeometrySwitchProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let Some(last) = inputs.iter().rposition(Option::is_some) else {
+            return Ok(Arc::new(Geometry::new()));
+        };
+        let index = (params.i32_or("index", 0).max(0) as usize).min(last);
+        match &inputs[index] {
+            Some(input) if input.downcast_ref::<Geometry>().is_some() => Ok(input.clone()),
+            Some(_) => anyhow::bail!("geometry.switch: input {index} is not Geometry"),
+            None => Ok(Arc::new(Geometry::new())),
+        }
+    }
+}
+
+/// `geometry.null`: the identity. Returns the input `Arc` itself, no copy.
+pub struct GeometryNullProcessor;
+
+impl NodeProcessor for GeometryNullProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        geometry_input(inputs, 0, "geometry.null")?;
+        Ok(inputs[0]
+            .as_ref()
+            .expect("checked by geometry_input")
+            .clone())
     }
 }
 
@@ -2553,5 +2600,93 @@ mod tests {
             staggered(Some("x")),
             [(10, 2.0), (11, 0.0), (12, 1.0), (13, 3.0)]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // geometry.switch / geometry.null
+    // -----------------------------------------------------------------------
+
+    /// Geometry with `n` points, so which input was picked reads off the count.
+    fn n_points(n: usize) -> Arc<Geometry> {
+        Arc::new(Geometry::from_points(vec![Vec2(0.0, 0.0); n]))
+    }
+
+    /// Runs `geometry.switch` with one source per entry of `sources` (`None`
+    /// leaves that slot unconnected) and returns the node's output.
+    fn eval_switch(index: i32, sources: &[Option<Arc<Geometry>>]) -> Arc<dyn NodeData> {
+        let mut node = Node::new(NodeId::new(100), "geometry.switch")
+            .with_output("output", DataTypeId::GEOMETRY)
+            .with_param("index", ParameterValue::Int(index));
+        for i in 0..sources.len() {
+            node = node.with_input(format!("geometry_{i}"), &[DataTypeId::GEOMETRY]);
+        }
+        let mut graph = Graph::new();
+        let mut ev = Evaluator::new();
+        let mut edges = Vec::new();
+        for (i, source) in sources.iter().enumerate() {
+            if let Some(geo) = source {
+                let id = NodeId::new(i as u64 + 1);
+                graph = graph
+                    .add_node(Node::new(id, "test.source").with_output("out", DataTypeId::GEOMETRY))
+                    .unwrap();
+                ev.register(id, Arc::new(Fixed(geo.clone())));
+                edges.push((i, id));
+            }
+        }
+        graph = graph.add_node(node).unwrap();
+        for (slot, from) in edges {
+            graph = graph
+                .add_edge(
+                    EdgeId::new(slot as u64 + 1),
+                    from,
+                    OutputPortIndex(0),
+                    NodeId::new(100),
+                    InputPortIndex(slot as u32),
+                )
+                .unwrap();
+        }
+        ev.register(NodeId::new(100), Arc::new(GeometrySwitchProcessor));
+        ev.evaluate(&graph, NodeId::new(100), &ctx()).unwrap()
+    }
+
+    #[test]
+    fn switch_picks_the_indexed_input_and_clamps_out_of_range() {
+        let sources = [Some(n_points(1)), Some(n_points(2)), Some(n_points(3))];
+        let picked = |index| as_geometry(&eval_switch(index, &sources)).point_count();
+        assert_eq!(picked(0), 1);
+        assert_eq!(picked(1), 2);
+        assert_eq!(picked(2), 3);
+        assert_eq!(picked(99), 3, "past the end clamps to the last input");
+        assert_eq!(picked(-4), 1, "negative clamps to the first input");
+    }
+
+    #[test]
+    fn switch_clamps_to_the_last_connected_input_and_shares_it() {
+        let a = n_points(1);
+        let b = n_points(2);
+        // Slot 2 is the empty trailing slot a fresh variadic group leaves.
+        let out = eval_switch(5, &[Some(a), Some(b.clone()), None]);
+        assert!(std::ptr::eq(as_geometry(&out), b.as_ref()));
+        // Nothing connected is an empty geometry, not an error.
+        assert_eq!(as_geometry(&eval_switch(0, &[None])).point_count(), 0);
+    }
+
+    #[test]
+    fn null_returns_the_input_arc_without_copying() {
+        let input: Arc<dyn NodeData> = n_points(3);
+        let node = Node::new(NodeId::new(1), "geometry.null")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_output("output", DataTypeId::GEOMETRY);
+        let mut scope = Evaluator::new();
+        let out = GeometryNullProcessor
+            .process(
+                &node,
+                &ctx(),
+                &[Some(input.clone())],
+                &ResolvedParams::default(),
+                &mut scope,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&out, &input));
     }
 }

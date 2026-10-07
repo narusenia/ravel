@@ -1097,6 +1097,16 @@ end = "絞りが最終幅に達する軸上の位置。"
 amount = "終端までに失う幅の割合。0 で変化なし、1 で一点に閉じ、負で広がる。"
 group = "Bool 型のポイントアトリビュート名。フラグが立った点だけ動く。空なら全点。"
 
+[node."geometry.switch"]
+label = "スイッチ"
+description = "複数のジオメトリ入力から index で 1 つ選んで通す。接続済みの最後の入力より大きい index は最後の入力を選ぶ。"
+[node."geometry.switch".params]
+index = "通す入力の番号（0 始まり）。"
+
+[node."geometry.null"]
+label = "ヌル"
+description = "入力をそのまま通す。グラフの整理や、リンク先の固定に使う。"
+
 [node."geometry.from_image"]
 label = "画像をジオメトリへ"
 description = "画像を 1 個のインスタンスとして包み、ジオメトリノードで複製・配置できるようにする。長方形はソースのピクセル寸法で原点中心。コピーを拡大するとボケる。"

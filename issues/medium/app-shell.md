@@ -256,3 +256,32 @@ Escape を受け取れない**。`.agents/rules/ux.md` の不変条件 10
 
 **severity の根拠**: bug。クラッシュはせず、機能が無いだけ。だが
 不変条件 10 と 4 の両方を macOS で満たせなくするので low ではない。
+
+## MED-APP-47 | bug | `cargo bench` のビルドで `set_active_composition_for_tests` が消え、main の `bench` ジョブが 9/30 から毎回落ちる
+
+**該当**: `crates/ravel-app/src/panels/mod.rs:873`（`#[cfg(debug_assertions)]`）、
+呼び出し側 `crates/ravel-app/src/project_state.rs:7921`（lib 内 `#[cfg(test)]`）、
+`crates/ravel-app/tests/playback_transport.rs:226`、
+`crates/ravel-app/tests/panel_rebuild_gate.rs:821` / `:879` / `:1644`
+
+ヘルパは `debug_assertions` でゲートされているが、`ci.yml` の `bench` ジョブ
+（`cargo bench --workspace -- --test`）は lib のテストと統合テストも
+**bench プロファイル（`debug_assertions` 無効）**で組むので、関数が消えて
+`error[E0425]: cannot find function set_active_composition_for_tests in module crate::panels`
+で落ちる。
+
+**いつから**: #575（`47ce963e`、2026-09-30）が lib 内テストから呼び始めた。
+main の push で最後に緑だったのは 2026-09-30 05:54 で、以後の main の
+push は `bench` だけ毎回 failure（`check` は緑）。`bench` は main への push
+でしか走らないので、PR では見えない。
+
+**実害**: main の CI が常に赤なので、**本物の失敗が混ざっても気づけない**。
+製品のバイナリには影響しない。
+
+**修正方針**: ヘルパのゲートを `debug_assertions` から外す（`#[doc(hidden)]`
+で常に公開する）か、呼び出し側を同じ `cfg` で囲む。前者が単純。
+ゲートを外すときは、アプリコードから呼ばれないことを `scripts/lint-patterns.sh`
+で守れるか確かめる。
+
+**severity の根拠**: bug。ビルドは CI の 1 ジョブだけだが、main を常時赤にして
+回帰検出を殺すので low ではない。

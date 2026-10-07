@@ -7,7 +7,8 @@ use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams, ResolvedValue};
 use ravel_core::geometry::{
     AggregateMode, AttributeArray, AttributeValue, CurveUMode, Domain, Geometry, TransferMode,
-    attribute_delete, attribute_set, attribute_transfer, curve_u, path_sample, promote_attribute,
+    attribute_delete, attribute_set_in_group, attribute_transfer, curve_u, path_sample,
+    promote_attribute_in_group,
 };
 use ravel_core::graph::Node;
 use ravel_core::registry::builtin::{ATTRIBUTE_SET_DEFAULT_TYPE, attribute_set_value_defaults};
@@ -66,7 +67,13 @@ impl NodeProcessor for AttributeSetProcessor {
         };
         let domain = domain_param(params, "domain", Domain::Point);
         let name = params.str_or("name", "value");
-        Ok(Arc::new(attribute_set(geometry, domain, name, value)?))
+        // Elements a `group` leaves out keep the column's current value; with
+        // no column yet they read as "nobody wrote this" — the type's zero.
+        let unset = AttributeValue::zero(value.attr_type());
+        let group = params.str_or("group", "");
+        Ok(Arc::new(attribute_set_in_group(
+            geometry, domain, name, value, group, unset,
+        )?))
     }
 }
 
@@ -120,12 +127,13 @@ impl NodeProcessor for AttributePromoteProcessor {
     ) -> anyhow::Result<Arc<dyn NodeData>> {
         let geometry = geometry_input(inputs, 0, "attribute.promote")?;
         let mode = aggregate_param(params);
-        Ok(Arc::new(promote_attribute(
+        Ok(Arc::new(promote_attribute_in_group(
             geometry,
             domain_param(params, "source_domain", Domain::Point),
             domain_param(params, "target_domain", Domain::Detail),
             params.str_or("name", "value"),
             mode,
+            params.str_or("group", ""),
         )?))
     }
 }
@@ -290,6 +298,7 @@ mod tests {
     use super::*;
     use crate::scatter::GridProcessor;
     use ravel_core::eval::Evaluator;
+    use ravel_core::geometry::{attribute_set, promote_attribute};
     use ravel_core::graph::{Graph, ParameterValue};
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::types::FrameRate;
@@ -1132,5 +1141,143 @@ mod tests {
                 .unwrap(),
             &[2.5]
         );
+    }
+
+    // ---- the `group` element scope -----------------------------------------
+
+    fn grouped(flags: Vec<bool>) -> Geometry {
+        let n = flags.len();
+        let mut g = Geometry::from_points((0..n).map(|i| Vec2(i as f32, 0.0)).collect());
+        g.points_mut()
+            .insert("pick", AttributeArray::Bool(flags))
+            .unwrap();
+        g.points_mut()
+            .insert("plain", AttributeArray::F32(vec![1.0; n]))
+            .unwrap();
+        g
+    }
+
+    fn run_with(type_key: &str, params: &[(&str, &str)], geometry: Geometry) -> Geometry {
+        let mut node = registered_node(type_key, 1);
+        for (key, value) in params {
+            set_string_param(&mut node, key, value);
+        }
+        let out = run_attribute_node(&node, &[Arc::new(geometry)]);
+        out.downcast_ref::<Geometry>().unwrap().clone()
+    }
+
+    fn f32_column(g: &Geometry, domain: Domain, name: &str) -> Vec<f32> {
+        g.attribute_set(domain)
+            .get(name)
+            .unwrap()
+            .as_f32(name)
+            .unwrap()
+            .to_vec()
+    }
+
+    #[test]
+    fn set_group_writes_flagged_elements_and_keeps_the_rest_bit_exact() {
+        let mut input = grouped(vec![true, false, true]);
+        input
+            .points_mut()
+            .insert("w", AttributeArray::F32(vec![f32::NAN, -0.0, 3.0]))
+            .unwrap();
+        let out = run_with(
+            "attribute.set",
+            &[("name", "w"), ("group", "pick")],
+            input.clone(),
+        );
+        let (after, before) = (
+            f32_column(&out, Domain::Point, "w"),
+            f32_column(&input, Domain::Point, "w"),
+        );
+        assert_eq!(
+            after[1].to_bits(),
+            before[1].to_bits(),
+            "outside: bit-exact"
+        );
+        assert_eq!((after[0], after[2]), (0.0, 0.0), "inside: written");
+        // No existing column: outside elements read the type's zero.
+        let fresh = run_with(
+            "attribute.set",
+            &[("name", "fresh"), ("group", "pick")],
+            grouped(vec![true, false, true]),
+        );
+        assert_eq!(f32_column(&fresh, Domain::Point, "fresh"), [0.0; 3]);
+    }
+
+    #[test]
+    fn set_unusable_group_writes_every_element_and_warns() {
+        for name in ["typo", "plain"] {
+            let mut out = None;
+            let logged = warnings_from(|| {
+                let mut g = grouped(vec![true, false, true]);
+                g.points_mut()
+                    .insert("w", AttributeArray::F32(vec![9.0; 3]))
+                    .unwrap();
+                out = Some(run_with(
+                    "attribute.set",
+                    &[("name", "w"), ("group", name), ("type", "f32")],
+                    g,
+                ));
+            });
+            assert_eq!(f32_column(&out.unwrap(), Domain::Point, "w"), [0.0; 3]);
+            assert!(logged.contains(name), "{name}: {logged}");
+        }
+    }
+
+    #[test]
+    fn promote_group_aggregates_only_flagged_source_elements() {
+        let mut g = grouped(vec![true, true, false, false]);
+        g.points_mut()
+            .insert("v", AttributeArray::F32(vec![1.0, 2.0, 30.0, 40.0]))
+            .unwrap();
+        let out = run_with(
+            "attribute.promote",
+            &[("name", "v"), ("group", "pick")],
+            g.clone(),
+        );
+        assert_eq!(f32_column(&out, Domain::Detail, "v"), [1.5]);
+
+        // No flagged element: the target's existing value, else the zero.
+        let mut none = g.clone();
+        none.points_mut()
+            .insert("pick", AttributeArray::Bool(vec![false; 4]))
+            .unwrap();
+        let fresh = run_with(
+            "attribute.promote",
+            &[("name", "v"), ("group", "pick")],
+            none.clone(),
+        );
+        assert_eq!(f32_column(&fresh, Domain::Detail, "v"), [0.0]);
+        none.detail_mut()
+            .insert("v", AttributeArray::F32(vec![7.0]))
+            .unwrap();
+        let kept = run_with(
+            "attribute.promote",
+            &[("name", "v"), ("group", "pick")],
+            none,
+        );
+        assert_eq!(f32_column(&kept, Domain::Detail, "v"), [7.0]);
+    }
+
+    #[test]
+    fn promote_unusable_group_aggregates_every_element_and_warns() {
+        for name in ["typo", "plain"] {
+            let mut out = None;
+            let logged = warnings_from(|| {
+                let mut g = grouped(vec![true, true, false, false]);
+                g.points_mut()
+                    .insert("v", AttributeArray::F32(vec![1.0, 2.0, 30.0, 40.0]))
+                    .unwrap();
+                out = Some(run_with(
+                    "attribute.promote",
+                    &[("name", "v"), ("group", name)],
+                    g,
+                ));
+            });
+            assert_eq!(f32_column(&out.unwrap(), Domain::Detail, "v"), [18.25]);
+            assert!(logged.contains(name), "{name}: {logged}");
+        }
     }
 }

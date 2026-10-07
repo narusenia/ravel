@@ -223,6 +223,25 @@ pub fn promote_attribute(
     name: &str,
     mode: AggregateMode,
 ) -> Result<Geometry, GeometryOpError> {
+    promote_attribute_in_group(geometry, source, target, name, mode, "")
+}
+
+/// [`promote_attribute`] aggregating only the `source` elements `group` flags
+/// (element-scope convention, REQ-CORE-013; the same reading as Houdini's
+/// attribpromote group).
+///
+/// `group` is a `Bool` column of the **source** domain. It only narrows an
+/// aggregation, so a same-domain copy and a Detail source ignore it. When no
+/// flagged element contributes, the target column keeps its current value if
+/// it exists with the promoted type, and otherwise takes the type's zero.
+pub fn promote_attribute_in_group(
+    geometry: &Geometry,
+    source: Domain,
+    target: Domain,
+    name: &str,
+    mode: AggregateMode,
+    group: &str,
+) -> Result<Geometry, GeometryOpError> {
     let source_column = geometry
         .attribute_set(source)
         .get(name)
@@ -236,7 +255,27 @@ pub fn promote_attribute(
     } else if source == Domain::Detail {
         repeat_first(source_column, count)?
     } else {
-        reduce_and_repeat(source_column, count, mode)?
+        let selection = super::field::group_selection(
+            geometry.attribute_set(source),
+            group,
+            domain_count(geometry, source),
+        );
+        let chosen = selection.map(|flags| {
+            let picked = (0..flags.len()).filter(|index| flags[*index]);
+            select_values(source_column, picked)
+        });
+        match chosen {
+            Some(picked) if picked.is_empty() => match geometry.attribute_set(target).get(name) {
+                Some(existing)
+                    if existing.attr_type() == picked.attr_type() && existing.len() == count =>
+                {
+                    existing.as_ref().clone()
+                }
+                _ => broadcast_value(&AttributeValue::zero(picked.attr_type()), count),
+            },
+            Some(picked) => reduce_and_repeat(&picked, count, mode)?,
+            None => reduce_and_repeat(source_column, count, mode)?,
+        }
     };
     let mut result = geometry.clone();
     result.attribute_set_mut(target).insert(name, column)?;

@@ -1012,6 +1012,11 @@ rotation = "オイラー角（度）。2D の回転は Z 軸まわり。"
 scale = "軸ごとの拡大率。"
 use_centroid = "ピボットではなくジオメトリの重心を中心に回転・拡大縮小する。"
 pivot = "use_centroid がオフのときの変換原点。"
+group = "動かすポイント（インスタンスは独立に同名列）を絞る bool アトリビュート名（空で全要素）。重心は対象要素のみで求める。"
+[node."geometry.transform".group]
+placement = "配置"
+pivot = "ピボット"
+scope = "適用範囲"
 
 [node."geometry.merge"]
 label = "ジオメトリマージ"
@@ -1702,9 +1707,11 @@ value = "float / ベクトル / カラー型の値。"
 int_value = "i32 型の値。"
 bool_value = "bool 型の値。"
 string_value = "string 型の値。"
+group = "書き込む要素を絞る、ドメイン上の bool アトリビュート名（空で全要素）。対象外の要素は元の値を保ち、新規列では型の 0 になる。"
 [node."attribute.set".group]
 target = "対象"
 value = "値"
+scope = "適用範囲"
 
 [node."style.fill"]
 label = "スタイル塗り"
@@ -1753,6 +1760,7 @@ source_domain = "読み取るドメイン。"
 target_domain = "集約結果を書き込むドメイン。"
 name = "アトリビュート名。"
 aggregate = "要素の集約方法: average / max / first。"
+group = "集約に参加する要素を絞る、ソースドメイン上の bool アトリビュート名（空で全要素）。該当要素が無いときターゲットは既存値か型の 0 のまま。"
 
 [node."attribute.transfer"]
 label = "アトリビュート転送"

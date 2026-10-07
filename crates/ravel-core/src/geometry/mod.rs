@@ -7,6 +7,7 @@ pub mod absent;
 mod attribute;
 mod container;
 pub mod deform;
+pub mod distribute;
 mod field;
 pub mod index_group;
 pub mod names;

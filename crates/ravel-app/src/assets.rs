@@ -205,6 +205,8 @@ pub enum RavelIcon {
     NodeGeometryConnect,
     /// Node header/menu: `geometry.sort`.
     NodeGeometrySort,
+    /// Node header/menu: `geometry.group_index`.
+    NodeGeometryGroupIndex,
     NodeGeometryFromImage,
     /// Node header/menu: `scene.add`.
     NodeSceneAdd,
@@ -490,6 +492,7 @@ impl RavelIcon {
             "geometry.merge" => Self::NodeGeometryMerge,
             "geometry.connect" => Self::NodeGeometryConnect,
             "geometry.sort" => Self::NodeGeometrySort,
+            "geometry.group_index" => Self::NodeGeometryGroupIndex,
             "geometry.from_image" => Self::NodeGeometryFromImage,
             "scene.add" => Self::NodeSceneAdd,
             "scene.merge" => Self::NodeSceneMerge,
@@ -673,6 +676,7 @@ impl RavelIcon {
             Self::NodeGeometryMerge => "icons/combine.svg",
             Self::NodeGeometryConnect => "icons/network.svg",
             Self::NodeGeometrySort => "icons/arrow-down-up.svg",
+            Self::NodeGeometryGroupIndex => "icons/hash.svg",
             Self::NodeGeometryFromImage => "icons/image.svg",
             Self::NodeSceneAdd => "icons/box.svg",
             Self::NodeSceneMerge => "icons/group.svg",

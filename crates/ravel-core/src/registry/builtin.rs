@@ -175,6 +175,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(geometry_merge());
     reg.register(geometry_connect());
     reg.register(geometry_sort());
+    reg.register(geometry_group_index());
     reg.register(geometry_from_image());
     reg.register(scene_add());
     reg.register(scene_merge());
@@ -1704,6 +1705,28 @@ fn geometry_connect() -> NodeTemplate {
             key: "closed".into(),
             value: ParameterValue::Bool(false),
         })
+}
+
+/// `geometry.group_index`: write a `Bool` group from an index range.
+///
+/// `range` takes `"3"`, `"3-7"` (inclusive), `"3,5,9"` and a stride
+/// `"0-20:2"`; what it cannot select is ignored with a warning.
+fn geometry_group_index() -> NodeTemplate {
+    NodeTemplate::new(
+        "geometry.group_index",
+        "Group by Index",
+        NodeCategory::Geometry,
+    )
+    .with_input(geometry_input("geometry"))
+    .with_output(geometry_output())
+    .with_param(string_parameter("range", "0"))
+    .with_param(string_parameter("domain", "point"))
+    .with_param_options("domain", ATTRIBUTE_DOMAINS)
+    .with_param(string_parameter("name", "group"))
+    .with_param(Parameter {
+        key: "invert".into(),
+        value: ParameterValue::Bool(false),
+    })
 }
 
 /// `geometry.sort`: reorder the elements of one domain and renumber `index`.
@@ -3236,14 +3259,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 118);
+        assert_eq!(reg.all_templates().count(), 119);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 28);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 29);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
@@ -4276,6 +4299,7 @@ mod tests {
             "attribute.transfer",
             "field.apply",
             "geometry.connect",
+            "geometry.group_index",
             "geometry.sort",
             "geometry.transform",
             "style.dash",

@@ -1044,6 +1044,16 @@ center = "radial モードが距離を測る中心。"
 seed = "random モードのシード。同じシードなら同じ順序になる。"
 attribute = "attribute モードが読むアトリビュート名。ベクトルや色は第 1 成分で並べる。"
 
+[node."geometry.group_index"]
+label = "インデックスでグループ化"
+description = "インデックスで要素を選び、Bool 型のグループアトリビュートを書く。group パラメータを持つノードにつなぐ。"
+
+[node."geometry.group_index".params]
+range = "選ぶインデックス。3、3-7（両端を含む）、3,5,9、0-20:2 のようなストライド。末尾を超えた指定は警告して無視する。"
+domain = "インデックスを数える要素。"
+name = "書き込む Bool アトリビュートの名前。"
+invert = "範囲で指定した要素以外を選ぶ。"
+
 [node."geometry.from_image"]
 label = "画像をジオメトリへ"
 description = "画像を 1 個のインスタンスとして包み、ジオメトリノードで複製・配置できるようにする。長方形はソースのピクセル寸法で原点中心。コピーを拡大するとボケる。"

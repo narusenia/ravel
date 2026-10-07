@@ -1056,6 +1056,16 @@ center = "Center the radial mode measures the distance from."
 seed = "Seed of the random mode. The same seed gives the same order."
 attribute = "Name of the attribute the attribute mode sorts by. A vector or color sorts by its first component."
 
+[node."geometry.group_index"]
+label = "Group by Index"
+description = "Writes a boolean group attribute that flags elements by index. Feed it to any node with a group parameter."
+
+[node."geometry.group_index".params]
+range = "Indices to flag: 3, 3-7 (inclusive), 3,5,9, or a stride such as 0-20:2. Indices past the end are ignored with a warning."
+domain = "Which elements the indices count."
+name = "Name of the boolean attribute that is written."
+invert = "Flag every element except the ones the range names."
+
 [node."geometry.from_image"]
 label = "Image to Geometry"
 description = "Wraps an image as one instance that stamps it, so geometry nodes can repeat and place it. The rectangle is the source's pixel size, centred on the origin; scaling a copy up makes it blurry."

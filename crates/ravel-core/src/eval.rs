@@ -331,6 +331,15 @@ impl EvalContext {
         }
     }
 
+    /// This context moved to `frame`, with `time` re-derived from `fps`.
+    pub fn at_frame(&self, frame: u64) -> Self {
+        Self {
+            frame,
+            time: frame as f64 / self.fps.as_f64(),
+            ..*self
+        }
+    }
+
     /// Use `comp_resolution` as the coordinate basis for this evaluation.
     pub fn with_comp_resolution(mut self, comp_resolution: (u32, u32)) -> Self {
         self.comp_resolution = comp_resolution;
@@ -438,6 +447,10 @@ struct PathId(u32);
 /// The root (empty) path, interned by construction.
 const ROOT_PATH: PathId = PathId(0);
 
+/// How many `TimeShift` scopes one owner node keeps cached at once; the rest
+/// are evicted least recently entered first (see [`PathInterner`]).
+const MAX_TIME_SHIFT_SCOPES_PER_OWNER: usize = 64;
+
 /// `Vec<PathSegment>` ⇆ [`PathId`], one table per evaluator.
 ///
 /// Node visits used to key the cache, the dirty set, the in-flight run map
@@ -448,18 +461,30 @@ const ROOT_PATH: PathId = PathId(0);
 ///
 /// # Growth
 ///
-/// Ids are never reused: a path stays interned even after its scope's caches
-/// are dropped, because a live `NodeKey` elsewhere may still name it. The
-/// table is therefore bounded by the number of *distinct* scopes an evaluator
-/// has entered, which the document's structure bounds in turn — layers and
-/// subnets are finite, and `Iteration` is bounded by the iteration count.
-/// [`Evaluator::invalidate_all`] resets it. The one segment that could grow
-/// without bound is `PathSegment::TimeShift`, which carries a frame number;
-/// it is reserved and unused today, and wiring it up means giving this table
-/// an eviction story.
+/// Ids are not reused while anything may still name them: a path stays
+/// interned even after its scope's caches are dropped, because a live
+/// `NodeKey` elsewhere may still name it. The table is therefore bounded by
+/// the number of *distinct* scopes an evaluator has entered, which the
+/// document's structure bounds in turn — layers and subnets are finite, and
+/// `Iteration` is bounded by the iteration count.
+/// [`Evaluator::invalidate_all`] resets it.
+///
+/// `PathSegment::TimeShift` carries a frame number, so scrubbing would grow
+/// the table without bound. The evaluator therefore keeps at most
+/// [`MAX_TIME_SHIFT_SCOPES_PER_OWNER`] shift scopes per owner node
+/// (least recently entered goes first). An evicted scope is *retired*, not
+/// freed on the spot: the pull that evicted it may still hold `NodeKey`s
+/// naming its ids. At the start of the next top-level pull nothing is in
+/// flight, so [`Evaluator::release_retired_scopes`] drops the scope's cache
+/// entries and state and hands its ids back through [`PathInterner::release`]
+/// for reuse. Live entries and table size are thus bounded by
+/// `owners × cap` (plus what one pull enters), whatever frames are scrubbed.
 struct PathInterner {
-    /// [`PathId`] → the segments it names, indexed by `PathId.0`.
-    paths: Vec<Vec<PathSegment>>,
+    /// [`PathId`] → the segments it names, indexed by `PathId.0`. `None` is
+    /// a released slot waiting in `free`.
+    paths: Vec<Option<Vec<PathSegment>>>,
+    /// Released ids, reused by [`Self::intern`] before the table grows.
+    free: Vec<PathId>,
     /// The reverse direction, so re-entering a scope reuses its id.
     ids: HashMap<Vec<PathSegment>, PathId>,
 }
@@ -470,7 +495,8 @@ impl Default for PathInterner {
         let mut ids = HashMap::new();
         ids.insert(Vec::new(), ROOT_PATH);
         Self {
-            paths: vec![Vec::new()],
+            paths: vec![Some(Vec::new())],
+            free: Vec::new(),
             ids,
         }
     }
@@ -485,18 +511,36 @@ impl PathInterner {
         if let Some(id) = self.ids.get(path) {
             return *id;
         }
-        let id = PathId(u32::try_from(self.paths.len()).expect("path count fits in u32"));
-        self.paths.push(path.to_vec());
+        let id = if let Some(id) = self.free.pop() {
+            self.paths[id.0 as usize] = Some(path.to_vec());
+            id
+        } else {
+            self.paths.push(Some(path.to_vec()));
+            PathId(u32::try_from(self.paths.len() - 1).expect("path count fits in u32"))
+        };
         self.ids.insert(path.to_vec(), id);
         id
+    }
+
+    /// Give `released` back for reuse. The caller must have dropped every
+    /// key and record that names them, and no pull may be in flight.
+    fn release(&mut self, released: &HashSet<PathId>) {
+        for id in released {
+            if let Some(path) = self.paths[id.0 as usize].take() {
+                self.ids.remove(&path);
+                self.free.push(*id);
+            }
+        }
     }
 
     /// The segments `id` names.
     ///
     /// Panics on an id this interner did not issue, which is unreachable:
-    /// ids never leave the evaluator, and the table only grows.
+    /// ids never leave the evaluator, and a released id is no longer named.
     fn path(&self, id: PathId) -> &[PathSegment] {
-        &self.paths[id.0 as usize]
+        self.paths[id.0 as usize]
+            .as_deref()
+            .expect("path id is live")
     }
 
     /// The id `path` already has, if it has one. Never assigns.
@@ -513,7 +557,7 @@ impl PathInterner {
         self.paths
             .iter()
             .enumerate()
-            .map(|(index, path)| (PathId(index as u32), path.as_slice()))
+            .filter_map(|(index, path)| path.as_deref().map(|path| (PathId(index as u32), path)))
     }
 
     /// The ids of every interned path that starts with `prefix`.
@@ -524,6 +568,17 @@ impl PathInterner {
     fn ids_under(&self, prefix: &[PathSegment]) -> HashSet<PathId> {
         self.iter()
             .filter(|(_, path)| path.starts_with(prefix))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// [`Self::ids_under`] for several prefixes in one pass over the table.
+    fn ids_under_any(&self, prefixes: &[&[PathSegment]]) -> HashSet<PathId> {
+        if prefixes.is_empty() {
+            return HashSet::new();
+        }
+        self.iter()
+            .filter(|(_, path)| prefixes.iter().any(|prefix| path.starts_with(prefix)))
             .map(|(id, _)| id)
             .collect()
     }
@@ -875,6 +930,33 @@ pub trait EvalScope {
         ctx: &EvalContext,
         bindings: Bindings,
     ) -> Result<Arc<dyn NodeData>, EvalError>;
+
+    /// Evaluate `upstream` of `graph` at `frame` instead of `ctx.frame`, as
+    /// the scope `TimeShift(shift_node, frame)`.
+    ///
+    /// `shift_node` is the calling node. The shifted pull keeps its own cache
+    /// entries, so the same upstream node can hold values for `ctx.frame` and
+    /// `frame` at once, and dirtying `shift_node` drops every shifted scope.
+    /// The enclosing scope's bindings carry over. This is a time remap only:
+    /// not motion blur, and not a layer shell's `time_remap`.
+    fn evaluate_time_shifted(
+        &mut self,
+        shift_node: NodeId,
+        frame: u64,
+        graph: &Graph,
+        upstream: NodeId,
+        ctx: &EvalContext,
+    ) -> Result<Arc<dyn NodeData>, EvalError> {
+        let shifted = ctx.at_frame(frame);
+        let bindings = self.bindings().to_vec();
+        self.evaluate_sub(
+            PathSegment::TimeShift(shift_node, frame),
+            graph,
+            upstream,
+            &shifted,
+            bindings,
+        )
+    }
 
     /// Bindings offered by the caller of the innermost active scope.
     fn bindings(&self) -> &[(String, Arc<dyn NodeData>)];
@@ -1808,6 +1890,12 @@ pub struct Evaluator {
     /// invalidation uses this to drop the owner's cached value too, so a
     /// network edit propagates to the shell chain automatically.
     scope_owners: HashMap<PathId, NodeKey>,
+    /// Live `TimeShift` scopes per owner node, least recently entered first
+    /// (see [`MAX_TIME_SHIFT_SCOPES_PER_OWNER`]).
+    time_shift_scopes: HashMap<NodeId, Vec<PathId>>,
+    /// Evicted shift scopes whose ids are released at the next top-level
+    /// pull (see [`PathInterner`]).
+    retired_scopes: Vec<PathId>,
     /// Bindings last used per nested scope. A scope re-entered with
     /// different bindings (e.g. an adjustment layer's changing lower stack)
     /// has the cached values those bindings reach dropped before evaluation.
@@ -2360,6 +2448,7 @@ impl Evaluator {
             };
             if self.store.mark_dirty(key) {
                 stack.extend_from_slice(index.out_nodes(current));
+                self.drop_time_shift_scopes(path_id, current);
             }
         }
         self.drop_scope_owner_caches(path_id);
@@ -2375,6 +2464,8 @@ impl Evaluator {
         // `scope_reach`) alive behind an otherwise empty cache
         // (MED-CORE-07).
         self.scope_owners.clear();
+        self.time_shift_scopes.clear();
+        self.retired_scopes.clear();
         self.scope_bindings.clear();
         self.scope_reach.clear();
         self.graph_index.clear();
@@ -2426,6 +2517,72 @@ impl Evaluator {
         self.scope_reach.retain(|scope, _| !under.contains(scope));
         // Holds a `Graph` clone too, for the same reason.
         self.graph_index.retain(|scope, _| !under.contains(scope));
+    }
+
+    /// Drop the cached values under every shift scope that `node` opened
+    /// from the scope `parent`: the shifted pulls read the same graph, so
+    /// they go stale together with the node that spawned them.
+    fn drop_time_shift_scopes(&mut self, parent: PathId, node: NodeId) {
+        let Some(scopes) = self.time_shift_scopes.get(&node) else {
+            return;
+        };
+        let parent_path = self.paths.path(parent);
+        let owned: Vec<&[PathSegment]> = scopes
+            .iter()
+            .map(|id| self.paths.path(*id))
+            .filter(|path| path.len() == parent_path.len() + 1 && path.starts_with(parent_path))
+            .collect();
+        let under = self.paths.ids_under_any(&owned);
+        if under.is_empty() {
+            return;
+        }
+        self.store.retain(|k| !under.contains(&k.path));
+        self.prune_scope_state(&under);
+    }
+
+    /// Record that the shift scope `scope` was entered, retiring the owner's
+    /// least recently entered scopes beyond the cap. A scope on the active
+    /// path is never retired.
+    fn touch_time_shift_scope(&mut self, owner: NodeId, scope: PathId) {
+        let live = self.time_shift_scopes.entry(owner).or_default();
+        live.retain(|id| *id != scope);
+        live.push(scope);
+        while live.len() > MAX_TIME_SHIFT_SCOPES_PER_OWNER {
+            let paths = &self.paths;
+            let active = &self.path;
+            let Some(index) = live
+                .iter()
+                .position(|id| !active.starts_with(paths.path(*id)))
+            else {
+                break;
+            };
+            self.retired_scopes.push(live.remove(index));
+        }
+    }
+
+    /// Drop the cache entries and state of retired shift scopes and release
+    /// their ids. Runs only at the start of a top-level pull, when no
+    /// `NodeKey` held by a pull can name them.
+    fn release_retired_scopes(&mut self) {
+        if self.retired_scopes.is_empty() {
+            return;
+        }
+        let live: HashSet<PathId> = self.time_shift_scopes.values().flatten().copied().collect();
+        let retired = std::mem::take(&mut self.retired_scopes);
+        // Entered again since it was retired: it is live, keep it.
+        let dead: Vec<&[PathSegment]> = retired
+            .iter()
+            .filter(|id| !live.contains(id))
+            .map(|id| self.paths.path(*id))
+            .collect();
+        let under = self.paths.ids_under_any(&dead);
+        self.store.retain(|k| !under.contains(&k.path));
+        self.prune_scope_state(&under);
+        // A nested scope of another owner can sit under a retired one.
+        for scopes in self.time_shift_scopes.values_mut() {
+            scopes.retain(|id| !under.contains(id));
+        }
+        self.paths.release(&under);
     }
 
     /// Drop cached/dirty entries for the owners of `scope` and of every
@@ -2580,6 +2737,7 @@ impl Evaluator {
         // `path_id` must name `path` before anything builds a cache key:
         // the two are one value in two forms, and a stale id here would give
         // this pull another scope's cached results.
+        self.release_retired_scopes();
         self.path = path.to_vec();
         self.path_id = self.paths.intern(path);
         self.active_scopes = path.to_vec();
@@ -3344,6 +3502,9 @@ impl EvalScope for Evaluator {
         // a scope costs one hash and leaves the per-node keys `Copy`.
         let outer_path_id = self.path_id;
         self.path_id = self.paths.intern(&self.path);
+        if let PathSegment::TimeShift(owner, _) = segment {
+            self.touch_time_shift_scope(owner, self.path_id);
+        }
         let depth = self
             .processing
             .last()
@@ -7142,6 +7303,255 @@ mod tests {
         assert!(ev.cache_contains(&iteration_one, node));
         assert!(!ev.cache_contains(&shift_ten, node));
         assert!(ev.cache_contains(&shift_twenty, node));
+    }
+
+    // ---- time-shift evaluation (evaluation-scope unit 2) -------------------
+
+    /// Time-shifts its connected input: pulls `upstream` of `graph` at a
+    /// fixed `target` frame through [`EvalScope::evaluate_time_shifted`].
+    struct TestTimeShift {
+        graph: Graph,
+        upstream: NodeId,
+        target: u64,
+    }
+
+    impl NodeProcessor for TestTimeShift {
+        fn process(
+            &self,
+            node: &Node,
+            ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            Ok(scope.evaluate_time_shifted(
+                node.id,
+                self.target,
+                &self.graph,
+                self.upstream,
+                ctx,
+            )?)
+        }
+    }
+
+    /// Shifts to `ctx.frame + 1000`, so every pull opens a new scope.
+    struct Follow {
+        graph: Graph,
+    }
+    impl NodeProcessor for Follow {
+        fn process(
+            &self,
+            node: &Node,
+            ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            Ok(scope.evaluate_time_shifted(
+                node.id,
+                ctx.frame + 1000,
+                &self.graph,
+                upstream(),
+                ctx,
+            )?)
+        }
+        fn is_time_dependent(&self) -> bool {
+            true
+        }
+    }
+
+    fn shift() -> NodeId {
+        NodeId::new(1)
+    }
+    fn upstream() -> NodeId {
+        NodeId::new(7)
+    }
+
+    /// `upstream()` (a frame source) wired into `shift()`, which pulls `upstream()`
+    /// again at `target`. Returns the evaluator, the graph and the source's
+    /// call counter.
+    fn time_shift_setup(target: u64) -> (Evaluator, Graph, Arc<AtomicUsize>) {
+        let graph = Graph::new()
+            .add_node(scalar_node(shift().raw()))
+            .unwrap()
+            .add_node(scalar_node(upstream().raw()))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                upstream(),
+                OutputPortIndex(0),
+                shift(),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            upstream(),
+            Arc::new(FrameSource {
+                calls: calls.clone(),
+            }),
+        );
+        ev.register(
+            shift(),
+            Arc::new(TestTimeShift {
+                graph: graph.clone(),
+                upstream: upstream(),
+                target,
+            }),
+        );
+        (ev, graph, calls)
+    }
+
+    fn scalar_of(value: &Arc<dyn NodeData>) -> f32 {
+        value.downcast_ref::<Scalar>().unwrap().0
+    }
+
+    fn shift_scope(frame: u64) -> Vec<PathSegment> {
+        vec![PathSegment::TimeShift(shift(), frame)]
+    }
+
+    #[test]
+    fn one_upstream_node_is_cached_at_both_f_and_shifted_f() {
+        let (mut ev, graph, calls) = time_shift_setup(9);
+
+        // The shift node reads `upstream()` at 3 (its input) and at 9.
+        let out = ev.evaluate(&graph, shift(), &ctx_at(3)).unwrap();
+        assert_eq!(scalar_of(&out), 9.0, "shifted pull did not see frame 9");
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+
+        assert!(ev.cache_contains(&[], upstream()), "frame f entry missing");
+        assert!(
+            ev.cache_contains(&shift_scope(9), upstream()),
+            "frame f' entry missing"
+        );
+        assert_eq!(
+            scalar_of(&ev.evaluate(&graph, upstream(), &ctx_at(3)).unwrap()),
+            3.0
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "f entry was recomputed");
+    }
+
+    #[test]
+    fn pulling_f_does_not_break_the_shifted_entry() {
+        let (mut ev, graph, calls) = time_shift_setup(9);
+        ev.evaluate(&graph, shift(), &ctx_at(3)).unwrap();
+
+        // Move the unshifted side around; the shifted entry must survive.
+        for frame in [4, 5, 3] {
+            ev.evaluate(&graph, upstream(), &ctx_at(frame)).unwrap();
+        }
+        assert!(ev.cache_contains(&shift_scope(9), upstream()));
+
+        let before = calls.load(Ordering::Relaxed);
+        let value = ev
+            .evaluate_at(&shift_scope(9), &graph, upstream(), &ctx_at(9))
+            .unwrap();
+        assert_eq!(scalar_of(&value), 9.0);
+        assert_eq!(calls.load(Ordering::Relaxed), before, "f' entry recomputed");
+        assert!(ev.store.index_is_consistent());
+    }
+
+    #[test]
+    fn dirtying_the_shift_node_drops_all_its_scopes() {
+        let (mut ev, graph, _) = time_shift_setup(0);
+        ev.register(
+            shift(),
+            Arc::new(Follow {
+                graph: graph.clone(),
+            }),
+        );
+        // Two taps under one owner.
+        for frame in [3, 4] {
+            ev.evaluate(&graph, shift(), &ctx_at(frame)).unwrap();
+        }
+        assert!(ev.cache_contains(&shift_scope(1003), upstream()));
+        assert!(ev.cache_contains(&shift_scope(1004), upstream()));
+
+        ev.mark_dirty(&graph, shift());
+
+        assert!(!ev.cache_contains(&shift_scope(1003), upstream()));
+        assert!(!ev.cache_contains(&shift_scope(1004), upstream()));
+        assert!(ev.store.index_is_consistent());
+    }
+
+    #[test]
+    fn dirtying_the_upstream_drops_the_shifted_copies_downstream_of_it() {
+        let (mut ev, graph, _) = time_shift_setup(9);
+        ev.evaluate(&graph, shift(), &ctx_at(3)).unwrap();
+        assert!(ev.cache_contains(&shift_scope(9), upstream()));
+
+        // `shift()` is downstream of `upstream()`, so an edit there reaches it.
+        ev.mark_dirty(&graph, upstream());
+
+        assert!(!ev.cache_contains(&shift_scope(9), upstream()));
+    }
+
+    #[test]
+    fn dirtying_the_owner_in_one_parent_keeps_the_other_parents_shifted_copies() {
+        let (mut ev, graph, _) = time_shift_setup(0);
+        ev.register(
+            shift(),
+            Arc::new(Follow {
+                graph: graph.clone(),
+            }),
+        );
+        let subnet = PathSegment::Subnet(NodeId::new(50));
+
+        // The same owner shifts under the root and under a subnet scope.
+        ev.evaluate(&graph, shift(), &ctx_at(3)).unwrap();
+        ev.evaluate_at(&[subnet], &graph, shift(), &ctx_at(3))
+            .unwrap();
+        let in_root = shift_scope(1003);
+        let in_subnet = vec![subnet, PathSegment::TimeShift(shift(), 1003)];
+        assert!(ev.cache_contains(&in_root, upstream()));
+        assert!(ev.cache_contains(&in_subnet, upstream()));
+
+        ev.mark_dirty(&graph, shift());
+
+        assert!(!ev.cache_contains(&in_root, upstream()));
+        assert!(
+            ev.cache_contains(&in_subnet, upstream()),
+            "dirtying in the root dropped another parent's shifted copy"
+        );
+    }
+
+    #[test]
+    fn scrubbing_shifted_frames_keeps_the_cache_and_path_table_bounded() {
+        let (mut ev, graph, calls) = time_shift_setup(0);
+        ev.register(
+            shift(),
+            Arc::new(Follow {
+                graph: graph.clone(),
+            }),
+        );
+
+        let scrubbed = (MAX_TIME_SHIFT_SCOPES_PER_OWNER * 20) as u64;
+        for frame in 0..scrubbed {
+            let out = ev.evaluate(&graph, shift(), &ctx_at(frame)).unwrap();
+            assert_eq!(scalar_of(&out), (frame + 1000) as f32);
+        }
+        assert_eq!(calls.load(Ordering::Relaxed) as u64, scrubbed * 2);
+
+        // Root + the `shift()` scopes of one owner (plus one pull's slack).
+        let bound = 2 + MAX_TIME_SHIFT_SCOPES_PER_OWNER + 1;
+        assert!(
+            ev.paths.paths.len() <= bound,
+            "path table grew to {}",
+            ev.paths.paths.len()
+        );
+        assert!(ev.paths.ids.len() <= bound);
+        assert!(
+            ev.store.len() <= 2 * bound,
+            "{} live entries",
+            ev.store.len()
+        );
+        assert!(ev.store.index_is_consistent());
+
+        // The most recent scope is still a cache hit; an evicted one is gone.
+        let last = scrubbed - 1;
+        assert!(ev.cache_contains(&shift_scope(last + 1000), upstream()));
+        assert!(!ev.cache_contains(&shift_scope(1000), upstream()));
     }
 
     // ---- regression: hidden/stale dependency fixes -------------------------

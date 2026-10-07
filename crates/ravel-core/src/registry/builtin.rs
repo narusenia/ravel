@@ -224,6 +224,9 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(comp_drop_shadow());
     reg.register(comp_stroke());
     reg.register(comp_emboss());
+    reg.register(comp_time_remap());
+    reg.register(comp_freeze_frame());
+    reg.register(comp_frame_blend());
     reg.register(color_ramp());
     reg.register(rasterize());
     reg.register(shape_rect());
@@ -2444,6 +2447,41 @@ fn comp_ripple() -> NodeTemplate {
         .with_param_range("center", -10.0..=10.0, 0.0..=1.0)
 }
 
+/// The `interpolation` values of `comp.time_remap`, in dropdown order: how a
+/// fractional source frame is read.
+pub const COMP_TIME_REMAP_INTERPOLATIONS: [&str; 2] = ["nearest", "blend"];
+
+/// `comp.time_remap`: the output frame `x` shows the input's frame `curve(x)`.
+/// The default curve is empty, which is the identity for every frame (a
+/// two-point 0..1 curve would clamp past frame 1).
+fn comp_time_remap() -> NodeTemplate {
+    NodeTemplate::new("comp.time_remap", "Time Remap", NodeCategory::Time)
+        .with_input(frame_buffer_input("image"))
+        .with_output(frame_buffer_output())
+        .with_param(curve_parameter("curve", CurveParam::from_points([])))
+        .with_param(string_parameter("interpolation", "nearest"))
+        .with_param_options("interpolation", COMP_TIME_REMAP_INTERPOLATIONS)
+}
+
+/// `comp.freeze_frame`: shows one frame of the input for every frame.
+fn comp_freeze_frame() -> NodeTemplate {
+    NodeTemplate::new("comp.freeze_frame", "Freeze Frame", NodeCategory::Time)
+        .with_input(frame_buffer_input("image"))
+        .with_output(frame_buffer_output())
+        .with_param(float_parameter("frame", 0.0))
+        .with_param_range("frame", 0.0..=100_000.0, 0.0..=300.0)
+}
+
+/// `comp.frame_blend`: mixes the input's frames `frame + floor(offset)` and the
+/// next one by the fractional part of `offset` (0.5 is their average).
+fn comp_frame_blend() -> NodeTemplate {
+    NodeTemplate::new("comp.frame_blend", "Frame Blend", NodeCategory::Time)
+        .with_input(frame_buffer_input("image"))
+        .with_output(frame_buffer_output())
+        .with_param(float_parameter("offset", 0.5))
+        .with_param_range("offset", -1000.0..=1000.0, -2.0..=2.0)
+}
+
 /// The `mode` values of `comp.mirror`, in dropdown order.
 pub const COMP_MIRROR_MODES: [&str; 3] = ["horizontal", "vertical", "both"];
 
@@ -3473,7 +3511,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 129);
+        assert_eq!(reg.all_templates().count(), 132);
     }
 
     #[test]
@@ -3485,7 +3523,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 3);
-        assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
+        assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 28);
     }
 

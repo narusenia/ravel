@@ -1388,6 +1388,25 @@ tolerance = "How far from the key color a pixel is still removed completely."
 softness = "Width of the soft edge beyond the tolerance, where the alpha ramps back to opaque. 0 is a hard edge."
 invert = "Keep only the pixels near the key color and remove the rest."
 
+[node."comp.time_remap"]
+label = "Time Remap"
+description = "Shows the input at a different time. The curve maps the frame being rendered (horizontal) to the input frame to show (vertical); the default empty curve changes nothing. The curve holds its end values outside its first and last points."
+[node."comp.time_remap".params]
+curve = "Rendered frame in, input frame out. A straight rising line at slope 1 changes nothing; a falling line plays backwards."
+interpolation = "nearest picks the closest input frame; blend mixes the two input frames around a fractional position."
+
+[node."comp.freeze_frame"]
+label = "Freeze Frame"
+description = "Shows one frame of the input on every frame."
+[node."comp.freeze_frame".params]
+frame = "The input frame to hold (rounded to a whole number)."
+
+[node."comp.frame_blend"]
+label = "Frame Blend"
+description = "Mixes the input with a later (or earlier) frame to smooth motion. An offset of 0.5 averages the current frame and the next one."
+[node."comp.frame_blend".params]
+offset = "Frames ahead of the current one to read. The whole part picks the frame; the fractional part is how much of the following frame is mixed in. 0 changes nothing."
+
 [node."comp.gradient"]
 label = "Gradient"
 description = "Fills the frame with a gradient through any number of color stops. Positions are fractions of the frame, so the picture looks the same at any resolution."

@@ -2441,6 +2441,7 @@ impl Evaluator {
         let path_id = self.paths.intern(path);
         let index = self.graph_index(graph, path_id);
         let mut stack = vec![node];
+        let mut dirtied: HashSet<NodeKey> = HashSet::new();
         while let Some(current) = stack.pop() {
             let key = NodeKey {
                 path: path_id,
@@ -2449,8 +2450,10 @@ impl Evaluator {
             if self.store.mark_dirty(key) {
                 stack.extend_from_slice(index.out_nodes(current));
                 self.drop_time_shift_scopes(path_id, current);
+                dirtied.insert(key);
             }
         }
+        self.drop_iteration_scopes(&dirtied);
         self.drop_scope_owner_caches(path_id);
     }
 
@@ -2536,6 +2539,33 @@ impl Evaluator {
         if under.is_empty() {
             return;
         }
+        self.store.retain(|k| !under.contains(&k.path));
+        self.prune_scope_state(&under);
+    }
+
+    /// Drop the cached values under every `Iteration` scope owned by one of
+    /// the `dirtied` nodes. The body of an iteration reads its input through
+    /// bindings, so an edit upstream leaves iterations the next pull no longer
+    /// enters (fewer pieces) holding stale values until the owner is dirtied
+    /// again; dropping them all here keeps them from outliving their input.
+    fn drop_iteration_scopes(&mut self, dirtied: &HashSet<NodeKey>) {
+        let owned: Vec<PathId> = self
+            .scope_owners
+            .iter()
+            .filter(|(scope, owner)| {
+                dirtied.contains(*owner)
+                    && matches!(
+                        self.paths.path(**scope).last(),
+                        Some(PathSegment::Iteration(..))
+                    )
+            })
+            .map(|(scope, _)| *scope)
+            .collect();
+        if owned.is_empty() {
+            return;
+        }
+        let paths: Vec<&[PathSegment]> = owned.iter().map(|id| self.paths.path(*id)).collect();
+        let under = self.paths.ids_under_any(&paths);
         self.store.retain(|k| !under.contains(&k.path));
         self.prune_scope_state(&under);
     }
@@ -7303,6 +7333,142 @@ mod tests {
         assert!(ev.cache_contains(&iteration_one, node));
         assert!(!ev.cache_contains(&shift_ten, node));
         assert!(ev.cache_contains(&shift_twenty, node));
+    }
+
+    // ---- per-piece iteration scopes (evaluation-scope unit 3) --------------
+
+    /// Pulls `inner_output` of `inner` once per iteration scope, the way an
+    /// iterate node does, and sums the answers.
+    struct Fan {
+        inner: Graph,
+        inner_output: NodeId,
+        count: u32,
+    }
+
+    impl NodeProcessor for Fan {
+        fn process(
+            &self,
+            node: &Node,
+            ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            let mut sum = 0.0;
+            for i in 0..self.count {
+                let value = scope.evaluate_sub(
+                    PathSegment::Iteration(node.id, i),
+                    &self.inner,
+                    self.inner_output,
+                    ctx,
+                    Vec::new(),
+                )?;
+                sum += value.downcast_ref::<Scalar>().unwrap().0;
+            }
+            Ok(Arc::new(Scalar(sum)))
+        }
+    }
+
+    /// An edit upstream of an iteration node drops the cache under **every**
+    /// one of its iteration scopes. The inner node is a constant that reads no
+    /// binding, so nothing but the owner's dirtying can be what drops it.
+    #[test]
+    fn dirtying_the_upstream_of_an_iteration_node_drops_every_iteration_scope() {
+        let (upstream, fan, inner_node) = (NodeId::new(1), NodeId::new(2), NodeId::new(7));
+        let graph = Graph::new()
+            .add_node(scalar_node(upstream.raw()))
+            .unwrap()
+            .add_node(scalar_node(fan.raw()))
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                upstream,
+                OutputPortIndex(0),
+                fan,
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let inner = Graph::new()
+            .add_node(scalar_node(inner_node.raw()))
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            upstream,
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            inner_node,
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: calls.clone(),
+            }),
+        );
+        ev.register(
+            fan,
+            Arc::new(Fan {
+                inner,
+                inner_output: inner_node,
+                count: 3,
+            }),
+        );
+        let scope = |i: u32| vec![PathSegment::Iteration(fan, i)];
+
+        ev.evaluate(&graph, fan, &ctx_at(0)).unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+        assert!((0..3).all(|i| ev.cache_contains(&scope(i), inner_node)));
+
+        ev.mark_dirty(&graph, upstream);
+
+        for i in 0..3 {
+            assert!(
+                !ev.cache_contains(&scope(i), inner_node),
+                "iteration {i} survived an upstream edit"
+            );
+        }
+        assert!(ev.store.index_is_consistent());
+        ev.evaluate(&graph, fan, &ctx_at(0)).unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 6, "every iteration reran");
+    }
+
+    /// Dirtying an unrelated node in the same graph leaves the iterations alone.
+    #[test]
+    fn dirtying_an_unrelated_node_keeps_the_iteration_scopes() {
+        let (fan, other, inner_node) = (NodeId::new(2), NodeId::new(3), NodeId::new(7));
+        let graph = Graph::new()
+            .add_node(scalar_node(fan.raw()))
+            .unwrap()
+            .add_node(scalar_node(other.raw()))
+            .unwrap();
+        let inner = Graph::new()
+            .add_node(scalar_node(inner_node.raw()))
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(
+            inner_node,
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            fan,
+            Arc::new(Fan {
+                inner,
+                inner_output: inner_node,
+                count: 2,
+            }),
+        );
+        ev.evaluate(&graph, fan, &ctx_at(0)).unwrap();
+
+        ev.mark_dirty(&graph, other);
+
+        for i in 0..2 {
+            assert!(ev.cache_contains(&[PathSegment::Iteration(fan, i)], inner_node));
+        }
     }
 
     // ---- time-shift evaluation (evaluation-scope unit 2) -------------------

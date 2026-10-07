@@ -299,86 +299,91 @@ impl NodeProcessor for GeometryMergeProcessor {
         _params: &ResolvedParams,
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
-        let slot = |index: usize| -> Option<&Geometry> {
-            inputs
-                .get(index)
-                .and_then(|input| input.as_ref())
-                .and_then(|input| input.downcast_ref::<Geometry>())
-        };
-        let (a, b) = (slot(0), slot(1));
-        let is_empty = |g: &Geometry| {
-            g.point_count() == 0
+        merge_pair(
+            inputs.first().and_then(Option::as_ref),
+            inputs.get(1).and_then(Option::as_ref),
+        )
+    }
+}
+
+/// The merge `geometry.merge` performs on its two inputs, shared with
+/// `geometry.iterate` so both combine geometries by one rule.
+pub(crate) fn merge_pair(
+    input_a: Option<&Arc<dyn NodeData>>,
+    input_b: Option<&Arc<dyn NodeData>>,
+) -> anyhow::Result<Arc<dyn NodeData>> {
+    let a = input_a.and_then(|input| input.downcast_ref::<Geometry>());
+    let b = input_b.and_then(|input| input.downcast_ref::<Geometry>());
+    let is_empty = |g: &Geometry| {
+        g.point_count() == 0
                 && g.primitive_count() == 0
                 && g.instance_count() == 0
                 // A detail-only side still contributes to the merge.
                 && g.detail().element_count() == 0
-        };
-        match (a, b) {
-            (None, None) => return Ok(Arc::new(Geometry::new())),
-            // One side missing or empty: share the other input wholesale.
-            (Some(_), None) | (Some(_), Some(_)) if b.is_none_or(is_empty) => {
-                return Ok(inputs[0].as_ref().expect("a present").clone());
-            }
-            (None, Some(_)) | (Some(_), Some(_)) if a.is_none_or(is_empty) => {
-                return Ok(inputs[1].as_ref().expect("b present").clone());
-            }
-            _ => {}
+    };
+    match (a, b) {
+        (None, None) => return Ok(Arc::new(Geometry::new())),
+        // One side missing or empty: share the other input wholesale.
+        (Some(_), None) | (Some(_), Some(_)) if b.is_none_or(is_empty) => {
+            return Ok(input_a.expect("a present").clone());
         }
-        let (a, b) = (a.expect("checked"), b.expect("checked"));
-
-        let mut out = Geometry::new();
-        // Fill lengths come from the domain's element count, not the
-        // attribute set's column length — a side may have primitives (or
-        // points/instances) without any attribute columns on that domain.
-        *out.points_mut() = concat_attribute_sets(a, b, Domain::Point)?;
-        *out.primitive_attrs_mut() = concat_attribute_sets(a, b, Domain::Primitive)?;
-        *out.instances_mut() = concat_attribute_sets(a, b, Domain::Instance)?;
-        // Detail is not a concatenable domain: A wins wholesale.
-        *out.detail_mut() = if a.detail().element_count() > 0 {
-            a.detail().clone()
-        } else {
-            b.detail().clone()
-        };
-
-        // Primitives are kind-agnostic here: both variants relocate by the
-        // same two offsets. A's index blob has to land first so its ranges
-        // stay correct unshifted, and B's shifts by however long A's was.
-        let point_offset = a.point_count();
-        let a_indices = out.extend_indices(a.indices());
-        for prim in a.primitives() {
-            out.push_primitive(prim.shifted(0, a_indices));
+        (None, Some(_)) | (Some(_), Some(_)) if a.is_none_or(is_empty) => {
+            return Ok(input_b.expect("b present").clone());
         }
-        let b_indices = out.extend_indices(b.indices());
-        for prim in b.primitives() {
-            out.push_primitive(prim.shifted(point_offset, b_indices));
-        }
-
-        // Sources are moved, never inspected: an image source merges by the
-        // same rule a geometry one does.
-        match (a.sources(), b.sources()) {
-            (sources_a, sources_b)
-                if !sources_a.is_empty()
-                    && !sources_b.is_empty()
-                    && (sources_a.len() != sources_b.len()
-                        || sources_a
-                            .iter()
-                            .zip(sources_b)
-                            .any(|(source_a, source_b)| !source_a.ptr_eq(source_b))) =>
-            {
-                anyhow::bail!(
-                    "geometry.merge: merging two distinct instance sources is unsupported"
-                )
-            }
-            (sources_a, sources_b) => {
-                out.set_sources(if sources_a.is_empty() {
-                    sources_b.to_vec()
-                } else {
-                    sources_a.to_vec()
-                });
-            }
-        }
-        Ok(Arc::new(out))
+        _ => {}
     }
+    let (a, b) = (a.expect("checked"), b.expect("checked"));
+
+    let mut out = Geometry::new();
+    // Fill lengths come from the domain's element count, not the
+    // attribute set's column length — a side may have primitives (or
+    // points/instances) without any attribute columns on that domain.
+    *out.points_mut() = concat_attribute_sets(a, b, Domain::Point)?;
+    *out.primitive_attrs_mut() = concat_attribute_sets(a, b, Domain::Primitive)?;
+    *out.instances_mut() = concat_attribute_sets(a, b, Domain::Instance)?;
+    // Detail is not a concatenable domain: A wins wholesale.
+    *out.detail_mut() = if a.detail().element_count() > 0 {
+        a.detail().clone()
+    } else {
+        b.detail().clone()
+    };
+
+    // Primitives are kind-agnostic here: both variants relocate by the
+    // same two offsets. A's index blob has to land first so its ranges
+    // stay correct unshifted, and B's shifts by however long A's was.
+    let point_offset = a.point_count();
+    let a_indices = out.extend_indices(a.indices());
+    for prim in a.primitives() {
+        out.push_primitive(prim.shifted(0, a_indices));
+    }
+    let b_indices = out.extend_indices(b.indices());
+    for prim in b.primitives() {
+        out.push_primitive(prim.shifted(point_offset, b_indices));
+    }
+
+    // Sources are moved, never inspected: an image source merges by the
+    // same rule a geometry one does.
+    match (a.sources(), b.sources()) {
+        (sources_a, sources_b)
+            if !sources_a.is_empty()
+                && !sources_b.is_empty()
+                && (sources_a.len() != sources_b.len()
+                    || sources_a
+                        .iter()
+                        .zip(sources_b)
+                        .any(|(source_a, source_b)| !source_a.ptr_eq(source_b))) =>
+        {
+            anyhow::bail!("geometry.merge: merging two distinct instance sources is unsupported")
+        }
+        (sources_a, sources_b) => {
+            out.set_sources(if sources_a.is_empty() {
+                sources_b.to_vec()
+            } else {
+                sources_a.to_vec()
+            });
+        }
+    }
+    Ok(Arc::new(out))
 }
 
 /// Concatenates the union of both sides' columns; rows missing on one side

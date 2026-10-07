@@ -1256,6 +1256,87 @@ tolerance = "キー色からどこまで離れた画素を完全に抜くか。"
 softness = "許容範囲の外側で、アルファが不透明へ戻るなだらかな幅。0 で硬い縁。"
 invert = "キー色に近い画素だけを残し、それ以外を抜く。"
 
+[node."comp.gradient"]
+label = "グラデーション"
+description = "複数の色の止め位置を通るグラデーションでフレームを塗る。位置はフレームに対する割合なので、解像度が変わっても同じ絵になる。"
+[node."comp.gradient".params]
+type = "linear（始点から終点へ）または radial（始点を中心に、終点までの距離で終端色に達する）。"
+start = "グラデーションの始点（フレームに対する割合。0, 0 が左上）。"
+end = "グラデーションの終点（フレームに対する割合）。"
+stops = "色の止め位置。最初と最後の止め位置より外側は端の色が続く。"
+
+[node."comp.noise"]
+label = "プロシージャルノイズ"
+description = "2 色の間を行き来するフラクタルノイズでフレームを塗る。同じシードなら必ず同じ絵になる。"
+[node."comp.noise".params]
+scale = "最も大きな模様の大きさ（コンポジションのピクセル）。"
+octaves = "細かい層をいくつ重ねるか（整数に丸める。1〜8）。"
+roughness = "細かい層がどれだけ強く出るか。0〜1。"
+seed = "模様を選ぶ値（整数に丸める）。"
+offset = "模様をずらす量（コンポジションのピクセル）。動かすとノイズが流れる。"
+color_a = "ノイズが最も低いところの色。"
+color_b = "ノイズが最も高いところの色。"
+[node."comp.noise".group]
+pattern = "模様"
+colors = "色"
+
+[node."comp.fractal"]
+label = "フラクタル"
+description = "マンデルブロ集合またはジュリア集合を描く。各点が発散する速さで色が決まる。"
+[node."comp.fractal".params]
+type = "mandelbrot、または julia（ジュリア定数を使う）。"
+center = "フレームの中央に来る複素平面上の点。"
+zoom = "拡大率。1 で上下 3 単位が映る。深く拡大すると精度が落ちる。"
+iterations = "内側とみなすまでに試す回数（1〜1000）。"
+julia = "ジュリア定数（実部, 虚部）。julia のときだけ使う。"
+stops = "発散の速さに対する色。早く発散する点から遅い点の順。"
+inside = "発散しない点の色。"
+[node."comp.fractal".group]
+view = "ビュー"
+colors = "色"
+
+[node."comp.checkerboard"]
+label = "チェッカーボード"
+description = "市松模様でフレームを塗る。"
+[node."comp.checkerboard".params]
+size = "1 マスの幅と高さ（コンポジションのピクセル）。"
+offset = "模様をずらす量（コンポジションのピクセル）。"
+color_a = "最初のマス（オフセット前に左上が入るマス）の色。"
+color_b = "もう一方のマスの色。"
+
+[node."comp.glow"]
+label = "グロー"
+description = "画像をぼかしたコピーを元の画像へ加え、明るい形から光がにじむようにする。しきい値はなく、画像全体が光る。完全に透明な画像は透明のまま。"
+[node."comp.glow".params]
+radius = "光が広がる距離（コンポジションのピクセル。出力解像度で 64 ピクセルまで）。"
+intensity = "光の強さ。1 を超えると露出オーバーの見た目になる。"
+color = "光の色味。白なら画像本来の色のまま。"
+
+[node."comp.drop_shadow"]
+label = "ドロップシャドウ"
+description = "画像の形をぼかしてずらしたコピーを背後に描く。影はフレームの外へはみ出してよい。"
+[node."comp.drop_shadow".params]
+color = "影の色（アルファは無視される。濃さは「不透明度」で決める）。"
+opacity = "影の濃さ。0〜1。"
+offset = "影を右と下へずらす量（コンポジションのピクセル）。"
+softness = "影をぼかす量（コンポジションのピクセル）。"
+
+[node."comp.stroke"]
+label = "ストローク"
+description = "画像の形（不透明な部分）の周りに、指定した幅の輪郭を描く。幅 0 なら画像は変わらない。"
+[node."comp.stroke".params]
+color = "輪郭の色。アルファは輪郭の濃さに掛かる。"
+width = "輪郭の幅（コンポジションのピクセル。出力解像度で 48 ピクセルまで）。"
+position = "outside（輪郭の分だけ形が太る）または inside（形の縁を輪郭で置き換える）。"
+
+[node."comp.emboss"]
+label = "エンボス"
+description = "明るさと透明度を高さとみなし、浮き彫りのように光を当てる。平らな部分はそのまま。"
+[node."comp.emboss".params]
+angle = "光の来る向き（度。0 が右、90 が下）。"
+amount = "凹凸の明暗の強さ。0 なら何も変わらない。"
+distance = "比べる 2 つの高さの間隔（コンポジションのピクセル）。"
+
 [node."color.ramp"]
 label = "カラーランプ"
 description = "グラデーションで値を色に写す。明るさではなく色そのものを数値で動かせる。"

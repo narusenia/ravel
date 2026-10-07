@@ -10,7 +10,8 @@
 //!
 //! The exception is the user-placed image nodes `comp.solid`, `comp.fill`,
 //! `comp.tint` and `comp.alpha` (`solid`, `colorize`, `alpha`; the effect nodes
-//! `distort`, `tile`, `key`, `mask` and `grade` follow the same rule): they are
+//! `distort`, `tile`, `key`, `mask`, `grade`, `generate` and `stylize` follow the same
+//! rule): they are
 //! ordinary nodes, take their values from their parameters, and neither decode
 //! a node id nor read the `Document`. They live here because they work on the
 //! composited frame, not because they belong to the shell.
@@ -21,12 +22,14 @@ mod colorize;
 mod distort;
 #[cfg(test)]
 mod fx_test_util;
+mod generate;
 mod grade;
 mod key;
 mod mask;
 mod merge;
 mod opacity;
 mod solid;
+mod stylize;
 mod tile;
 mod transform;
 
@@ -34,12 +37,16 @@ pub use alpha::{CompAlphaProcessor, comp_alpha_mode_is_known};
 pub use background::CompBackgroundProcessor;
 pub use colorize::{ColorizeKind, CompColorizeProcessor};
 pub use distort::{CompDistortProcessor, DistortKind, radial_blur_mode_is_known};
+pub use generate::{
+    CompGenerateProcessor, GenerateKind, comp_fractal_type_is_known, comp_gradient_type_is_known,
+};
 pub use grade::{CompGradeProcessor, GradeKind};
 pub use key::{CompKeyProcessor, comp_key_mode_is_known};
 pub use mask::CompMaskProcessor;
 pub use merge::{CompMergeGpuProcessor, CompMergeProcessor};
 pub use opacity::{CompOpacityGpuProcessor, CompOpacityProcessor};
 pub use solid::CompSolidProcessor;
+pub use stylize::{CompStylizeProcessor, StylizeKind, comp_stroke_position_is_known};
 pub use tile::{CompTileProcessor, TileKind, comp_mirror_mode_is_known};
 pub use transform::{CompTransformGpuProcessor, CompTransformProcessor};
 

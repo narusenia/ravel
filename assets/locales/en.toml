@@ -1268,6 +1268,87 @@ tolerance = "How far from the key color a pixel is still removed completely."
 softness = "Width of the soft edge beyond the tolerance, where the alpha ramps back to opaque. 0 is a hard edge."
 invert = "Keep only the pixels near the key color and remove the rest."
 
+[node."comp.gradient"]
+label = "Gradient"
+description = "Fills the frame with a gradient through any number of color stops. Positions are fractions of the frame, so the picture looks the same at any resolution."
+[node."comp.gradient".params]
+type = "linear (from start to end) or radial (centered on start, reaching the end color at the distance to end)."
+start = "Where the gradient begins, as a fraction of the frame (0, 0 is the top left)."
+end = "Where the gradient ends, as a fraction of the frame."
+stops = "The color stops. Outside the first and last stop the end colors hold."
+
+[node."comp.noise"]
+label = "Procedural Noise"
+description = "Fills the frame with fractal noise blended between two colors. The same seed always gives the same picture."
+[node."comp.noise".params]
+scale = "Size of the largest features in composition pixels."
+octaves = "How many layers of finer detail are added (rounded to a whole number, 1 to 8)."
+roughness = "How strongly each finer layer shows, 0 to 1."
+seed = "Picks the pattern (rounded to a whole number)."
+offset = "Slides the pattern, in composition pixels; animate it to make the noise drift."
+color_a = "Color where the noise is lowest."
+color_b = "Color where the noise is highest."
+[node."comp.noise".group]
+pattern = "Pattern"
+colors = "Colors"
+
+[node."comp.fractal"]
+label = "Fractal"
+description = "Draws the Mandelbrot set or a Julia set, colored by how quickly each point escapes."
+[node."comp.fractal".params]
+type = "mandelbrot, or julia (uses the Julia constant)."
+center = "The point of the complex plane at the middle of the frame."
+zoom = "Magnification. 1 shows three units from top to bottom; very deep zooms lose precision."
+iterations = "How many steps to try before a point counts as inside (1 to 1000)."
+julia = "The Julia constant (real, imaginary). Only used by julia."
+stops = "Colors for the escape time, from quick to slow escapes."
+inside = "Color of points that never escape."
+[node."comp.fractal".group]
+view = "View"
+colors = "Colors"
+
+[node."comp.checkerboard"]
+label = "Checkerboard"
+description = "Fills the frame with alternating squares."
+[node."comp.checkerboard".params]
+size = "Width and height of one square in composition pixels."
+offset = "Slides the pattern, in composition pixels."
+color_a = "Color of the first square (the one the top left falls in, before the offset)."
+color_b = "Color of the other squares."
+
+[node."comp.glow"]
+label = "Glow"
+description = "Adds a blurred copy of the image back onto itself, so bright shapes bleed light. The whole image glows; there is no brightness threshold. Fully transparent images stay transparent."
+[node."comp.glow".params]
+radius = "How far the glow spreads, in composition pixels (up to 64 pixels at the output resolution)."
+intensity = "How strong the glow is. It can go above 1 for an overexposed look."
+color = "Tints the glow; white keeps the image's own colors."
+
+[node."comp.drop_shadow"]
+label = "Drop Shadow"
+description = "Draws a blurred, shifted copy of the image's shape behind it. The shadow may extend past the frame."
+[node."comp.drop_shadow".params]
+color = "Color of the shadow (its alpha is ignored; use Opacity)."
+opacity = "How dark the shadow is, 0 to 1."
+offset = "How far the shadow is shifted right and down, in composition pixels."
+softness = "How much the shadow is blurred, in composition pixels."
+
+[node."comp.stroke"]
+label = "Stroke"
+description = "Draws an outline of a given width around the image's shape (where it is opaque). A width of 0 leaves the image unchanged."
+[node."comp.stroke".params]
+color = "Color of the outline; its alpha scales the outline."
+width = "Outline width in composition pixels (up to 48 pixels at the output resolution)."
+position = "outside (the outline grows the shape) or inside (the outline replaces the rim of the shape)."
+
+[node."comp.emboss"]
+label = "Emboss"
+description = "Lights the image as if it were relief, using brightness and transparency as height. Flat areas stay as they are."
+[node."comp.emboss".params]
+angle = "Direction the light comes from, in degrees (0 is the right, 90 is the bottom)."
+amount = "How strongly the relief lightens and darkens. 0 changes nothing."
+distance = "How far apart, in composition pixels, the two heights being compared are."
+
 [node."color.ramp"]
 label = "Color Ramp"
 description = "Maps a value to a color through a gradient, so a number drives a hue rather than a brightness."

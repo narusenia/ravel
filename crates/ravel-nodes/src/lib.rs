@@ -429,6 +429,54 @@ pub fn processor_for_node(
             shaders,
             pool.clone(),
         ))),
+        "comp.gradient" => Some(Arc::new(comp::CompGenerateProcessor::new(
+            comp::GenerateKind::Gradient,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.noise" => Some(Arc::new(comp::CompGenerateProcessor::new(
+            comp::GenerateKind::Noise,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.fractal" => Some(Arc::new(comp::CompGenerateProcessor::new(
+            comp::GenerateKind::Fractal,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.checkerboard" => Some(Arc::new(comp::CompGenerateProcessor::new(
+            comp::GenerateKind::Checkerboard,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.glow" => Some(Arc::new(comp::CompStylizeProcessor::new(
+            comp::StylizeKind::Glow,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.drop_shadow" => Some(Arc::new(comp::CompStylizeProcessor::new(
+            comp::StylizeKind::DropShadow,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.stroke" => Some(Arc::new(comp::CompStylizeProcessor::new(
+            comp::StylizeKind::Stroke,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
+        "comp.emboss" => Some(Arc::new(comp::CompStylizeProcessor::new(
+            comp::StylizeKind::Emboss,
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+        ))),
         "comp.alpha" => Some(Arc::new(comp::CompAlphaProcessor::new(
             ctx.clone(),
             shaders,
@@ -571,6 +619,14 @@ mod tests {
             "comp.tile",
             "comp.mask",
             "comp.key",
+            "comp.gradient",
+            "comp.noise",
+            "comp.fractal",
+            "comp.checkerboard",
+            "comp.glow",
+            "comp.drop_shadow",
+            "comp.stroke",
+            "comp.emboss",
             "comp.transform",
             "comp.merge.normal",
             "comp.merge.adjustment",
@@ -1460,5 +1516,293 @@ mod tests {
         assert!((fb.as_f32()[0] - 0.3).abs() < 0.02, "r={}", fb.as_f32()[0]);
         assert!((fb.as_f32()[1] - 0.5).abs() < 0.02, "g={}", fb.as_f32()[1]);
         assert!(fb.as_f32()[2] < 0.02, "b={}", fb.as_f32()[2]);
+    }
+
+    /// The generators (no input) and the stylize nodes (one image input) of
+    /// the effects library.
+    const GENERATE_NODES: [&str; 4] = [
+        "comp.gradient",
+        "comp.noise",
+        "comp.fractal",
+        "comp.checkerboard",
+    ];
+    const STYLIZE_NODES: [&str; 4] = [
+        "comp.glow",
+        "comp.drop_shadow",
+        "comp.stroke",
+        "comp.emboss",
+    ];
+
+    /// Evaluate `type_key` (built from the registry's template) over a fixed
+    /// 8 x 8 test image at `frame`, with `animated` keyframed from `from` at
+    /// frame 0 to `to` at frame 10 and the other values set as given. A
+    /// generator ignores the image.
+    fn fx_output(
+        type_key: &str,
+        animated: Option<(&str, f32, f32)>,
+        floats: &[(&str, f32)],
+        strings: &[(&str, &str)],
+        frame: u64,
+    ) -> Vec<f32> {
+        use ravel_core::animation::Interpolation;
+        use ravel_core::animation::channel::AnimationChannel;
+        use ravel_core::animation::curve::KeyframeCurve;
+
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let mut shaders = ShaderManager::new(gpu.clone());
+        let mut reg = ravel_core::registry::NodeRegistry::new();
+        builtin::register_builtins(&mut reg);
+        let mut node = reg.create_node(type_key, NodeId::new(2)).unwrap();
+        fn slot<'a>(node: &'a mut Node, key: &str) -> &'a mut ravel_core::graph::Parameter {
+            node.parameters
+                .iter_mut()
+                .find(|p| p.key == key)
+                .unwrap_or_else(|| panic!("{} has no {key}", node.type_key))
+        }
+        // A two-component parameter takes the number on both components.
+        for (key, v) in floats {
+            let slot = slot(&mut node, key);
+            slot.value = match slot.value {
+                ParameterValue::Channel2(_) => ParameterValue::vec2(*v, *v),
+                _ => ParameterValue::Float(*v),
+            };
+        }
+        for (key, v) in strings {
+            slot(&mut node, key).value = ParameterValue::String((*v).into());
+        }
+        if let Some((key, from, to)) = animated {
+            let keyed = || {
+                let mut curve = KeyframeCurve::new();
+                curve.insert(0, from, Interpolation::Linear);
+                curve.insert(10, to, Interpolation::Linear);
+                AnimationChannel::keyframes(curve)
+            };
+            let slot = slot(&mut node, key);
+            slot.value = match slot.value {
+                ParameterValue::Float(_) => ParameterValue::Channel(keyed()),
+                ParameterValue::Channel2(_) => ParameterValue::Channel2([keyed(), keyed()]),
+                ParameterValue::Channel4(_) => {
+                    ParameterValue::Channel4([keyed(), keyed(), keyed(), keyed()])
+                }
+                ref other => panic!("{type_key}.{key} is {other:?}, not animatable"),
+            };
+        }
+        let mut graph = Graph::new().add_node(node).unwrap();
+        // A checker of opaque coloured and fully transparent pixels: every
+        // stylize node has an edge and a coverage to work with.
+        let image = FrameBuffer::from_f32(
+            8,
+            8,
+            (0..64)
+                .flat_map(|i| {
+                    if (i % 8 + i / 8) % 2 == 0 {
+                        [0.9, 0.6, 0.3, 1.0]
+                    } else {
+                        [0.0; 4]
+                    }
+                })
+                .collect(),
+        );
+        struct Fixed(FrameBuffer);
+        impl ravel_core::eval::NodeProcessor for Fixed {
+            fn process(
+                &self,
+                _node: &Node,
+                _ctx: &EvalContext,
+                _inputs: &[Option<Arc<dyn ravel_core::types::NodeData>>],
+                _params: &ravel_core::eval::ResolvedParams,
+                _scope: &mut dyn ravel_core::eval::EvalScope,
+            ) -> anyhow::Result<Arc<dyn ravel_core::types::NodeData>> {
+                Ok(Arc::new(self.0.clone()))
+            }
+        }
+        if !GENERATE_NODES.contains(&type_key) {
+            graph = graph
+                .add_node(
+                    Node::new(NodeId::new(1), "test.image")
+                        .with_output("output", DataTypeId::FRAME_BUFFER),
+                )
+                .unwrap()
+                .add_edge(
+                    EdgeId::new(1),
+                    NodeId::new(1),
+                    OutputPortIndex(0),
+                    NodeId::new(2),
+                    InputPortIndex(0),
+                )
+                .unwrap();
+        }
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(Fixed(image)));
+        let pool = shared_texture_pool(&gpu);
+        let frames = MediaFrameCache::standalone();
+        register_all_processors(&mut ev, &graph, &gpu, &mut shaders, &pool, &frames);
+        let out = ev
+            .evaluate(
+                &graph,
+                NodeId::new(2),
+                &EvalContext::new(frame, FrameRate::new(30, 1), (8, 8)),
+            )
+            .unwrap();
+        out.downcast_ref::<ravel_gpu::GpuFrameBuffer>()
+            .unwrap_or_else(|| panic!("{type_key} stays GPU-resident"))
+            .to_frame_buffer()
+            .expect("readback")
+            .as_f32()
+            .to_vec()
+    }
+
+    /// Every generator and stylize template has a processor under its own key
+    /// and evaluates from the registry's defaults, to a frame of the
+    /// evaluation resolution.
+    #[test]
+    fn every_generate_and_stylize_template_evaluates() {
+        for type_key in GENERATE_NODES.iter().chain(&STYLIZE_NODES) {
+            let out = fx_output(type_key, None, &[], &[], 0);
+            assert_eq!(out.len(), 8 * 8 * 4, "{type_key}");
+            assert!(out.iter().all(|v| v.is_finite()), "{type_key}");
+            assert!(out.iter().any(|v| *v != 0.0), "{type_key} drew nothing");
+        }
+    }
+
+    /// Every numeric parameter is a unified animation channel; the ramp is the
+    /// structural parameter every ramp consumer shares; each string is a
+    /// dropdown whose values the processor understands.
+    #[test]
+    fn generate_and_stylize_parameters_are_animation_channels() {
+        let mut reg = ravel_core::registry::NodeRegistry::new();
+        builtin::register_builtins(&mut reg);
+        for type_key in GENERATE_NODES.iter().chain(&STYLIZE_NODES) {
+            for p in &reg.get(type_key).unwrap().default_params {
+                match p.value {
+                    ParameterValue::Float(_)
+                    | ParameterValue::Channel2(_)
+                    | ParameterValue::Channel4(_) => {}
+                    ParameterValue::Ramp(_) => assert_eq!(p.key, "stops"),
+                    ParameterValue::String(_) => assert!(
+                        reg.param_options(type_key, &p.key).is_some(),
+                        "{type_key}.{} is a string but not a dropdown",
+                        p.key
+                    ),
+                    ref other => panic!("{type_key}.{} is {other:?}", p.key),
+                }
+            }
+        }
+        let offered = |type_key: &str, key: &str| -> Vec<String> {
+            reg.param_options(type_key, key).expect("options").to_vec()
+        };
+        assert_eq!(
+            offered("comp.gradient", "type"),
+            builtin::COMP_GRADIENT_TYPES
+        );
+        assert_eq!(offered("comp.fractal", "type"), builtin::COMP_FRACTAL_TYPES);
+        assert_eq!(
+            offered("comp.stroke", "position"),
+            builtin::COMP_STROKE_POSITIONS
+        );
+        for t in offered("comp.gradient", "type") {
+            assert!(comp::comp_gradient_type_is_known(&t), "{t}");
+        }
+        for t in offered("comp.fractal", "type") {
+            assert!(comp::comp_fractal_type_is_known(&t), "{t}");
+        }
+        for t in offered("comp.stroke", "position") {
+            assert!(comp::comp_stroke_position_is_known(&t), "{t}");
+        }
+    }
+
+    /// Every animatable parameter of the generators and stylize nodes changes
+    /// the picture between frame 0 and frame 10: the processor reads it per
+    /// frame under the right key.
+    #[test]
+    fn generate_and_stylize_parameters_animate_through_the_unified_channels() {
+        type Case = (
+            &'static str,
+            &'static str,
+            f32,
+            f32,
+            &'static [(&'static str, f32)],
+            &'static [(&'static str, &'static str)],
+        );
+        let cases: &[Case] = &[
+            ("comp.gradient", "start", 0.0, 0.4, &[], &[]),
+            ("comp.gradient", "end", 1.0, 0.6, &[], &[]),
+            ("comp.noise", "scale", 40.0, 10.0, &[], &[]),
+            ("comp.noise", "octaves", 1.0, 4.0, &[], &[]),
+            (
+                "comp.noise",
+                "roughness",
+                0.1,
+                0.9,
+                &[("octaves", 4.0)],
+                &[],
+            ),
+            ("comp.noise", "seed", 0.0, 5.0, &[], &[]),
+            ("comp.noise", "offset", 0.0, 20.0, &[], &[]),
+            ("comp.noise", "color_a", 0.0, 0.5, &[], &[]),
+            ("comp.noise", "color_b", 1.0, 0.5, &[], &[]),
+            ("comp.fractal", "center", -0.5, 0.2, &[], &[]),
+            ("comp.fractal", "zoom", 1.0, 4.0, &[], &[]),
+            ("comp.fractal", "iterations", 3.0, 60.0, &[], &[]),
+            (
+                "comp.fractal",
+                "julia",
+                -0.8,
+                0.3,
+                &[],
+                &[("type", "julia")],
+            ),
+            ("comp.fractal", "inside", 0.0, 1.0, &[], &[]),
+            ("comp.checkerboard", "size", 2.0, 3.0, &[], &[]),
+            ("comp.checkerboard", "offset", 0.0, 1.0, &[], &[]),
+            ("comp.checkerboard", "color_a", 1.0, 0.0, &[], &[]),
+            (
+                "comp.checkerboard",
+                "color_b",
+                0.0,
+                1.0,
+                &[("size", 2.0)],
+                &[],
+            ),
+            ("comp.glow", "radius", 0.0, 4.0, &[], &[]),
+            ("comp.glow", "intensity", 0.0, 2.0, &[], &[]),
+            ("comp.glow", "color", 1.0, 0.0, &[], &[]),
+            ("comp.drop_shadow", "color", 0.0, 1.0, &[], &[]),
+            ("comp.drop_shadow", "opacity", 0.0, 1.0, &[], &[]),
+            ("comp.drop_shadow", "offset", 0.0, 2.0, &[], &[]),
+            ("comp.drop_shadow", "softness", 0.0, 3.0, &[], &[]),
+            ("comp.stroke", "color", 1.0, 0.0, &[("width", 1.0)], &[]),
+            ("comp.stroke", "width", 0.0, 2.0, &[], &[]),
+            ("comp.emboss", "angle", 0.0, 180.0, &[], &[]),
+            ("comp.emboss", "amount", 0.0, 2.0, &[], &[]),
+            ("comp.emboss", "distance", 1.0, 2.0, &[], &[]),
+        ];
+        // Every numeric parameter is covered by a case.
+        let mut reg = ravel_core::registry::NodeRegistry::new();
+        builtin::register_builtins(&mut reg);
+        for type_key in GENERATE_NODES.iter().chain(&STYLIZE_NODES) {
+            for p in &reg.get(type_key).unwrap().default_params {
+                if matches!(
+                    p.value,
+                    ParameterValue::Float(_)
+                        | ParameterValue::Channel2(_)
+                        | ParameterValue::Channel4(_)
+                ) {
+                    assert!(
+                        cases.iter().any(|c| c.0 == *type_key && c.1 == p.key),
+                        "{type_key}.{} has no animation case",
+                        p.key
+                    );
+                }
+            }
+        }
+        for &(type_key, key, from, to, floats, strings) in cases {
+            let at = |frame| fx_output(type_key, Some((key, from, to)), floats, strings, frame);
+            let (a, b) = (at(0), at(10));
+            assert!(
+                a.iter().zip(&b).any(|(x, y)| (x - y).abs() > 1e-3),
+                "{type_key}.{key} did not change the output between frames"
+            );
+        }
     }
 }

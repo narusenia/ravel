@@ -202,6 +202,14 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(comp_tile());
     reg.register(comp_mask());
     reg.register(comp_key());
+    reg.register(comp_gradient());
+    reg.register(comp_noise());
+    reg.register(comp_fractal());
+    reg.register(comp_checkerboard());
+    reg.register(comp_glow());
+    reg.register(comp_drop_shadow());
+    reg.register(comp_stroke());
+    reg.register(comp_emboss());
     reg.register(color_ramp());
     reg.register(rasterize());
     reg.register(shape_rect());
@@ -2266,6 +2274,155 @@ fn comp_key() -> NodeTemplate {
         .with_param_range("softness", 0.0..=2.0, 0.0..=1.0)
 }
 
+/// The `type` values of `comp.gradient`, in dropdown order.
+pub const COMP_GRADIENT_TYPES: [&str; 2] = ["linear", "radial"];
+
+/// `comp.gradient`: a multi-stop gradient over the whole frame. `start` and
+/// `end` are frame fractions, so the picture is the same at any resolution.
+/// `linear` runs from `start` to `end`; `radial` is centred on `start` with the
+/// distance to `end` as its radius. The stops are the shared `Ramp` parameter.
+fn comp_gradient() -> NodeTemplate {
+    NodeTemplate::new("comp.gradient", "Gradient", NodeCategory::Image)
+        .with_output(frame_buffer_output())
+        .with_param(string_parameter("type", "linear"))
+        .with_param(channel2_parameter("start", 0.0, 0.5))
+        .with_param(channel2_parameter("end", 1.0, 0.5))
+        .with_param(ramp_parameter("stops", RampParam::default()))
+        .with_param_options("type", COMP_GRADIENT_TYPES)
+        .with_param_range("start", -10.0..=10.0, 0.0..=1.0)
+        .with_param_range("end", -10.0..=10.0, 0.0..=1.0)
+}
+
+/// `comp.noise`: fractal gradient noise mapped between two colours. Its own
+/// implementation (in WGSL), unrelated to `field.noise`. `scale` and `offset`
+/// are composition pixels; `octaves` and `seed` are rounded to integers.
+fn comp_noise() -> NodeTemplate {
+    NodeTemplate::new("comp.noise", "Procedural Noise", NodeCategory::Image)
+        .with_output(frame_buffer_output())
+        .with_param(float_parameter("scale", 100.0))
+        .with_param(float_parameter("octaves", 4.0))
+        .with_param(float_parameter("roughness", 0.5))
+        .with_param(float_parameter("seed", 0.0))
+        .with_param(channel2_parameter("offset", 0.0, 0.0))
+        .with_param(color_parameter("color_a", [0.0, 0.0, 0.0, 1.0]))
+        .with_param(color_parameter("color_b", [1.0, 1.0, 1.0, 1.0]))
+        .with_color_param("color_a")
+        .with_color_param("color_b")
+        .with_param_group(
+            "pattern",
+            ["scale", "octaves", "roughness", "seed", "offset"],
+        )
+        .with_param_group("colors", ["color_a", "color_b"])
+        .with_param_range("scale", 1.0..=100_000.0, 4.0..=500.0)
+        .with_param_range("octaves", 1.0..=8.0, 1.0..=8.0)
+        .with_param_range("roughness", 0.0..=1.0, 0.0..=1.0)
+        .with_param_range("seed", 0.0..=1e9, 0.0..=1000.0)
+        .with_param_range("offset", -1e6..=1e6, -500.0..=500.0)
+}
+
+/// The `type` values of `comp.fractal`, in dropdown order.
+pub const COMP_FRACTAL_TYPES: [&str; 2] = ["mandelbrot", "julia"];
+
+/// `comp.fractal`: the Mandelbrot or Julia set. The view is `center` (complex
+/// plane) and `zoom` (1 shows 3 units top to bottom), so it is resolution
+/// independent. The escape time is looked up in the `stops` ramp; points that
+/// never escape are `inside`.
+fn comp_fractal() -> NodeTemplate {
+    NodeTemplate::new("comp.fractal", "Fractal", NodeCategory::Image)
+        .with_output(frame_buffer_output())
+        .with_param(string_parameter("type", "mandelbrot"))
+        .with_param(channel2_parameter("center", -0.5, 0.0))
+        .with_param(float_parameter("zoom", 1.0))
+        .with_param(float_parameter("iterations", 64.0))
+        .with_param(channel2_parameter("julia", -0.8, 0.156))
+        .with_param(ramp_parameter("stops", RampParam::default()))
+        .with_param(color_parameter("inside", [0.0, 0.0, 0.0, 1.0]))
+        .with_color_param("inside")
+        .with_param_options("type", COMP_FRACTAL_TYPES)
+        .with_param_group("view", ["type", "center", "zoom", "iterations", "julia"])
+        .with_param_group("colors", ["stops", "inside"])
+        .with_param_range("center", -100.0..=100.0, -2.0..=2.0)
+        .with_param_range("zoom", 0.001..=1e6, 0.5..=50.0)
+        .with_param_range("iterations", 1.0..=1000.0, 16.0..=256.0)
+        .with_param_range("julia", -4.0..=4.0, -2.0..=2.0)
+}
+
+/// `comp.checkerboard`: alternating `color_a` / `color_b` cells. `size` and
+/// `offset` are composition pixels.
+fn comp_checkerboard() -> NodeTemplate {
+    NodeTemplate::new("comp.checkerboard", "Checkerboard", NodeCategory::Image)
+        .with_output(frame_buffer_output())
+        .with_param(channel2_parameter("size", 50.0, 50.0))
+        .with_param(channel2_parameter("offset", 0.0, 0.0))
+        .with_param(color_parameter("color_a", [1.0, 1.0, 1.0, 1.0]))
+        .with_param(color_parameter("color_b", [0.0, 0.0, 0.0, 1.0]))
+        .with_color_param("color_a")
+        .with_color_param("color_b")
+        .with_param_range("size", 1.0..=100_000.0, 4.0..=200.0)
+        .with_param_range("offset", -1e6..=1e6, -200.0..=200.0)
+}
+
+/// `comp.glow`: adds a blurred copy of the image back onto it. `radius` is in
+/// composition pixels; `intensity` is a plain number (not a colour) so it can
+/// pass 1, `color` only tints the glow.
+fn comp_glow() -> NodeTemplate {
+    NodeTemplate::new("comp.glow", "Glow", NodeCategory::Image)
+        .with_input(frame_buffer_input("image"))
+        .with_output(frame_buffer_output())
+        .with_param(float_parameter("radius", 20.0))
+        .with_param(float_parameter("intensity", 1.0))
+        .with_param(color_parameter("color", [1.0, 1.0, 1.0, 1.0]))
+        .with_color_param("color")
+        .with_param_range("radius", 0.0..=200.0, 0.0..=50.0)
+        .with_param_range("intensity", 0.0..=20.0, 0.0..=4.0)
+}
+
+/// `comp.drop_shadow`: the image's alpha, blurred and shifted, drawn behind
+/// it. `offset` and `softness` are composition pixels.
+fn comp_drop_shadow() -> NodeTemplate {
+    NodeTemplate::new("comp.drop_shadow", "Drop Shadow", NodeCategory::Image)
+        .with_input(frame_buffer_input("image"))
+        .with_output(frame_buffer_output())
+        .with_param(color_parameter("color", [0.0, 0.0, 0.0, 1.0]))
+        .with_param(float_parameter("opacity", 0.75))
+        .with_param(channel2_parameter("offset", 5.0, 5.0))
+        .with_param(float_parameter("softness", 5.0))
+        .with_color_param("color")
+        .with_param_range("opacity", 0.0..=1.0, 0.0..=1.0)
+        .with_param_range("offset", -10_000.0..=10_000.0, -100.0..=100.0)
+        .with_param_range("softness", 0.0..=200.0, 0.0..=50.0)
+}
+
+/// The `position` values of `comp.stroke`, in dropdown order.
+pub const COMP_STROKE_POSITIONS: [&str; 2] = ["outside", "inside"];
+
+/// `comp.stroke`: an outline `width` composition pixels wide around the
+/// image's alpha shape; width 0 is the input.
+fn comp_stroke() -> NodeTemplate {
+    NodeTemplate::new("comp.stroke", "Stroke", NodeCategory::Image)
+        .with_input(frame_buffer_input("image"))
+        .with_output(frame_buffer_output())
+        .with_param(color_parameter("color", [1.0, 1.0, 1.0, 1.0]))
+        .with_param(float_parameter("width", 2.0))
+        .with_param(string_parameter("position", "outside"))
+        .with_color_param("color")
+        .with_param_options("position", COMP_STROKE_POSITIONS)
+        .with_param_range("width", 0.0..=200.0, 0.0..=50.0)
+}
+
+/// `comp.emboss`: relief lit from `angle`; `amount` 0 is the input.
+fn comp_emboss() -> NodeTemplate {
+    NodeTemplate::new("comp.emboss", "Emboss", NodeCategory::Image)
+        .with_input(frame_buffer_input("image"))
+        .with_output(frame_buffer_output())
+        .with_param(float_parameter("angle", 225.0))
+        .with_param(float_parameter("amount", 1.0))
+        .with_param(float_parameter("distance", 1.0))
+        .with_param_range("angle", -3600.0..=3600.0, -180.0..=360.0)
+        .with_param_range("amount", 0.0..=20.0, 0.0..=4.0)
+        .with_param_range("distance", 0.0..=100.0, 0.0..=10.0)
+}
+
 /// `shape.rect`: a sized quad, and the one node a Solid layer's network is
 /// built on (`assets/layer-templates/solid.ron`).
 ///
@@ -3077,7 +3234,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 110);
+        assert_eq!(reg.all_templates().count(), 118);
     }
 
     #[test]
@@ -3087,7 +3244,7 @@ mod tests {
         assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 28);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
-        assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 25);
+        assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Time).len(), 0);
         assert_eq!(reg.list_by_category(NodeCategory::Utility).len(), 28);
@@ -3680,6 +3837,14 @@ mod tests {
             ("comp.tint", "map_black", true),
             ("comp.tint", "map_white", true),
             ("comp.key", "key_color", true),
+            ("comp.noise", "color_a", true),
+            ("comp.noise", "color_b", true),
+            ("comp.fractal", "inside", true),
+            ("comp.checkerboard", "color_a", true),
+            ("comp.checkerboard", "color_b", true),
+            ("comp.glow", "color", true),
+            ("comp.drop_shadow", "color", true),
+            ("comp.stroke", "color", true),
             ("style.fill", "color", true),
             ("style.stroke", "color", true),
         ];

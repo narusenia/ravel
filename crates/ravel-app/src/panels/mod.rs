@@ -869,7 +869,10 @@ pub(crate) fn set_active_composition(comp: Option<CompId>, cx: &mut App) {
 /// behind it. Application code has no reason to call it — use
 /// [`crate::project_state::ProjectState::set_active_composition`], which is what
 /// keeps the compiled root and the viewer in step.
-#[cfg(debug_assertions)]
+///
+/// Not behind `cfg(debug_assertions)`: `cargo bench` builds the lib unit tests
+/// and the integration tests without it, and the call sites would stop compiling.
+#[doc(hidden)]
 pub fn set_active_composition_for_tests(comp: Option<CompId>, cx: &mut App) {
     set_active_composition(comp, cx);
 }

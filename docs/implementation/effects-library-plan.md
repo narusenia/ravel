@@ -185,6 +185,21 @@ pub struct XProcessor { ctx, pipeline, pool }
   ストップ表現とエディタを作らない
 - グロウ、ドロップシャドウ、ストローク、エンボス
 
+> **2026-10-06 実装**: 生成系は `comp.gradient` / `comp.noise` /
+> `comp.fractal` / `comp.checkerboard`（`comp/generate.rs`、
+> `comp_generate.wgsl`、1 本のシェーダ + 判別値）。位置はフレームに対する割合、
+> または合成ピクセル × `composition_scale` で持ち、解像度に依存しない。
+> グラデーションのストップは `Ramp` パラメータで、CPU の `RampParam::evaluate`
+> を 256 エントリの表に焼いて GPU へ渡す（`comp.curves` と同じ。評価の実装は
+> 1 本）。ノイズは `field.noise` と実装を共有しない WGSL の勾配ノイズで、
+> `seed` がハッシュに入る。スタイライズ系は `comp.glow` / `comp.drop_shadow` /
+> `comp.stroke` / `comp.emboss`（`comp/stylize.rs`、`comp_stylize.wgsl`）。
+> グロウとシャドウは既存の `BlurProcessor` を呼び（半径に `composition_scale`
+> を掛ける）、ストロークは距離重みつきの膨張 / 収縮、エンボスは輝度 + 被覆を
+> 高さとする傾き。式は各ファイル冒頭の doc コメントが正。グロウに輝度しきい値は
+> なく、ストロークは外側 / 内側のみ（中央は無い）で、探索半径は 48 ピクセルで
+> 頭打ち。
+
 **完了条件**
 
 - 生成系は解像度非依存（同じ内容が解像度に応じてスケールする）テスト。

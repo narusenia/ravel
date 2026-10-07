@@ -69,6 +69,10 @@ pub enum GeometryOpError {
         operation: &'static str,
         point: usize,
     },
+    /// Instances stamp sources that no primitive owns, so there is no piece
+    /// to deal one to.
+    #[error("{operation} cannot split a geometry that has instances")]
+    HasInstances { operation: &'static str },
     #[error("the {name} attribute is required on the {domain:?} domain and cannot be deleted")]
     RequiredAttribute { name: &'static str, domain: Domain },
 }
@@ -2471,6 +2475,84 @@ fn transfer_weighted(
             });
         }
     })
+}
+
+/// Splits `geometry` into one geometry per distinct value of the `I32`
+/// primitive attribute `attribute`, **ordered by ascending value** (never by
+/// hash order, so the result is deterministic).
+///
+/// A piece holds its primitives with their primitive attributes, the points
+/// they run over (copied per primitive, so two primitives sharing a point get
+/// one each) with the point attributes, and the detail. A point no primitive
+/// runs over belongs to no piece and is not in any of them. Instances are not
+/// split: a geometry carrying some is an error rather than silently losing
+/// them. A geometry without primitives has no pieces.
+pub fn split_by_piece(
+    geometry: &Geometry,
+    attribute: &str,
+) -> Result<Vec<Geometry>, GeometryOpError> {
+    if geometry.instance_count() > 0 {
+        return Err(GeometryOpError::HasInstances {
+            operation: "split by piece",
+        });
+    }
+    if geometry.primitive_count() == 0 {
+        return Ok(Vec::new());
+    }
+    geometry.validate()?;
+    let column = geometry.primitive_attrs().get(attribute).ok_or_else(|| {
+        GeometryError::AttributeNotFound {
+            name: attribute.into(),
+        }
+    })?;
+    let mut groups: std::collections::BTreeMap<i32, Vec<usize>> = Default::default();
+    for (index, piece) in column.as_i32(attribute)?.iter().enumerate() {
+        groups.entry(*piece).or_default().push(index);
+    }
+    Ok(groups
+        .into_values()
+        .map(|members| piece_of(geometry, &members))
+        .collect())
+}
+
+/// The geometry made of the primitives `members` (indices into `geometry`).
+fn piece_of(geometry: &Geometry, members: &[usize]) -> Geometry {
+    let mut point_sources: Vec<usize> = Vec::new();
+    let runs: Vec<Range<usize>> = members
+        .iter()
+        .map(|&member| {
+            let start = point_sources.len();
+            point_sources.extend(geometry.primitives()[member].verts().clone());
+            start..point_sources.len()
+        })
+        .collect();
+
+    let mut out = Geometry::new();
+    for (name, source) in geometry.points().iter() {
+        let column = select_values(source, point_sources.iter().copied());
+        out.points_mut()
+            .insert(name.clone(), column)
+            .expect("columns of one length");
+    }
+    for (name, source) in geometry.primitive_attrs().iter() {
+        let column = select_values(source, members.iter().copied());
+        out.primitive_attrs_mut()
+            .insert(name.clone(), column)
+            .expect("columns of one length");
+    }
+    *out.detail_mut() = geometry.detail().clone();
+    for (&member, verts) in members.iter().zip(runs) {
+        match &geometry.primitives()[member] {
+            Primitive::Path { closed, .. } => out.push_primitive(Primitive::Path {
+                verts,
+                closed: *closed,
+            }),
+            Primitive::Mesh { indices, .. } => {
+                out.push_mesh(verts, &geometry.indices()[indices.clone()])
+            }
+        }
+    }
+    out
 }
 
 fn select_values(source: &AttributeArray, indices: impl Iterator<Item = usize>) -> AttributeArray {
@@ -8162,5 +8244,85 @@ mod tests {
         assert!(measure(&mesh, Measure::Area, "").is_err());
         // But a mesh has an extent.
         assert!(measure(&mesh, Measure::Size, "").is_ok());
+    }
+
+    /// A path piece and a mesh piece each keep their own points and runs.
+    #[test]
+    fn split_by_piece_rebases_paths_and_meshes_per_piece() {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0); 7]);
+        // Piece 1: a triangle mesh over points 0..3, then a path over 3..5;
+        // piece 0: a path over 5..7.
+        geometry.push_mesh(0..3, &[0, 1, 2]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 3..5,
+            closed: true,
+        });
+        geometry.push_primitive(Primitive::Path {
+            verts: 5..7,
+            closed: false,
+        });
+        geometry
+            .primitive_attrs_mut()
+            .insert(names::PIECE, AttributeArray::I32(vec![1, 1, 0]))
+            .unwrap();
+        geometry
+            .points_mut()
+            .insert("id", AttributeArray::I32((0..7).collect()))
+            .unwrap();
+
+        let pieces = split_by_piece(&geometry, names::PIECE).unwrap();
+        assert_eq!(pieces.len(), 2);
+        assert_eq!(pieces[0].point_count(), 2);
+        assert_eq!(pieces[1].point_count(), 5);
+        assert_eq!(
+            pieces[1].primitives(),
+            [
+                Primitive::Mesh {
+                    verts: 0..3,
+                    indices: 0..3
+                },
+                Primitive::Path {
+                    verts: 3..5,
+                    closed: true
+                }
+            ]
+        );
+        assert_eq!(
+            pieces[0].points().get("id").unwrap().as_i32("id").unwrap(),
+            [5, 6]
+        );
+        assert_eq!(pieces[1].indices(), [0, 1, 2]);
+        for piece in &pieces {
+            assert_eq!(piece.validate(), Ok(()));
+        }
+    }
+
+    #[test]
+    fn split_by_piece_refuses_instances_and_wrong_column_types() {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0); 2]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        geometry
+            .primitive_attrs_mut()
+            .insert(names::PIECE, AttributeArray::F32(vec![0.0]))
+            .unwrap();
+        assert!(matches!(
+            split_by_piece(&geometry, names::PIECE),
+            Err(GeometryOpError::Geometry(
+                GeometryError::TypeMismatch { .. }
+            ))
+        ));
+
+        let mut with_instances = geometry.clone();
+        with_instances
+            .instances_mut()
+            .insert(names::INDEX, AttributeArray::I32(vec![0]))
+            .unwrap();
+        assert!(matches!(
+            split_by_piece(&with_instances, names::PIECE),
+            Err(GeometryOpError::HasInstances { .. })
+        ));
     }
 }

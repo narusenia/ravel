@@ -1613,12 +1613,17 @@ version が動き、この穴には当たらない。
 
 ## MED-APP-47 | bug | `cargo bench` のビルドで `set_active_composition_for_tests` が消え、main の `bench` ジョブが 9/30 から毎回落ちる
 
-> **解決済み**: `set_active_composition_for_tests` から `#[cfg(debug_assertions)]` を外し、
+> **解決済み**（#601）: `set_active_composition_for_tests` から `#[cfg(debug_assertions)]` を外し、
 > `#[doc(hidden)]` の常時公開にした（
 > `disable_background_eval_for_tests` と同じ形）。bench プロファイルで lib テストと統合
 > テストが再びコンパイルできる（`cargo test -p ravel-app --profile bench --no-run`）。
 > アプリコードから呼ばれないことの lint は足していない: lib 内 `#[cfg(test)]` の
 > 呼び出し側があり、grep では `tests/` と区別できず偽陽性になるため。
+>
+> **補足**: 上の記述の「統合テストも bench プロファイルで組む」は誤り。CI の
+> `cargo bench --workspace -- --test` の `--test` は `--` の後にあるので Cargo の
+> ターゲット選択ではなく harness への引数で、既定の `cargo bench` 対象に `tests/` の
+> 統合テストは含まれない。実際に落ちていたのは lib 内 `#[cfg(test)]` の呼び出しだけ。
 
 **該当**: `crates/ravel-app/src/panels/mod.rs:873`（`#[cfg(debug_assertions)]`）、
 呼び出し側 `crates/ravel-app/src/project_state.rs:7921`（lib 内 `#[cfg(test)]`）、

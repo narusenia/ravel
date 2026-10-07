@@ -217,6 +217,8 @@ pub enum RavelIcon {
     NodeGeometryTaper,
     /// Node header/menu: `geometry.blast`.
     NodeGeometryBlast,
+    /// Node header/menu: `geometry.resample`.
+    NodeGeometryResample,
     /// Node header/menu: `geometry.switch`.
     NodeGeometrySwitch,
     /// Node header/menu: `geometry.null`.
@@ -512,6 +514,7 @@ impl RavelIcon {
             "geometry.twist" => Self::NodeGeometryTwist,
             "geometry.taper" => Self::NodeGeometryTaper,
             "geometry.blast" => Self::NodeGeometryBlast,
+            "geometry.resample" => Self::NodeGeometryResample,
             "geometry.switch" => Self::NodeGeometrySwitch,
             "geometry.null" => Self::NodeGeometryNull,
             "geometry.from_image" => Self::NodeGeometryFromImage,
@@ -703,6 +706,7 @@ impl RavelIcon {
             Self::NodeGeometryTwist => "icons/orbit.svg",
             Self::NodeGeometryTaper => "icons/maximize-2.svg",
             Self::NodeGeometryBlast => "icons/eraser.svg",
+            Self::NodeGeometryResample => "icons/waypoints.svg",
             Self::NodeGeometrySwitch => "icons/arrow-right-left.svg",
             Self::NodeGeometryNull => "icons/circle-dashed.svg",
             Self::NodeGeometryFromImage => "icons/image.svg",

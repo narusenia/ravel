@@ -200,6 +200,23 @@ pen ツールが現状の主な生成源であることを踏まえると優先�
 - 属性の補間テスト。
 - 退化パス（点が 1 つ、長さ 0）でエラーにならないテスト。
 
+**実装時の決定**:
+
+- **`length` が正ならそれが優先**で、`round(弧長 / length)` 個（最低 1）の
+  等分割にする（端点がずれない最近傍の等間隔）。0 のとき `segments`
+- `keep_corners` は約 1 度より鋭く曲がる頂点を残し、区間ごとに分割する。
+  `segments` モードの区間は `round(segments × 区間の弧長比)` 個（最低 1）
+- 補間は F32 / ベクタ / 色が線形、I32 / Bool / Str は近い側の点
+  （`id` が実在の id のまま残る）。`index` は振り直し。`in_tan` / `out_tan` は
+  旧曲線のハンドルなので捨てる（リサンプル後はポリライン）
+- 全パスプリミティブが対象。どのパスも使わないポイントは捨てる。パスが
+  無いジオメトリは素通し。メッシュと 3D 位置は `path_sample` と同じ理由で
+  明示エラー
+- 弧長は `path_parameters` と共有する `vertex_arc_lengths`
+  （`path_sample` と同じ `push_segment`）から取る
+- 1 区間の分割数は 2^20 で頭打ち（`length` の入力ミスで無制限に確保しない）
+- アイコンは `waypoints.svg`
+
 ### 単位 4: `geometry.measure`
 
 - `perimeter` / `area` / `curvature` / `segment_length` / `bounds` / `size`。

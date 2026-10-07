@@ -1117,6 +1117,14 @@ domain = "Which elements are deleted. Deleting primitives keeps their points."
 group = "Name of the boolean attribute on that domain that flags the elements to delete. Empty deletes nothing."
 invert = "Delete the elements the group does not flag instead."
 
+[node."geometry.resample"]
+label = "Resample"
+description = "Re-places the points of every path at even arc-length spacing. Attributes are interpolated from the original points; in_tan and out_tan are dropped. Points no path uses are dropped."
+[node."geometry.resample".params]
+length = "Target spacing. The path is divided into the nearest whole number of equal segments. When 0, segments decides instead."
+segments = "Number of equal segments per path. Used when length is 0."
+keep_corners = "Keep the points where a path turns sharply, and resample each stretch between them on its own."
+
 [node."geometry.switch"]
 label = "Switch"
 description = "Passes one of its geometry inputs through, picked by index. An index past the last connected input picks the last one."

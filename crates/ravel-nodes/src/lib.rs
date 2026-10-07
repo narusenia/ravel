@@ -266,6 +266,7 @@ pub fn processor_for_node(
         "geometry.twist" => Some(Arc::new(geometry_ops::GeometryDeformProcessor::twist())),
         "geometry.taper" => Some(Arc::new(geometry_ops::GeometryDeformProcessor::taper())),
         "geometry.blast" => Some(Arc::new(geometry::GeometryBlastProcessor)),
+        "geometry.resample" => Some(Arc::new(geometry::GeometryResampleProcessor)),
         "geometry.switch" => Some(Arc::new(geometry::GeometrySwitchProcessor)),
         "geometry.null" => Some(Arc::new(geometry::GeometryNullProcessor)),
         "geometry.from_image" => Some(Arc::new(geometry::GeometryFromImageProcessor::from_node(

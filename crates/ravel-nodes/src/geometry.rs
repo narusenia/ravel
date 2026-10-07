@@ -3,7 +3,7 @@
 
 //! Geometry-level operations (CPU-only): `geometry.transform`,
 //! `geometry.merge`, `geometry.connect`, `geometry.sort`,
-//! `geometry.blast`, `geometry.switch`, `geometry.null`, and `geometry.from_image`.
+//! `geometry.blast`, `geometry.resample`, `geometry.switch`, `geometry.null`, and `geometry.from_image`.
 //!
 //! Operate on whole [`Geometry`] values with copy-on-write attribute
 //! columns — untouched columns keep sharing their `Arc` with the input.
@@ -14,7 +14,7 @@ use ravel_core::geometry::absent::absent_column;
 use ravel_core::geometry::{
     AttributeArray, AttributeSet, ConnectInterpolation, ConnectMode, Domain, Geometry,
     InstanceColumns, InstanceImage, InstanceSource, InstanceTransform, SortMode, blast,
-    bounds_center, connect, names, sort,
+    bounds_center, connect, names, resample, sort,
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{NodeData, Vec2, Vec3};
@@ -559,6 +559,31 @@ impl NodeProcessor for GeometryBlastProcessor {
             domain,
             params.str_or("group", ""),
             params.bool_or("invert", false),
+        )?))
+    }
+}
+
+/// `geometry.resample`: re-place the points of every path at even spacing.
+///
+/// `length` wins when positive, otherwise `segments` decides; see
+/// [`ravel_core::geometry::resample`] for how attributes and corners behave.
+pub struct GeometryResampleProcessor;
+
+impl NodeProcessor for GeometryResampleProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let geometry = geometry_input(inputs, 0, "geometry.resample")?;
+        Ok(Arc::new(resample(
+            geometry,
+            params.f32_or("length", 0.0),
+            params.i32_or("segments", 16).max(1) as usize,
+            params.bool_or("keep_corners", false),
         )?))
     }
 }
@@ -2811,5 +2836,65 @@ mod tests {
         for (name, column) in a.points().iter() {
             assert_eq!(Some(column), b.points().get(name), "{name}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // geometry.resample
+    // -----------------------------------------------------------------------
+
+    /// Runs `geometry.resample` with `params` over a straight 10-long path.
+    fn eval_resample(params: &[(&str, ParameterValue)]) -> Geometry {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0)]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        let mut node = Node::new(NodeId::new(2), "geometry.resample")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_output("output", DataTypeId::GEOMETRY);
+        for (key, value) in params {
+            node = node.with_param(*key, value.clone());
+        }
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "test.source").with_output("out", DataTypeId::GEOMETRY),
+            )
+            .unwrap()
+            .add_node(node)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(Fixed(Arc::new(geometry))));
+        ev.register(NodeId::new(2), Arc::new(GeometryResampleProcessor));
+        let output = ev.evaluate(&graph, NodeId::new(2), &ctx()).unwrap();
+        output.downcast_ref::<Geometry>().unwrap().clone()
+    }
+
+    #[test]
+    fn resample_parameters_pick_the_spacing() {
+        let count = |params: &[(&str, ParameterValue)]| eval_resample(params).point_count();
+        assert_eq!(count(&[("length", ParameterValue::Float(2.0))]), 6);
+        assert_eq!(count(&[("segments", ParameterValue::Int(4))]), 5);
+        assert_eq!(
+            count(&[
+                ("length", ParameterValue::Float(5.0)),
+                ("segments", ParameterValue::Int(40)),
+            ]),
+            3,
+            "length wins over segments when positive"
+        );
+        assert_eq!(count(&[]), 17, "the default is 16 segments");
+        assert_eq!(
+            count(&[("segments", ParameterValue::Int(-3))]),
+            2,
+            "at least one segment"
+        );
     }
 }

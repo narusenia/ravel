@@ -1097,6 +1097,39 @@ end = "絞りが最終幅に達する軸上の位置。"
 amount = "終端までに失う幅の割合。0 で変化なし、1 で一点に閉じ、負で広がる。"
 group = "Bool 型のポイントアトリビュート名。フラグが立った点だけ動く。空なら全点。"
 
+[node."geometry.blast"]
+label = "ブラスト"
+description = "Bool 型のグループアトリビュートが指す要素（反転時は指さない要素）を削除する。ポイントを消すとそれを使うプリミティブも消える。index は振り直し、id は保存する。グループ名が空か解決できないときは何も削除しない。"
+[node."geometry.blast".params]
+domain = "削除する要素。プリミティブを消してもポイントは残る。"
+group = "削除する要素を指す、そのドメインの Bool 型アトリビュート名。空なら何も削除しない。"
+invert = "グループが指さない要素のほうを削除する。"
+
+[node."geometry.resample"]
+label = "リサンプル"
+description = "すべてのパスのポイントを弧長で等間隔に打ち直す。アトリビュートは元のポイントから補間し、in_tan と out_tan は捨てる。どのパスも使わないポイントは捨てる。"
+[node."geometry.resample".params]
+length = "目標の間隔。最も近い整数個の等分割になる。0 のときは segments が決める。"
+segments = "パス 1 本あたりの等分割数。length が 0 のとき使う。"
+keep_corners = "鋭く曲がるポイントを残し、その間の区間ごとに打ち直す。"
+
+[node."geometry.measure"]
+label = "メジャー"
+description = "幾何的な計測値をフィールドから読めるアトリビュートとして書く。perimeter・area・size はプリミティブ、curvature・segment_length はポイント、bounds はディテールに書く。"
+[node."geometry.measure".params]
+measure = "計測する量。area は符号付き（反時計回りが正）で、開いたパスは閉じたものとして扱う。curvature は各ポイントの符号付き 1/R。bounds は (min x, min y, max x, max y)、size はプリミティブごとの (幅, 高さ)。"
+name = "書き込むアトリビュート名。空なら計測値自身の名前を使う。"
+
+[node."geometry.switch"]
+label = "スイッチ"
+description = "複数のジオメトリ入力から index で 1 つ選んで通す。接続済みの最後の入力より大きい index は最後の入力を選ぶ。"
+[node."geometry.switch".params]
+index = "通す入力の番号（0 始まり）。"
+
+[node."geometry.null"]
+label = "ヌル"
+description = "入力をそのまま通す。グラフの整理や、リンク先の固定に使う。"
+
 [node."geometry.from_image"]
 label = "画像をジオメトリへ"
 description = "画像を 1 個のインスタンスとして包み、ジオメトリノードで複製・配置できるようにする。長方形はソースのピクセル寸法で原点中心。コピーを拡大するとボケる。"

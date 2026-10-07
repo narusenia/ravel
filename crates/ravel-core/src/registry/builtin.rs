@@ -180,6 +180,11 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(geometry_deformer("geometry.bend", "Bend", 90.0));
     reg.register(geometry_deformer("geometry.twist", "Twist", 90.0));
     reg.register(geometry_deformer("geometry.taper", "Taper", 0.5));
+    reg.register(geometry_blast());
+    reg.register(geometry_measure());
+    reg.register(geometry_resample());
+    reg.register(geometry_switch());
+    reg.register(geometry_null());
     reg.register(geometry_from_image());
     reg.register(scene_add());
     reg.register(scene_merge());
@@ -1806,6 +1811,83 @@ fn geometry_sort() -> NodeTemplate {
         .with_param_role("center", ParamRole::Position)
 }
 
+/// `geometry.blast`: delete the elements a Bool `group` attribute flags.
+///
+/// The `group` default is empty on purpose: elsewhere an empty group means
+/// every element, which for a deletion would empty the geometry the moment the
+/// node is created, so here it means none.
+fn geometry_blast() -> NodeTemplate {
+    NodeTemplate::new("geometry.blast", "Blast", NodeCategory::Geometry)
+        .with_input(geometry_input("geometry"))
+        .with_output(geometry_output())
+        // Detail holds exactly one element; there is nothing to delete from it.
+        .with_param(string_parameter("domain", "point"))
+        .with_param_options("domain", ["point", "primitive", "instance"])
+        .with_param(string_parameter("group", ""))
+        .with_param(Parameter {
+            key: "invert".into(),
+            value: ParameterValue::Bool(false),
+        })
+}
+
+/// `geometry.measure`: write one geometric quantity as an attribute.
+///
+/// The output domain follows the quantity (perimeter / area / size on the
+/// primitives, curvature / segment_length on the points, bounds on the detail),
+/// so `measure` is the one parameter and there is no `domain`.
+fn geometry_measure() -> NodeTemplate {
+    NodeTemplate::new("geometry.measure", "Measure", NodeCategory::Geometry)
+        .with_input(geometry_input("geometry"))
+        .with_output(geometry_output())
+        .with_param(string_parameter("measure", "perimeter"))
+        .with_param_options(
+            "measure",
+            [
+                "perimeter",
+                "area",
+                "curvature",
+                "segment_length",
+                "bounds",
+                "size",
+            ],
+        )
+        .with_param(string_parameter("name", ""))
+}
+
+/// `geometry.resample`: re-place the points of every path at even arc-length
+/// spacing. `length` wins when positive, otherwise `segments` decides.
+fn geometry_resample() -> NodeTemplate {
+    NodeTemplate::new("geometry.resample", "Resample", NodeCategory::Geometry)
+        .with_input(geometry_input("geometry"))
+        .with_output(geometry_output())
+        .with_param(float_parameter("length", 0.0))
+        .with_param(int_parameter("segments", 16))
+        .with_param(Parameter {
+            key: "keep_corners".into(),
+            value: ParameterValue::Bool(false),
+        })
+        .with_param_range("length", 0.0..=1e6, 0.0..=100.0)
+        .with_param_range("segments", 1.0..=1e6, 1.0..=256.0)
+}
+
+/// `geometry.switch`: pass one of the variadic inputs through, picked by
+/// `index`. Out-of-range clamps to the last connected input.
+fn geometry_switch() -> NodeTemplate {
+    NodeTemplate::new("geometry.switch", "Switch", NodeCategory::Geometry)
+        .with_variadic_input_group(geometry_input("geometry"))
+        .with_output(geometry_output())
+        .with_param(int_parameter("index", 0))
+        .with_param_range("index", 0.0..=1e6, 0.0..=16.0)
+}
+
+/// `geometry.null`: the identity. Hands the input on untouched, for tidying a
+/// graph and for giving links a stable place to point at.
+fn geometry_null() -> NodeTemplate {
+    NodeTemplate::new("geometry.null", "Null", NodeCategory::Geometry)
+        .with_input(geometry_input("geometry"))
+        .with_output(geometry_output())
+}
+
 fn scene_input(name: &str) -> InputPort {
     InputPort {
         name: name.into(),
@@ -3368,14 +3450,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 123);
+        assert_eq!(reg.all_templates().count(), 128);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 33);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 38);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
@@ -4407,12 +4489,18 @@ mod tests {
             "attribute.set",
             "attribute.transfer",
             "field.apply",
+            "geometry.blast",
             "geometry.connect",
             "geometry.bend",
             "geometry.group_index",
             "geometry.repeat",
+            "geometry.measure",
+            "geometry.null",
+            "geometry.resample",
             "geometry.sort",
             "geometry.taper",
+            "geometry.null",
+            "geometry.switch",
             "geometry.transform",
             "geometry.twist",
             "style.dash",

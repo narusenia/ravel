@@ -710,9 +710,20 @@ fn path_parameters(path: &[Vec2], closed: bool, mode: CurveUMode) -> Vec<f32> {
             .map(|index| index as f32 / steps as f32)
             .collect();
     }
-    // Shares `push_segment` with `path_sample`: the same cumulative lengths,
-    // and the same rule that a zero-length segment does not advance them (a
-    // duplicated point therefore repeats its predecessor's `u`).
+    let (at_vertex, total) = vertex_arc_lengths(path, closed);
+    if total <= f32::EPSILON {
+        return vec![0.0; path.len()];
+    }
+    at_vertex.iter().map(|length| length / total).collect()
+}
+
+/// Cumulative arc length at each vertex of one polyline, and the total
+/// (closing segment included when `closed`).
+///
+/// Shares `push_segment` with `path_sample`: the same cumulative lengths, and
+/// the same rule that a zero-length segment does not advance them (a
+/// duplicated point therefore repeats its predecessor's length).
+fn vertex_arc_lengths(path: &[Vec2], closed: bool) -> (Vec<f32>, f32) {
     let mut segments = Vec::with_capacity(path.len());
     let mut at_vertex = Vec::with_capacity(path.len());
     for (index, point) in path.iter().enumerate() {
@@ -725,10 +736,475 @@ fn path_parameters(path: &[Vec2], closed: bool, mode: CurveUMode) -> Vec<f32> {
         push_segment(&mut segments, *last, *first);
     }
     let total = segments.last().map_or(0.0, |segment| segment.2);
-    if total <= f32::EPSILON {
-        return vec![0.0; path.len()];
+    (at_vertex, total)
+}
+
+// ---------------------------------------------------------------------------
+// Resample
+// ---------------------------------------------------------------------------
+
+/// Segments one **path** may be divided into, across all its `keep_corners`
+/// spans together (each span's share is scaled down in proportion, never below
+/// one). A tiny `length` would otherwise ask for billions of points; the cap is
+/// far above anything a drawn path needs and turns a runaway parameter into a
+/// coarse result.
+const MAX_PATH_SEGMENTS: usize = 1 << 20;
+
+/// A turn sharper than this at a vertex (cosine of 1 degree) is a corner.
+const CORNER_COS: f32 = 0.999_847_7;
+
+/// Re-places the points of every path primitive at even arc-length spacing.
+///
+/// `length > 0` divides each path into `round(arc / length)` equal segments
+/// (at least 1), so the spacing is the nearest *even* one to `length` and the
+/// path ends stay exact; otherwise `segments` equal segments are used. With
+/// `keep_corners` the vertices where the path turns by more than about a
+/// degree stay as points and each stretch between them is divided on its own —
+/// in `segments` mode a stretch gets `round(segments * its share of the arc)`.
+///
+/// Point attributes are read back from the original points the new point falls
+/// between: `F32`, vectors and colours interpolate linearly, and the
+/// non-interpolable `I32` / `Bool` / `Str` take the nearer endpoint (so `id`
+/// stays a real id). `index` is renumbered. `in_tan` / `out_tan` are dropped:
+/// they describe the old curve's handles, and a resampled path is a polyline.
+///
+/// Points that no path references are dropped with the rest of the rebuilt
+/// point list. A path with a single vertex or no length cannot be spaced, so it
+/// passes through as it is rather than failing; a geometry with no path at all
+/// is returned unchanged. Arc length is [`path_sample`]'s, so 3D positions and
+/// meshes are explicit errors for the same reasons.
+pub fn resample(
+    geometry: &Geometry,
+    length: f32,
+    segments: usize,
+    keep_corners: bool,
+) -> Result<Geometry, GeometryOpError> {
+    if geometry.primitives().is_empty() {
+        return Ok(geometry.clone());
     }
-    at_vertex.iter().map(|length| length / total).collect()
+    let points = positions(geometry, Domain::Point)?.require_planar("geometry.resample")?;
+    geometry.require_paths("geometry.resample")?;
+
+    // `(from, to, t)` per output point, in global point indices.
+    let mut samples: Vec<(usize, usize, f32)> = Vec::new();
+    let mut primitives = Vec::with_capacity(geometry.primitive_count());
+    for primitive in geometry.primitives() {
+        let Primitive::Path { verts, closed } = primitive else {
+            continue;
+        };
+        let path = points
+            .get(verts.clone())
+            .ok_or(GeometryOpError::InvalidPath)?;
+        let start = samples.len();
+        for (from, to, t) in path_samples(path, *closed, length, segments, keep_corners) {
+            samples.push((verts.start + from, verts.start + to, t));
+        }
+        primitives.push(Primitive::Path {
+            verts: start..samples.len(),
+            closed: *closed,
+        });
+    }
+
+    let mut result = geometry.clone();
+    let mut resampled = AttributeSet::new();
+    for (name, column) in geometry.points().iter() {
+        if name.as_str() == names::IN_TAN || name.as_str() == names::OUT_TAN {
+            continue;
+        }
+        resampled.insert(name.as_str(), interpolate_samples(column, &samples))?;
+    }
+    *result.attribute_set_mut(Domain::Point) = resampled;
+    result.set_primitives(primitives);
+    renumber_index(&mut result, Domain::Point)?;
+    result.validate()?;
+    Ok(result)
+}
+
+/// The `(from vertex, to vertex, t)` of every point [`resample`] puts on one
+/// path, in path order. A degenerate path answers with its own vertices.
+fn path_samples(
+    path: &[Vec2],
+    closed: bool,
+    length: f32,
+    segments: usize,
+    keep_corners: bool,
+) -> Vec<(usize, usize, f32)> {
+    let vertices = path.len();
+    let (at_vertex, total) = vertex_arc_lengths(path, closed);
+    if vertices < 2 || total <= f32::EPSILON {
+        return (0..vertices).map(|vertex| (vertex, vertex, 0.0)).collect();
+    }
+
+    // The vertices the spans run between. An open path always owns its two
+    // ends and a closed one its first vertex, so a span never needs to
+    // reason about "the start of the loop".
+    let mut anchors = vec![0];
+    if keep_corners {
+        anchors
+            .extend((1..vertices - usize::from(!closed)).filter(|v| is_corner(path, *v, closed)));
+    }
+    if !closed {
+        anchors.push(vertices - 1);
+    }
+    anchors.dedup();
+
+    let spans = if closed {
+        anchors.len()
+    } else {
+        anchors.len() - 1
+    };
+    // `(from anchor, arc length at it, span length, wanted segments)` per span.
+    let mut plan = Vec::with_capacity(spans);
+    for span in 0..spans {
+        let (a, b) = (anchors[span], anchors[(span + 1) % anchors.len()]);
+        let begin = at_vertex[a];
+        let span_length = if b > a || (!closed) {
+            at_vertex[b] - begin
+        } else {
+            total - begin + at_vertex[b]
+        };
+        let wanted = if span_length <= f32::EPSILON {
+            0.0
+        } else if length > 0.0 {
+            f64::from(span_length / length).round()
+        } else {
+            (segments as f64 * f64::from(span_length / total)).round()
+        };
+        plan.push((a, begin, span_length, wanted.max(1.0)));
+    }
+    // One budget for the whole path, shared out in proportion to what each
+    // span asked for: a per-span cap would still allow corners x cap points.
+    let asked: f64 = plan.iter().map(|span| span.3).sum();
+    let scale = (MAX_PATH_SEGMENTS as f64 / asked).min(1.0);
+    let mut samples = Vec::new();
+    for (a, begin, span_length, wanted) in plan {
+        samples.push((a, a, 0.0));
+        if span_length <= f32::EPSILON {
+            continue;
+        }
+        let count = ((wanted * scale).floor() as usize).max(1);
+        for step in 1..count {
+            let distance = begin + span_length * step as f32 / count as f32;
+            samples.push(locate(&at_vertex, total, vertices, closed, distance));
+        }
+    }
+    if !closed {
+        samples.push((vertices - 1, vertices - 1, 0.0));
+    }
+    samples
+}
+
+/// Whether the path turns by more than a degree at `vertex`.
+fn is_corner(path: &[Vec2], vertex: usize, closed: bool) -> bool {
+    let count = path.len();
+    let (before, after) = if closed {
+        (
+            path[(vertex + count - 1) % count],
+            path[(vertex + 1) % count],
+        )
+    } else {
+        (path[vertex - 1], path[vertex + 1])
+    };
+    let here = path[vertex];
+    let (incoming, outgoing) = (
+        Vec2(here.0 - before.0, here.1 - before.1),
+        Vec2(after.0 - here.0, after.1 - here.1),
+    );
+    let lengths = (incoming.0.hypot(incoming.1)) * (outgoing.0.hypot(outgoing.1));
+    lengths > f32::EPSILON
+        && (incoming.0 * outgoing.0 + incoming.1 * outgoing.1) / lengths < CORNER_COS
+}
+
+/// The segment `distance` along the path falls on, as `(from, to, t)`.
+fn locate(
+    at_vertex: &[f32],
+    total: f32,
+    vertices: usize,
+    closed: bool,
+    distance: f32,
+) -> (usize, usize, f32) {
+    // The last vertex at or before `distance`: with duplicated points several
+    // share a length, and the last of them is the one whose outgoing segment
+    // has any.
+    let from = at_vertex
+        .partition_point(|length| *length <= distance)
+        .saturating_sub(1);
+    let end = if from + 1 < vertices {
+        at_vertex[from + 1]
+    } else {
+        total
+    };
+    let to = if from + 1 < vertices || closed {
+        (from + 1) % vertices
+    } else {
+        from
+    };
+    let span = end - at_vertex[from];
+    let t = if span > f32::EPSILON {
+        ((distance - at_vertex[from]) / span).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (from, to, t)
+}
+
+/// One output row per `(from, to, t)` of `column`: a linear blend where the
+/// type has one, the nearer endpoint where it does not.
+fn interpolate_samples(column: &AttributeArray, samples: &[(usize, usize, f32)]) -> AttributeArray {
+    macro_rules! blend {
+        ($values:expr, $variant:ident, $mix:expr) => {
+            AttributeArray::$variant(
+                samples
+                    .iter()
+                    .map(|(from, to, t)| $mix(&$values[*from], &$values[*to], *t))
+                    .collect(),
+            )
+        };
+    }
+    fn nearest<T: Clone>(from: &T, to: &T, t: f32) -> T {
+        if t < 0.5 { from } else { to }.clone()
+    }
+    let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+    match column {
+        AttributeArray::F32(v) => blend!(v, F32, |a: &f32, b: &f32, t| lerp(*a, *b, t)),
+        AttributeArray::Vec2(v) => blend!(v, Vec2, |a: &Vec2, b: &Vec2, t| Vec2(
+            lerp(a.0, b.0, t),
+            lerp(a.1, b.1, t)
+        )),
+        AttributeArray::Vec3(v) => blend!(v, Vec3, |a: &Vec3, b: &Vec3, t| Vec3(
+            lerp(a.0, b.0, t),
+            lerp(a.1, b.1, t),
+            lerp(a.2, b.2, t)
+        )),
+        AttributeArray::Vec4(v) => blend!(v, Vec4, |a: &Vec4, b: &Vec4, t| Vec4(
+            lerp(a.0, b.0, t),
+            lerp(a.1, b.1, t),
+            lerp(a.2, b.2, t),
+            lerp(a.3, b.3, t)
+        )),
+        AttributeArray::Color(v) => blend!(v, Color, |a: &Color, b: &Color, t| Color::new(
+            lerp(a.r, b.r, t),
+            lerp(a.g, b.g, t),
+            lerp(a.b, b.b, t),
+            lerp(a.a, b.a, t)
+        )),
+        AttributeArray::I32(v) => blend!(v, I32, nearest),
+        AttributeArray::Bool(v) => blend!(v, Bool, nearest),
+        AttributeArray::Str(v) => blend!(v, Str, nearest),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Measure
+// ---------------------------------------------------------------------------
+
+/// What [`measure`] writes. Each quantity lives on the domain it describes,
+/// which is what lets a field read it back with `field.attribute`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Measure {
+    /// Primitive, `F32`: the length of the path, closing segment included for
+    /// a closed one.
+    Perimeter,
+    /// Primitive, `F32`: the **signed** enclosed area. Positive when the path
+    /// runs counter-clockwise in the coordinates it is written in, negative
+    /// clockwise. A path that crosses itself sums its lobes by winding, so a
+    /// figure of eight can read 0 — take the absolute value for "how much
+    /// ink". An **open** path is measured as if closed: the area between it
+    /// and the chord from its last point back to its first.
+    Area,
+    /// Point, `F32`: the signed Menger curvature `1 / R` of the circle through
+    /// the point and its two neighbours (exact on a circle, positive for a
+    /// left turn). The ends of an open path, and any point with a coincident
+    /// neighbour, read 0.
+    Curvature,
+    /// Point, `F32`: the length of the segment leaving the point towards the
+    /// next one. The last point of an open path has none and reads 0; the last
+    /// point of a closed path owns the closing segment.
+    SegmentLength,
+    /// Detail, `Vec4`: `(min x, min y, max x, max y)` of the point positions —
+    /// the instance positions when there are no points, all zero when there is
+    /// nothing at all.
+    Bounds,
+    /// Primitive, `Vec2`: `(width, height)` of the box around the primitive's
+    /// own points.
+    Size,
+}
+
+impl Measure {
+    /// The domain this measurement is written on.
+    pub fn domain(self) -> Domain {
+        match self {
+            Self::Perimeter | Self::Area | Self::Size => Domain::Primitive,
+            Self::Curvature | Self::SegmentLength => Domain::Point,
+            Self::Bounds => Domain::Detail,
+        }
+    }
+
+    /// The attribute name used when the caller gives none.
+    pub fn default_name(self) -> &'static str {
+        match self {
+            Self::Perimeter => "perimeter",
+            Self::Area => "area",
+            Self::Curvature => "curvature",
+            Self::SegmentLength => "segment_length",
+            Self::Bounds => "bounds",
+            Self::Size => "size",
+        }
+    }
+}
+
+/// Writes one geometric measurement as an attribute (empty `name` takes
+/// [`Measure::default_name`]), replacing a column of that name on the target
+/// domain. Everything else passes through, sharing its columns.
+///
+/// The path measurements are planar and refuse meshes for the reasons
+/// [`path_sample`] does; `Bounds` and `Size` read the xy of 2D or 3D
+/// positions.
+pub fn measure(
+    geometry: &Geometry,
+    what: Measure,
+    name: &str,
+) -> Result<Geometry, GeometryOpError> {
+    let name = if name.is_empty() {
+        what.default_name()
+    } else {
+        name
+    };
+    let column = match what {
+        Measure::Bounds | Measure::Size => measure_extent(geometry, what)?,
+        _ => measure_paths(geometry, what)?,
+    };
+    let mut result = geometry.clone();
+    result
+        .attribute_set_mut(what.domain())
+        .insert(name, column)?;
+    result.validate()?;
+    Ok(result)
+}
+
+/// The path-based measurements, one value per primitive or per point.
+fn measure_paths(geometry: &Geometry, what: Measure) -> Result<AttributeArray, GeometryOpError> {
+    let points = match geometry.positions(Domain::Point) {
+        Some(positions) => positions?.require_planar("geometry.measure")?,
+        None => &[],
+    };
+    geometry.require_paths("geometry.measure")?;
+    let mut per_point = vec![0.0f32; points.len()];
+    let mut per_primitive = Vec::with_capacity(geometry.primitive_count());
+    for primitive in geometry.primitives() {
+        let Primitive::Path { verts, closed } = primitive else {
+            continue;
+        };
+        let path = points
+            .get(verts.clone())
+            .ok_or(GeometryOpError::InvalidPath)?;
+        // The vertex a segment leaving `index` arrives at, if it has one.
+        let next = |index: usize| match (index + 1 < path.len(), *closed && path.len() > 1) {
+            (true, _) => Some(path[index + 1]),
+            (false, true) => Some(path[0]),
+            _ => None,
+        };
+        per_primitive.push(match what {
+            Measure::Perimeter => (0..path.len())
+                .filter_map(|i| next(i).map(|n| planar_distance_squared(path[i], n).sqrt()))
+                .sum(),
+            Measure::Area => {
+                (0..path.len())
+                    .map(|i| {
+                        let (a, b) = (path[i], path[(i + 1) % path.len()]);
+                        a.0 * b.1 - b.0 * a.1
+                    })
+                    .sum::<f32>()
+                    / 2.0
+            }
+            _ => 0.0,
+        });
+        for (offset, slot) in per_point[verts.clone()].iter_mut().enumerate() {
+            *slot = match what {
+                Measure::SegmentLength => {
+                    next(offset).map_or(0.0, |n| planar_distance_squared(path[offset], n).sqrt())
+                }
+                Measure::Curvature => {
+                    let before = match (offset, *closed) {
+                        (0, true) => path.last().copied(),
+                        (0, false) => None,
+                        _ => Some(path[offset - 1]),
+                    };
+                    match (before, next(offset)) {
+                        (Some(a), Some(c)) => menger_curvature(a, path[offset], c),
+                        _ => 0.0,
+                    }
+                }
+                _ => 0.0,
+            };
+        }
+    }
+    Ok(AttributeArray::F32(match what {
+        Measure::Perimeter | Measure::Area => per_primitive,
+        _ => per_point,
+    }))
+}
+
+/// Signed `1 / R` of the circle through three points; 0 when any two coincide
+/// or the three are collinear.
+fn menger_curvature(a: Vec2, b: Vec2, c: Vec2) -> f32 {
+    let (ab, bc, ac) = (
+        planar_distance_squared(a, b).sqrt(),
+        planar_distance_squared(b, c).sqrt(),
+        planar_distance_squared(a, c).sqrt(),
+    );
+    let denominator = ab * bc * ac;
+    if denominator <= f32::EPSILON {
+        return 0.0;
+    }
+    let cross = (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0);
+    2.0 * cross / denominator
+}
+
+/// `Bounds` (one `Vec4` for the detail) and `Size` (one `Vec2` per primitive).
+fn measure_extent(geometry: &Geometry, what: Measure) -> Result<AttributeArray, GeometryOpError> {
+    let corners = |points: &[Vec2]| {
+        points.iter().fold(None, |extent: Option<(Vec2, Vec2)>, p| {
+            Some(match extent {
+                None => (*p, *p),
+                Some((low, high)) => (
+                    Vec2(low.0.min(p.0), low.1.min(p.1)),
+                    Vec2(high.0.max(p.0), high.1.max(p.1)),
+                ),
+            })
+        })
+    };
+    let xy = |domain| -> Result<Cow<'_, [Vec2]>, GeometryOpError> {
+        Ok(match geometry.positions(domain) {
+            Some(positions) => positions?.projected(),
+            None => Cow::Borrowed(&[]),
+        })
+    };
+    if what == Measure::Bounds {
+        let points = xy(Domain::Point)?;
+        let extent = if points.is_empty() {
+            corners(&xy(Domain::Instance)?)
+        } else {
+            corners(&points)
+        };
+        let (low, high) = extent.unwrap_or((Vec2(0.0, 0.0), Vec2(0.0, 0.0)));
+        return Ok(AttributeArray::Vec4(vec![Vec4(
+            low.0, low.1, high.0, high.1,
+        )]));
+    }
+    let points = xy(Domain::Point)?;
+    geometry
+        .primitives()
+        .iter()
+        .map(|primitive| {
+            let run = points
+                .get(primitive.verts().clone())
+                .ok_or(GeometryOpError::InvalidPath)?;
+            let (low, high) = corners(run).unwrap_or((Vec2(0.0, 0.0), Vec2(0.0, 0.0)));
+            Ok(Vec2(high.0 - low.0, high.1 - low.1))
+        })
+        .collect::<Result<Vec<_>, GeometryOpError>>()
+        .map(AttributeArray::Vec2)
 }
 
 // ---------------------------------------------------------------------------
@@ -1108,6 +1584,176 @@ fn within_runs(order: &[usize], runs: &[Range<usize>]) -> Vec<usize> {
         }
     }
     placed
+}
+
+/// Deletes the elements of one domain that `group` selects (or, with `invert`,
+/// the ones it does not), and everything that would dangle without them.
+///
+/// `group` follows the element-scope convention (REQ-CORE-013) with one
+/// deliberate difference: **nothing selected is nothing deleted**. Elsewhere an
+/// empty or unresolvable group means "every element", which for a deletion
+/// would empty the geometry on a half-typed name. Here an empty name, a missing
+/// column, a non-`Bool` one, or one of the wrong length returns the input
+/// unchanged (the last three already warn through the shared resolver). To
+/// delete everything, flag everything, or `invert` an empty selection.
+///
+/// What goes with a deleted element:
+///
+/// - **Points**: every primitive that referenced one of them. A path is a
+///   contiguous run of points, so a path with a hole is not the same shape;
+///   it goes whole (Houdini's rule). Surviving primitives have their `verts`
+///   re-packed onto the shorter point list, and their attribute rows follow.
+///   A deleted mesh leaves its triangles in the shared index buffer, unread.
+/// - **Primitives**: nothing else. Their points stay, because other primitives
+///   or a point cloud may still want them.
+/// - **Instances**: sources no surviving instance stamps are dropped and
+///   `source_index` renumbered, so the list does not carry geometry nobody
+///   draws. Without a `source_index` column every instance stamps the first
+///   source, which is then only dropped when no instance is left.
+///
+/// Every column of the blasted domain is selected through the same keep mask,
+/// so the survivors are byte-identical to what they were; `index` is
+/// renumbered to `0..n` (when the domain carries one) and `id` is not touched.
+/// The detail domain has no elements to delete and passes through.
+pub fn blast(
+    geometry: &Geometry,
+    domain: Domain,
+    group: &str,
+    invert: bool,
+) -> Result<Geometry, GeometryOpError> {
+    let count = domain_count(geometry, domain);
+    if domain == Domain::Detail || count == 0 {
+        return Ok(geometry.clone());
+    }
+    let Some(selected) =
+        super::field::group_selection(geometry.attribute_set(domain), group, count)
+    else {
+        return Ok(geometry.clone());
+    };
+    // Selected elements go unless inverted; unselected ones go only if inverted.
+    let keep: Vec<bool> = selected.iter().map(|inside| *inside == invert).collect();
+
+    let mut result = geometry.clone();
+    match domain {
+        Domain::Point => {
+            // `before[i]` is how many points survive ahead of point `i`, which
+            // is both a survivor's new position and a run's new boundary.
+            let mut before = Vec::with_capacity(count + 1);
+            let mut kept = 0;
+            before.push(0);
+            for survives in &keep {
+                kept += usize::from(*survives);
+                before.push(kept);
+            }
+            let (mut primitives, mut primitive_keep) = (Vec::new(), Vec::new());
+            for primitive in geometry.primitives() {
+                let verts = primitive.verts();
+                let intact = keep[verts.clone()].iter().all(|survives| *survives);
+                primitive_keep.push(intact);
+                if intact {
+                    let verts = before[verts.start]..before[verts.end];
+                    primitives.push(match primitive {
+                        Primitive::Path { closed, .. } => Primitive::Path {
+                            verts,
+                            closed: *closed,
+                        },
+                        Primitive::Mesh { indices, .. } => Primitive::Mesh {
+                            verts,
+                            indices: indices.clone(),
+                        },
+                    });
+                }
+            }
+            retain_rows(&mut result, Domain::Point, &keep)?;
+            retain_rows(&mut result, Domain::Primitive, &primitive_keep)?;
+            result.set_primitives(primitives);
+        }
+        Domain::Primitive => {
+            retain_rows(&mut result, Domain::Primitive, &keep)?;
+            let primitives = geometry
+                .primitives()
+                .iter()
+                .zip(&keep)
+                .filter(|(_, survives)| **survives)
+                .map(|(primitive, _)| primitive.clone())
+                .collect();
+            result.set_primitives(primitives);
+        }
+        Domain::Instance => {
+            retain_rows(&mut result, Domain::Instance, &keep)?;
+            prune_sources(geometry, &mut result, &keep)?;
+        }
+        Domain::Detail => unreachable!("returned above"),
+    }
+    for domain in [Domain::Point, Domain::Primitive, Domain::Instance] {
+        renumber_index(&mut result, domain)?;
+    }
+    result.validate()?;
+    Ok(result)
+}
+
+/// Replaces `domain`'s columns with their rows where `keep` is set. A domain
+/// with no columns has nothing to select.
+fn retain_rows(
+    geometry: &mut Geometry,
+    domain: Domain,
+    keep: &[bool],
+) -> Result<(), GeometryOpError> {
+    let mut retained = AttributeSet::new();
+    for (name, column) in geometry.attribute_set(domain).iter() {
+        let rows = keep
+            .iter()
+            .enumerate()
+            .filter(|(_, survives)| **survives)
+            .map(|(row, _)| row);
+        retained.insert(name.as_str(), select_values(column, rows))?;
+    }
+    *geometry.attribute_set_mut(domain) = retained;
+    Ok(())
+}
+
+/// Drops the instance sources that no surviving instance stamps.
+///
+/// `original` is the geometry before the rows were removed, since the
+/// surviving rows' `source_index` values are read from it.
+fn prune_sources(
+    original: &Geometry,
+    result: &mut Geometry,
+    keep: &[bool],
+) -> Result<(), GeometryOpError> {
+    let sources = original.sources();
+    if sources.is_empty() {
+        return Ok(());
+    }
+    if !keep.iter().any(|survives| *survives) {
+        result.set_sources(Vec::new());
+        return Ok(());
+    }
+    let Some(column) = original.instances().get(names::SOURCE_INDEX) else {
+        return Ok(());
+    };
+    let indices = column.as_i32(names::SOURCE_INDEX)?;
+    let slots: Vec<usize> = keep
+        .iter()
+        .enumerate()
+        .filter(|(_, survives)| **survives)
+        .map(|(row, _)| source_slot(sources.len(), Some(indices), row))
+        .collect();
+    let mut used: Vec<usize> = slots.clone();
+    used.sort_unstable();
+    used.dedup();
+    if used.len() == sources.len() {
+        return Ok(());
+    }
+    result.set_sources(used.iter().map(|slot| sources[*slot].clone()).collect());
+    let renumbered = slots
+        .iter()
+        .map(|slot| used.binary_search(slot).expect("every slot is used") as i32)
+        .collect();
+    result
+        .instances_mut()
+        .insert(names::SOURCE_INDEX, AttributeArray::I32(renumbered))?;
+    Ok(())
 }
 
 /// Bounding-box center of point positions, falling back to instance positions
@@ -6461,5 +7107,1060 @@ mod tests {
         assert_eq!(expanded.point_count(), 1);
         assert_eq!(expanded.instance_count(), 0);
         assert!(expanded.sources().is_empty());
+    }
+
+    // ----- blast ---------------------------------------------------------------
+
+    /// One column of every attribute type, each value a pure function of the
+    /// **original** row number, so what a row should hold after a deletion is
+    /// computed from the survivors' row numbers rather than by running the
+    /// code under test again.
+    fn typed_rows(rows: &[usize]) -> Vec<(&'static str, AttributeArray)> {
+        let f = |row: usize| row as f32 * 0.5 + 1.0;
+        vec![
+            (
+                "t_f32",
+                AttributeArray::F32(rows.iter().map(|r| f(*r)).collect()),
+            ),
+            (
+                "t_vec2",
+                AttributeArray::Vec2(rows.iter().map(|r| Vec2(f(*r), -f(*r))).collect()),
+            ),
+            (
+                "t_vec3",
+                AttributeArray::Vec3(rows.iter().map(|r| Vec3(f(*r), 2.0, 3.0)).collect()),
+            ),
+            (
+                "t_vec4",
+                AttributeArray::Vec4(rows.iter().map(|r| Vec4(f(*r), 2.0, 3.0, 4.0)).collect()),
+            ),
+            (
+                "t_color",
+                AttributeArray::Color(
+                    rows.iter()
+                        .map(|r| Color::new(f(*r), 0.1, 0.2, 0.3))
+                        .collect(),
+                ),
+            ),
+            (
+                "t_i32",
+                AttributeArray::I32(rows.iter().map(|r| 1000 + *r as i32).collect()),
+            ),
+            (
+                "t_bool",
+                AttributeArray::Bool(rows.iter().map(|r| r % 3 == 0).collect()),
+            ),
+            (
+                "t_str",
+                AttributeArray::Str(rows.iter().map(|r| format!("row{r}")).collect()),
+            ),
+            (
+                names::ID,
+                AttributeArray::I32(rows.iter().map(|r| 500 + *r as i32).collect()),
+            ),
+        ]
+    }
+
+    fn insert_all(set: &mut AttributeSet, columns: Vec<(&'static str, AttributeArray)>) {
+        for (name, column) in columns {
+            set.insert(name, column).unwrap();
+        }
+    }
+
+    /// 8 points in four 2-point paths, 4 primitives, 5 instances stamping
+    /// three distinct sources, a detail column, and every attribute type on
+    /// each of the three element domains.
+    fn blast_subject() -> Geometry {
+        let mut geometry =
+            Geometry::from_points((0..8).map(|i| Vec2(i as f32, i as f32 * 2.0)).collect());
+        insert_all(
+            geometry.points_mut(),
+            typed_rows(&(0..8).collect::<Vec<_>>()),
+        );
+        for i in 0..4 {
+            geometry.push_primitive(Primitive::Path {
+                verts: 2 * i..2 * i + 2,
+                closed: i % 2 == 1,
+            });
+        }
+        insert_all(
+            geometry.primitive_attrs_mut(),
+            typed_rows(&(0..4).collect::<Vec<_>>()),
+        );
+        geometry
+            .primitive_attrs_mut()
+            .insert(names::INDEX, AttributeArray::I32((0..4).collect()))
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec2((0..5).map(|i| Vec2(i as f32, 0.0)).collect()),
+            )
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert(names::INDEX, AttributeArray::I32((0..5).collect()))
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert(
+                names::SOURCE_INDEX,
+                AttributeArray::I32(vec![0, 2, 2, 1, 0]),
+            )
+            .unwrap();
+        insert_all(
+            geometry.instances_mut(),
+            typed_rows(&(0..5).collect::<Vec<_>>()),
+        );
+        geometry.set_instance_sources(
+            (1..=3)
+                .map(|n| Arc::new(Geometry::from_points(vec![Vec2(0.0, 0.0); n])))
+                .collect(),
+        );
+        geometry
+            .detail_mut()
+            .insert("note", AttributeArray::Str(vec!["keep me".into()]))
+            .unwrap();
+        geometry
+    }
+
+    /// `subject` with a `g` Bool group on `domain` flagging `rows`.
+    fn grouped(mut subject: Geometry, domain: Domain, rows: &[usize]) -> Geometry {
+        let count = domain_count(&subject, domain);
+        subject
+            .attribute_set_mut(domain)
+            .insert(
+                "g",
+                AttributeArray::Bool((0..count).map(|row| rows.contains(&row)).collect()),
+            )
+            .unwrap();
+        subject
+    }
+
+    fn column<'a>(geometry: &'a Geometry, domain: Domain, name: &str) -> &'a AttributeArray {
+        geometry.attribute_set(domain).get(name).unwrap_or_else(|| {
+            panic!("{domain:?} lacks {name}");
+        })
+    }
+
+    /// Every domain x every attribute type: the group's rows disappear from
+    /// the blasted domain and every other row of every column survives with
+    /// its value, which is what a column left behind by the deletion would
+    /// break.
+    #[test]
+    fn blast_deletes_the_group_and_leaves_every_survivor_value_untouched() {
+        for (domain, doomed, count) in [
+            (Domain::Point, vec![1, 6], 8),
+            (Domain::Primitive, vec![0, 3], 4),
+            (Domain::Instance, vec![1, 4], 5),
+        ] {
+            let result = blast(
+                &grouped(blast_subject(), domain, &doomed),
+                domain,
+                "g",
+                false,
+            )
+            .unwrap();
+            let survivors: Vec<usize> = (0..count).filter(|row| !doomed.contains(row)).collect();
+            assert_eq!(domain_count(&result, domain), survivors.len(), "{domain:?}");
+            for (name, expected) in typed_rows(&survivors) {
+                assert_eq!(
+                    column(&result, domain, name),
+                    &expected,
+                    "{domain:?} column {name}"
+                );
+            }
+            // The group column itself is just another column: it is filtered
+            // and so reads false on every survivor.
+            assert_eq!(
+                column(&result, domain, "g"),
+                &AttributeArray::Bool(vec![false; survivors.len()])
+            );
+            assert_eq!(
+                column(&result, Domain::Detail, "note"),
+                &AttributeArray::Str(vec!["keep me".into()])
+            );
+            assert_eq!(result.validate(), Ok(()), "{domain:?}");
+        }
+    }
+
+    #[test]
+    fn blast_leaves_the_other_domains_alone() {
+        let subject = blast_subject();
+        let by_primitive = blast(
+            &grouped(subject.clone(), Domain::Primitive, &[1]),
+            Domain::Primitive,
+            "g",
+            false,
+        )
+        .unwrap();
+        assert_eq!(by_primitive.point_count(), 8, "points stay");
+        assert_eq!(by_primitive.instance_count(), 5);
+        let by_instance = blast(
+            &grouped(subject, Domain::Instance, &[0]),
+            Domain::Instance,
+            "g",
+            false,
+        )
+        .unwrap();
+        assert_eq!(by_instance.point_count(), 8);
+        assert_eq!(by_instance.primitive_count(), 4);
+    }
+
+    #[test]
+    fn invert_deletes_the_complement_of_the_group() {
+        let result = blast(
+            &grouped(blast_subject(), Domain::Point, &[0, 1, 2, 3]),
+            Domain::Point,
+            "g",
+            true,
+        )
+        .unwrap();
+        // The kept half is exactly the flagged half: points 0..4, both paths.
+        assert_eq!(result.point_count(), 4);
+        assert_eq!(
+            column(&result, Domain::Point, "t_i32"),
+            &AttributeArray::I32(vec![1000, 1001, 1002, 1003])
+        );
+        assert_eq!(result.primitive_count(), 2);
+    }
+
+    /// Deleting a point takes every primitive that referenced it, and the
+    /// primitives after it are re-packed onto the shorter point list with
+    /// their attribute rows alongside.
+    #[test]
+    fn deleting_a_point_removes_its_primitives_and_repacks_verts() {
+        // Point 3 sits in path 1 (2..4); point 7 in path 3 (6..8).
+        let result = blast(
+            &grouped(blast_subject(), Domain::Point, &[3, 7]),
+            Domain::Point,
+            "g",
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.point_count(), 6);
+        assert_eq!(
+            result.primitives(),
+            &[
+                Primitive::Path {
+                    verts: 0..2,
+                    closed: false
+                },
+                // Was 4..6; point 3 ahead of it is gone.
+                Primitive::Path {
+                    verts: 3..5,
+                    closed: false
+                },
+            ],
+            "paths 0 and 2 survive"
+        );
+        assert_eq!(
+            column(&result, Domain::Primitive, "t_i32"),
+            &AttributeArray::I32(vec![1000, 1002])
+        );
+        // The shifted path still spans the points it spanned before.
+        let points = column(&result, Domain::Point, "t_i32")
+            .as_i32("t_i32")
+            .unwrap();
+        assert_eq!(points, &[1000, 1001, 1002, 1004, 1005, 1006]);
+        assert_eq!(&points[3..5], &[1004, 1005]);
+    }
+
+    #[test]
+    fn deleting_every_element_leaves_a_valid_empty_geometry() {
+        for domain in [Domain::Point, Domain::Primitive, Domain::Instance] {
+            let count = domain_count(&blast_subject(), domain);
+            let everything: Vec<usize> = (0..count).collect();
+            let result = blast(
+                &grouped(blast_subject(), domain, &everything),
+                domain,
+                "g",
+                false,
+            )
+            .unwrap();
+            assert_eq!(domain_count(&result, domain), 0, "{domain:?}");
+            assert_eq!(result.validate(), Ok(()), "{domain:?}");
+        }
+        // Emptying the points takes every path with them.
+        let no_points = blast(
+            &grouped(blast_subject(), Domain::Point, &(0..8).collect::<Vec<_>>()),
+            Domain::Point,
+            "g",
+            false,
+        )
+        .unwrap();
+        assert_eq!(no_points.primitive_count(), 0);
+        assert_eq!(no_points.primitive_attrs().element_count(), 0);
+        // Inverting an empty selection deletes everything too.
+        let inverted = blast(
+            &grouped(blast_subject(), Domain::Instance, &[]),
+            Domain::Instance,
+            "g",
+            true,
+        )
+        .unwrap();
+        assert_eq!(inverted.instance_count(), 0);
+        assert!(inverted.sources().is_empty());
+    }
+
+    #[test]
+    fn index_is_repacked_and_id_survives_a_deletion() {
+        for (domain, doomed) in [
+            (Domain::Point, vec![0, 3]),
+            (Domain::Primitive, vec![1]),
+            (Domain::Instance, vec![0, 2]),
+        ] {
+            let subject = grouped(blast_subject(), domain, &doomed);
+            let original_ids = column(&subject, domain, names::ID)
+                .as_i32(names::ID)
+                .unwrap()
+                .to_vec();
+            let result = blast(&subject, domain, "g", false).unwrap();
+            let n = domain_count(&result, domain) as i32;
+            if let Some(index) = result.attribute_set(domain).get(names::INDEX) {
+                assert_eq!(
+                    index.as_i32(names::INDEX).unwrap(),
+                    (0..n).collect::<Vec<_>>(),
+                    "{domain:?}"
+                );
+            } else {
+                panic!("{domain:?} lost its index column");
+            }
+            let expected_ids: Vec<i32> = original_ids
+                .iter()
+                .enumerate()
+                .filter(|(row, _)| !doomed.contains(row))
+                .map(|(_, id)| *id)
+                .collect();
+            assert_eq!(
+                column(&result, domain, names::ID)
+                    .as_i32(names::ID)
+                    .unwrap(),
+                expected_ids,
+                "{domain:?}"
+            );
+        }
+    }
+
+    /// Instances 1 and 2 stamp source 2, instance 3 source 1, instances 0
+    /// and 4 source 0. Deleting both stampers of source 2 drops it and
+    /// renumbers the rest; deleting nobody who matters drops nothing.
+    #[test]
+    fn deleting_instances_drops_the_sources_nobody_stamps_any_more() {
+        let result = blast(
+            &grouped(blast_subject(), Domain::Instance, &[1, 2]),
+            Domain::Instance,
+            "g",
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.sources().len(), 2);
+        // The remaining instances are old rows 0, 3, 4 -> sources 0, 1, 0.
+        assert_eq!(
+            column(&result, Domain::Instance, names::SOURCE_INDEX),
+            &AttributeArray::I32(vec![0, 1, 0])
+        );
+        let point_counts: Vec<usize> = result
+            .sources()
+            .iter()
+            .map(|source| source.geometry().unwrap().point_count())
+            .collect();
+        assert_eq!(point_counts, [1, 2], "sources 0 and 1 kept, in order");
+
+        // Source 0's two stampers go; sources 1 and 2 stay and shift down.
+        let result = blast(
+            &grouped(blast_subject(), Domain::Instance, &[0, 4]),
+            Domain::Instance,
+            "g",
+            false,
+        )
+        .unwrap();
+        let point_counts: Vec<usize> = result
+            .sources()
+            .iter()
+            .map(|source| source.geometry().unwrap().point_count())
+            .collect();
+        assert_eq!(point_counts, [2, 3]);
+        assert_eq!(
+            column(&result, Domain::Instance, names::SOURCE_INDEX),
+            &AttributeArray::I32(vec![1, 1, 0])
+        );
+
+        let untouched = blast(
+            &grouped(blast_subject(), Domain::Instance, &[4]),
+            Domain::Instance,
+            "g",
+            false,
+        )
+        .unwrap();
+        assert_eq!(untouched.sources().len(), 3);
+    }
+
+    /// A deletion is only as dangerous as its selection is precise, so an
+    /// empty or unresolvable group deletes nothing rather than everything.
+    #[test]
+    fn an_empty_or_unresolvable_group_deletes_nothing() {
+        let subject = grouped(blast_subject(), Domain::Point, &[0]);
+        for group in ["", "nope", "t_f32"] {
+            for invert in [false, true] {
+                let result = blast(&subject, Domain::Point, group, invert).unwrap();
+                assert_eq!(result.point_count(), 8, "{group:?} invert={invert}");
+                assert_eq!(result.primitive_count(), 4);
+            }
+        }
+    }
+
+    #[test]
+    fn blast_is_deterministic_and_detail_has_nothing_to_delete() {
+        let subject = grouped(blast_subject(), Domain::Point, &[2, 5]);
+        let first = blast(&subject, Domain::Point, "g", false).unwrap();
+        let second = blast(&subject, Domain::Point, "g", false).unwrap();
+        assert_eq!(first.primitives(), second.primitives());
+        for domain in [Domain::Point, Domain::Primitive, Domain::Instance] {
+            let (a, b) = (first.attribute_set(domain), second.attribute_set(domain));
+            assert_eq!(a.describe().len(), b.describe().len());
+            for (name, column) in a.iter() {
+                assert_eq!(Some(column), b.get(name), "{domain:?} {name}");
+            }
+        }
+        let detail = blast(&subject, Domain::Detail, "g", false).unwrap();
+        assert_eq!(detail.point_count(), 8);
+    }
+
+    #[test]
+    fn blasting_points_keeps_surviving_meshes_valid() {
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(1.0, 0.0),
+            Vec2(0.0, 1.0),
+            Vec2(5.0, 5.0),
+            Vec2(6.0, 5.0),
+            Vec2(5.0, 6.0),
+        ]);
+        geometry.push_mesh(0..3, &[0, 1, 2]);
+        geometry.push_mesh(3..6, &[0, 1, 2]);
+        let result = blast(
+            &grouped(geometry, Domain::Point, &[0]),
+            Domain::Point,
+            "g",
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.primitive_count(), 1, "the first mesh lost a vertex");
+        assert_eq!(result.primitives()[0].verts(), &(2..5));
+        assert_eq!(result.validate(), Ok(()));
+    }
+
+    // ----- resample ------------------------------------------------------------
+
+    fn path_geometry(points: Vec<Vec2>, closed: bool) -> Geometry {
+        let mut geometry = Geometry::from_points(points);
+        let count = geometry.point_count();
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..count,
+            closed,
+        });
+        geometry
+    }
+
+    fn xs(geometry: &Geometry) -> Vec<Vec2> {
+        geometry
+            .points()
+            .get(names::P)
+            .unwrap()
+            .as_vec2(names::P)
+            .unwrap()
+            .to_vec()
+    }
+
+    fn assert_points(actual: &[Vec2], expected: &[(f32, f32)]) {
+        assert_eq!(actual.len(), expected.len(), "{actual:?}");
+        for (point, (x, y)) in actual.iter().zip(expected) {
+            assert!(
+                (point.0 - x).abs() < 1e-4 && (point.1 - y).abs() < 1e-4,
+                "{actual:?} vs {expected:?}"
+            );
+        }
+    }
+
+    /// Uneven source vertices come out evenly spaced, by length and by count.
+    #[test]
+    fn resample_spaces_a_straight_path_evenly() {
+        let line = path_geometry(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(10.0, 0.0)], false);
+        let by_length = resample(&line, 2.5, 99, false).unwrap();
+        assert_points(
+            &xs(&by_length),
+            &[(0.0, 0.0), (2.5, 0.0), (5.0, 0.0), (7.5, 0.0), (10.0, 0.0)],
+        );
+        // `length` wins over `segments`; with no length the count decides.
+        let by_count = resample(&line, 0.0, 5, false).unwrap();
+        assert_points(
+            &xs(&by_count),
+            &[
+                (0.0, 0.0),
+                (2.0, 0.0),
+                (4.0, 0.0),
+                (6.0, 0.0),
+                (8.0, 0.0),
+                (10.0, 0.0),
+            ],
+        );
+        // A length that does not divide the path snaps to the nearest even one.
+        let snapped = resample(&line, 3.0, 0, false).unwrap();
+        assert_eq!(snapped.point_count(), 4, "10 / 3 rounds to 3 segments");
+        assert_eq!(
+            by_length.primitives(),
+            &[Primitive::Path {
+                verts: 0..5,
+                closed: false
+            }]
+        );
+    }
+
+    /// A closed path goes all the way round, ends on no duplicate of its
+    /// start, and stays closed.
+    #[test]
+    fn resample_walks_a_closed_path_once_around() {
+        let square = path_geometry(
+            vec![
+                Vec2(0.0, 0.0),
+                Vec2(4.0, 0.0),
+                Vec2(4.0, 4.0),
+                Vec2(0.0, 4.0),
+            ],
+            true,
+        );
+        let result = resample(&square, 0.0, 8, false).unwrap();
+        assert_points(
+            &xs(&result),
+            &[
+                (0.0, 0.0),
+                (2.0, 0.0),
+                (4.0, 0.0),
+                (4.0, 2.0),
+                (4.0, 4.0),
+                (2.0, 4.0),
+                (0.0, 4.0),
+                (0.0, 2.0),
+            ],
+        );
+        assert_eq!(
+            result.primitives(),
+            &[Primitive::Path {
+                verts: 0..8,
+                closed: true
+            }]
+        );
+    }
+
+    #[test]
+    fn keep_corners_keeps_the_turns_and_divides_each_stretch() {
+        let ell = path_geometry(
+            vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0), Vec2(10.0, 5.0)],
+            false,
+        );
+        let kept = xs(&resample(&ell, 4.0, 0, true).unwrap());
+        // 10 -> 3 segments, 5 -> 1 segment, and the corner is exactly there.
+        assert_eq!(kept.len(), 5);
+        assert!(kept.contains(&Vec2(10.0, 0.0)), "{kept:?}");
+        assert_eq!(kept.last(), Some(&Vec2(10.0, 5.0)));
+        assert_points(
+            &kept,
+            &[
+                (0.0, 0.0),
+                (10.0 / 3.0, 0.0),
+                (20.0 / 3.0, 0.0),
+                (10.0, 0.0),
+                (10.0, 5.0),
+            ],
+        );
+        // Without it the corner is stepped over: 15 / 4 = 3.75 spacing.
+        let loose = xs(&resample(&ell, 4.0, 0, false).unwrap());
+        assert!(!loose.contains(&Vec2(10.0, 0.0)), "{loose:?}");
+        assert_points(
+            &loose,
+            &[
+                (0.0, 0.0),
+                (3.75, 0.0),
+                (7.5, 0.0),
+                (10.0, 1.25),
+                (10.0, 5.0),
+            ],
+        );
+        // A closed shape keeps every corner of a square, 4 per side.
+        let square = path_geometry(
+            vec![
+                Vec2(0.0, 0.0),
+                Vec2(4.0, 0.0),
+                Vec2(4.0, 4.0),
+                Vec2(0.0, 4.0),
+            ],
+            true,
+        );
+        let corners = xs(&resample(&square, 1.0, 0, true).unwrap());
+        assert_eq!(corners.len(), 16);
+        for corner in [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)] {
+            assert!(corners.contains(&Vec2(corner.0, corner.1)), "{corner:?}");
+        }
+    }
+
+    #[test]
+    fn resample_interpolates_what_can_be_and_picks_the_nearer_point_for_the_rest() {
+        let mut line = path_geometry(vec![Vec2(0.0, 0.0), Vec2(8.0, 0.0)], false);
+        line.points_mut()
+            .insert("w", AttributeArray::F32(vec![0.0, 10.0]))
+            .unwrap();
+        line.points_mut()
+            .insert(
+                "c",
+                AttributeArray::Color(vec![
+                    Color::new(0.0, 0.0, 0.0, 1.0),
+                    Color::new(1.0, 0.5, 0.0, 1.0),
+                ]),
+            )
+            .unwrap();
+        line.points_mut()
+            .insert(names::ID, AttributeArray::I32(vec![7, 9]))
+            .unwrap();
+        line.points_mut()
+            .insert("name", AttributeArray::Str(vec!["a".into(), "b".into()]))
+            .unwrap();
+        line.points_mut()
+            .insert(names::IN_TAN, AttributeArray::Vec2(vec![Vec2(1.0, 1.0); 2]))
+            .unwrap();
+        line.primitive_attrs_mut()
+            .insert("tag", AttributeArray::I32(vec![42]))
+            .unwrap();
+        let result = resample(&line, 0.0, 4, false).unwrap();
+        let point = |name: &str| result.points().get(name).unwrap().clone();
+        assert_eq!(point("w").as_f32("w").unwrap(), [0.0, 2.5, 5.0, 7.5, 10.0]);
+        let AttributeArray::Color(colors) = point("c").as_ref().clone() else {
+            panic!("c is a colour column");
+        };
+        assert!((colors[2].r - 0.5).abs() < 1e-6 && (colors[2].g - 0.25).abs() < 1e-6);
+        assert_eq!(point(names::ID).as_i32(names::ID).unwrap(), [7, 7, 9, 9, 9]);
+        assert_eq!(
+            point(names::INDEX).as_i32(names::INDEX).unwrap(),
+            [0, 1, 2, 3, 4]
+        );
+        let AttributeArray::Str(names) = point("name").as_ref().clone() else {
+            panic!("name is a string column");
+        };
+        assert_eq!(names, ["a", "a", "b", "b", "b"]);
+        assert!(result.points().get(names::IN_TAN).is_none());
+        assert_eq!(
+            result
+                .primitive_attrs()
+                .get("tag")
+                .unwrap()
+                .as_i32("tag")
+                .unwrap(),
+            [42],
+            "primitive rows follow their primitive"
+        );
+    }
+
+    #[test]
+    fn resample_handles_degenerate_paths_without_erroring() {
+        // One vertex, a path whose points coincide, and an open two-point
+        // path of zero length all pass through.
+        for points in [
+            vec![Vec2(3.0, 4.0)],
+            vec![Vec2(1.0, 1.0), Vec2(1.0, 1.0)],
+            vec![Vec2(2.0, 2.0), Vec2(2.0, 2.0), Vec2(2.0, 2.0)],
+        ] {
+            for closed in [false, true] {
+                for keep in [false, true] {
+                    let geometry = path_geometry(points.clone(), closed);
+                    let result = resample(&geometry, 0.5, 4, keep).unwrap();
+                    assert_eq!(xs(&result), points, "{points:?} closed={closed}");
+                    assert_eq!(result.validate(), Ok(()));
+                }
+            }
+        }
+        // No path primitive at all: nothing to do, nothing wrong.
+        let cloud = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0)]);
+        assert_eq!(resample(&cloud, 0.5, 4, false).unwrap().point_count(), 2);
+        assert_eq!(
+            resample(&Geometry::new(), 0.5, 4, false)
+                .unwrap()
+                .point_count(),
+            0
+        );
+        // A tiny length is capped rather than allocating without bound.
+        let long = path_geometry(vec![Vec2(0.0, 0.0), Vec2(1.0e6, 0.0)], false);
+        assert!(resample(&long, 1.0e-6, 0, false).unwrap().point_count() <= MAX_PATH_SEGMENTS + 1);
+    }
+
+    /// The budget is per path, not per corner-to-corner span.
+    #[test]
+    fn many_corners_and_a_tiny_length_stay_within_the_path_budget() {
+        let zigzag: Vec<Vec2> = (0..200)
+            .map(|i| Vec2(i as f32 * 1000.0, if i % 2 == 0 { 0.0 } else { 1000.0 }))
+            .collect();
+        let geometry = path_geometry(zigzag, false);
+        let result = resample(&geometry, 1.0e-4, 0, true).unwrap();
+        assert!(result.point_count() <= MAX_PATH_SEGMENTS + 200);
+        assert!(result.point_count() > 200, "still resampled, just coarser");
+        assert_eq!(result.validate(), Ok(()));
+    }
+
+    #[test]
+    fn resample_rebuilds_each_path_in_turn() {
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(4.0, 0.0),
+            Vec2(0.0, 10.0),
+            Vec2(0.0, 16.0),
+        ]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        geometry.push_primitive(Primitive::Path {
+            verts: 2..4,
+            closed: false,
+        });
+        let result = resample(&geometry, 2.0, 0, false).unwrap();
+        // 4 long -> 2 segments, 6 long -> 3 segments.
+        assert_eq!(
+            result.primitives(),
+            &[
+                Primitive::Path {
+                    verts: 0..3,
+                    closed: false
+                },
+                Primitive::Path {
+                    verts: 3..7,
+                    closed: false
+                },
+            ]
+        );
+        assert_points(
+            &xs(&result)[3..],
+            &[(0.0, 10.0), (0.0, 12.0), (0.0, 14.0), (0.0, 16.0)],
+        );
+    }
+
+    #[test]
+    fn resample_refuses_meshes() {
+        let mut geometry =
+            Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(0.0, 1.0)]);
+        geometry.push_mesh(0..3, &[0, 1, 2]);
+        assert!(resample(&geometry, 1.0, 4, false).is_err());
+    }
+
+    // ----- measure -------------------------------------------------------------
+
+    fn f32_column(geometry: &Geometry, domain: Domain, name: &str) -> Vec<f32> {
+        geometry
+            .attribute_set(domain)
+            .get(name)
+            .unwrap_or_else(|| panic!("{domain:?} lacks {name}"))
+            .as_f32(name)
+            .unwrap()
+            .to_vec()
+    }
+
+    fn close(actual: &[f32], expected: &[f32], tolerance: f32) {
+        assert_eq!(actual.len(), expected.len(), "{actual:?}");
+        for (a, e) in actual.iter().zip(expected) {
+            assert!((a - e).abs() <= tolerance, "{actual:?} vs {expected:?}");
+        }
+    }
+
+    fn rectangle(closed: bool) -> Geometry {
+        path_geometry(
+            vec![
+                Vec2(0.0, 0.0),
+                Vec2(4.0, 0.0),
+                Vec2(4.0, 3.0),
+                Vec2(0.0, 3.0),
+            ],
+            closed,
+        )
+    }
+
+    /// A counter-clockwise regular polygon close enough to a circle that the
+    /// analytic values hold to the tolerance used below.
+    fn circle(radius: f32, sides: usize) -> Geometry {
+        path_geometry(
+            (0..sides)
+                .map(|i| {
+                    let angle = i as f32 / sides as f32 * std::f32::consts::TAU;
+                    Vec2(radius * angle.cos(), radius * angle.sin())
+                })
+                .collect(),
+            true,
+        )
+    }
+
+    #[test]
+    fn measure_matches_the_analytic_values_of_a_rectangle() {
+        let rect = rectangle(true);
+        let perimeter = measure(&rect, Measure::Perimeter, "").unwrap();
+        close(
+            &f32_column(&perimeter, Domain::Primitive, "perimeter"),
+            &[14.0],
+            1e-5,
+        );
+        let area = measure(&rect, Measure::Area, "").unwrap();
+        close(&f32_column(&area, Domain::Primitive, "area"), &[12.0], 1e-5);
+        let lengths = measure(&rect, Measure::SegmentLength, "").unwrap();
+        close(
+            &f32_column(&lengths, Domain::Point, "segment_length"),
+            &[4.0, 3.0, 4.0, 3.0],
+            1e-5,
+        );
+        let sized = measure(&rect, Measure::Size, "").unwrap();
+        assert_eq!(
+            sized
+                .primitive_attrs()
+                .get("size")
+                .unwrap()
+                .as_vec2("size")
+                .unwrap(),
+            [Vec2(4.0, 3.0)]
+        );
+        let bounds = measure(&rect, Measure::Bounds, "").unwrap();
+        assert_eq!(
+            bounds
+                .detail()
+                .get("bounds")
+                .unwrap()
+                .as_vec4("bounds")
+                .unwrap(),
+            [Vec4(0.0, 0.0, 4.0, 3.0)]
+        );
+        // The rectangle's own columns are untouched and shared.
+        assert!(Arc::ptr_eq(
+            perimeter.points().get(names::P).unwrap(),
+            rect.points().get(names::P).unwrap()
+        ));
+    }
+
+    #[test]
+    fn measure_matches_the_analytic_values_of_a_circle() {
+        let (radius, sides) = (5.0f32, 720);
+        let round = circle(radius, sides);
+        let tau = std::f32::consts::TAU;
+        // A regular polygon's exact values, which the circle's are the limit of.
+        let n = sides as f32;
+        let perimeter = f32_column(
+            &measure(&round, Measure::Perimeter, "").unwrap(),
+            Domain::Primitive,
+            "perimeter",
+        );
+        close(
+            &perimeter,
+            &[n * 2.0 * radius * (tau / n / 2.0).sin()],
+            1e-3,
+        );
+        close(&perimeter, &[tau * radius], 0.01);
+        let area = f32_column(
+            &measure(&round, Measure::Area, "").unwrap(),
+            Domain::Primitive,
+            "area",
+        );
+        close(&area, &[std::f32::consts::PI * radius * radius], 0.01);
+        // Curvature is 1 / R at every point, positive for a counter-clockwise
+        // loop and negative for the same loop run backwards.
+        let curvature = measure(&round, Measure::Curvature, "").unwrap();
+        close(
+            &f32_column(&curvature, Domain::Point, "curvature"),
+            &vec![0.2; sides],
+            1e-3,
+        );
+        let mut backwards = xs(&round);
+        backwards.reverse();
+        let backwards = path_geometry(backwards, true);
+        let curvature = measure(&backwards, Measure::Curvature, "").unwrap();
+        close(
+            &f32_column(&curvature, Domain::Point, "curvature"),
+            &vec![-0.2; sides],
+            1e-3,
+        );
+        let area = f32_column(
+            &measure(&backwards, Measure::Area, "").unwrap(),
+            Domain::Primitive,
+            "area",
+        );
+        assert!(area[0] < 0.0, "a clockwise loop is negative: {area:?}");
+    }
+
+    /// The area is the signed shoelace sum, so lobes of opposite winding
+    /// cancel: this path runs one lobe clockwise and the other
+    /// counter-clockwise, and reads -4 where the ink covers more.
+    #[test]
+    fn the_area_of_a_self_crossing_path_is_the_signed_winding_sum() {
+        let crossing = path_geometry(
+            vec![
+                Vec2(0.0, 0.0),
+                Vec2(4.0, 4.0),
+                Vec2(4.0, 0.0),
+                Vec2(0.0, 2.0),
+            ],
+            true,
+        );
+        let area = f32_column(
+            &measure(&crossing, Measure::Area, "").unwrap(),
+            Domain::Primitive,
+            "area",
+        );
+        close(&area, &[-4.0], 1e-5);
+        // A symmetric bowtie cancels exactly.
+        let bowtie = path_geometry(
+            vec![
+                Vec2(0.0, 0.0),
+                Vec2(2.0, 2.0),
+                Vec2(2.0, 0.0),
+                Vec2(0.0, 2.0),
+            ],
+            true,
+        );
+        let area = f32_column(
+            &measure(&bowtie, Measure::Area, "").unwrap(),
+            Domain::Primitive,
+            "area",
+        );
+        close(&area, &[0.0], 1e-5);
+    }
+
+    /// An open path's area is that of the shape its chord closes, and its
+    /// perimeter is only the way along it.
+    #[test]
+    fn an_open_path_is_measured_for_area_as_if_it_were_closed() {
+        let open = path_geometry(vec![Vec2(0.0, 0.0), Vec2(4.0, 0.0), Vec2(4.0, 3.0)], false);
+        let closed = path_geometry(vec![Vec2(0.0, 0.0), Vec2(4.0, 0.0), Vec2(4.0, 3.0)], true);
+        let area = |geometry: &Geometry| {
+            f32_column(
+                &measure(geometry, Measure::Area, "").unwrap(),
+                Domain::Primitive,
+                "area",
+            )
+        };
+        close(&area(&open), &[6.0], 1e-5);
+        assert_eq!(area(&open), area(&closed));
+        let perimeter = |geometry: &Geometry| {
+            f32_column(
+                &measure(geometry, Measure::Perimeter, "").unwrap(),
+                Domain::Primitive,
+                "perimeter",
+            )
+        };
+        close(&perimeter(&open), &[7.0], 1e-5);
+        close(&perimeter(&closed), &[12.0], 1e-5);
+        // The open path's last point has no segment leaving it, its ends no
+        // curvature.
+        let lengths = measure(&open, Measure::SegmentLength, "").unwrap();
+        close(
+            &f32_column(&lengths, Domain::Point, "segment_length"),
+            &[4.0, 3.0, 0.0],
+            1e-5,
+        );
+        let curvature = measure(&open, Measure::Curvature, "").unwrap();
+        let curvature = f32_column(&curvature, Domain::Point, "curvature");
+        assert_eq!((curvature[0], curvature[2]), (0.0, 0.0));
+        assert!(curvature[1] > 0.0, "a left turn: {curvature:?}");
+    }
+
+    #[test]
+    fn measure_writes_each_quantity_on_its_domain_under_the_requested_name() {
+        let rect = rectangle(true);
+        for (what, domain) in [
+            (Measure::Perimeter, Domain::Primitive),
+            (Measure::Area, Domain::Primitive),
+            (Measure::Size, Domain::Primitive),
+            (Measure::Curvature, Domain::Point),
+            (Measure::SegmentLength, Domain::Point),
+            (Measure::Bounds, Domain::Detail),
+        ] {
+            assert_eq!(what.domain(), domain);
+            let named = measure(&rect, what, "mine").unwrap();
+            assert!(
+                named.attribute_set(domain).get("mine").is_some(),
+                "{what:?}"
+            );
+            assert!(
+                named
+                    .attribute_set(domain)
+                    .get(what.default_name())
+                    .is_none(),
+                "{what:?}"
+            );
+            let default = measure(&rect, what, "").unwrap();
+            assert!(
+                default
+                    .attribute_set(domain)
+                    .get(what.default_name())
+                    .is_some()
+            );
+        }
+        // Two primitives get one value each, in primitive order.
+        let mut two = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(4.0, 0.0),
+            Vec2(4.0, 3.0),
+            Vec2(0.0, 3.0),
+            Vec2(10.0, 10.0),
+            Vec2(11.0, 10.0),
+            Vec2(11.0, 12.0),
+        ]);
+        two.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        two.push_primitive(Primitive::Path {
+            verts: 4..7,
+            closed: true,
+        });
+        let sized = measure(&two, Measure::Size, "").unwrap();
+        assert_eq!(
+            sized
+                .primitive_attrs()
+                .get("size")
+                .unwrap()
+                .as_vec2("size")
+                .unwrap(),
+            [Vec2(4.0, 3.0), Vec2(1.0, 2.0)]
+        );
+    }
+
+    #[test]
+    fn measure_copes_with_degenerate_and_empty_geometry() {
+        let single = path_geometry(vec![Vec2(3.0, 4.0)], false);
+        for what in [
+            Measure::Perimeter,
+            Measure::Area,
+            Measure::Curvature,
+            Measure::SegmentLength,
+            Measure::Size,
+            Measure::Bounds,
+        ] {
+            let measured = measure(&single, what, "").unwrap();
+            assert_eq!(measured.validate(), Ok(()), "{what:?}");
+            let empty = measure(&Geometry::new(), what, "").unwrap();
+            assert_eq!(empty.validate(), Ok(()), "{what:?}");
+        }
+        let bounds = measure(&Geometry::new(), Measure::Bounds, "").unwrap();
+        assert_eq!(
+            bounds
+                .detail()
+                .get("bounds")
+                .unwrap()
+                .as_vec4("bounds")
+                .unwrap(),
+            [Vec4(0.0, 0.0, 0.0, 0.0)]
+        );
+        // Coincident points have no curvature rather than NaN.
+        let stacked = path_geometry(vec![Vec2(1.0, 1.0); 3], true);
+        let curvature = measure(&stacked, Measure::Curvature, "").unwrap();
+        assert_eq!(f32_column(&curvature, Domain::Point, "curvature"), [0.0; 3]);
+        let mut mesh = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.0), Vec2(0.0, 1.0)]);
+        mesh.push_mesh(0..3, &[0, 1, 2]);
+        assert!(measure(&mesh, Measure::Area, "").is_err());
+        // But a mesh has an extent.
+        assert!(measure(&mesh, Measure::Size, "").is_ok());
     }
 }

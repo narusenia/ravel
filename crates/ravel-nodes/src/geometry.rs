@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Geometry-level operations (CPU-only): `geometry.transform`,
-//! `geometry.merge`, `geometry.connect`, `geometry.sort`, and
-//! `geometry.from_image`.
+//! `geometry.merge`, `geometry.connect`, `geometry.sort`,
+//! `geometry.blast`, `geometry.measure`, `geometry.resample`, `geometry.switch`, `geometry.null`, and `geometry.from_image`.
 //!
 //! Operate on whole [`Geometry`] values with copy-on-write attribute
 //! columns — untouched columns keep sharing their `Arc` with the input.
@@ -13,8 +13,8 @@ use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::absent::absent_column;
 use ravel_core::geometry::{
     AttributeArray, AttributeSet, ConnectInterpolation, ConnectMode, Domain, Geometry,
-    InstanceColumns, InstanceImage, InstanceSource, InstanceTransform, SortMode, bounds_center,
-    connect, names, sort,
+    InstanceColumns, InstanceImage, InstanceSource, InstanceTransform, Measure, SortMode, blast,
+    bounds_center, connect, measure, names, resample, sort,
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{NodeData, Vec2, Vec3};
@@ -534,6 +534,137 @@ impl NodeProcessor for GeometrySortProcessor {
             _ => SortMode::X,
         };
         Ok(Arc::new(sort(geometry, domain, mode)?))
+    }
+}
+
+/// `geometry.blast`: delete the elements a Bool `group` attribute flags.
+///
+/// An empty or unresolvable `group` deletes nothing (see
+/// [`ravel_core::geometry::blast`]); `invert` flips which side goes.
+pub struct GeometryBlastProcessor;
+
+impl NodeProcessor for GeometryBlastProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let geometry = geometry_input(inputs, 0, "geometry.blast")?;
+        let domain = crate::attribute::domain_param(params, "domain", Domain::Point);
+        Ok(Arc::new(blast(
+            geometry,
+            domain,
+            params.str_or("group", ""),
+            params.bool_or("invert", false),
+        )?))
+    }
+}
+
+/// `geometry.measure`: write one geometric measurement as an attribute.
+///
+/// The `measure` parameter picks the quantity and with it the domain the
+/// attribute lands on; an unknown string falls back to `perimeter` the way
+/// `geometry.sort`'s unknown `mode` falls back to `x`.
+pub struct GeometryMeasureProcessor;
+
+impl NodeProcessor for GeometryMeasureProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let geometry = geometry_input(inputs, 0, "geometry.measure")?;
+        let what = match params.str_or("measure", "perimeter") {
+            "area" => Measure::Area,
+            "curvature" => Measure::Curvature,
+            "segment_length" => Measure::SegmentLength,
+            "bounds" => Measure::Bounds,
+            "size" => Measure::Size,
+            _ => Measure::Perimeter,
+        };
+        Ok(Arc::new(measure(
+            geometry,
+            what,
+            params.str_or("name", ""),
+        )?))
+    }
+}
+
+/// `geometry.resample`: re-place the points of every path at even spacing.
+///
+/// `length` wins when positive, otherwise `segments` decides; see
+/// [`ravel_core::geometry::resample`] for how attributes and corners behave.
+pub struct GeometryResampleProcessor;
+
+impl NodeProcessor for GeometryResampleProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let geometry = geometry_input(inputs, 0, "geometry.resample")?;
+        Ok(Arc::new(resample(
+            geometry,
+            params.f32_or("length", 0.0),
+            params.i32_or("segments", 16).max(1) as usize,
+            params.bool_or("keep_corners", false),
+        )?))
+    }
+}
+
+/// `geometry.switch`: pass one of the variadic inputs through, picked by
+/// `index`. The index clamps to the last connected input, so a typo or an
+/// animated overshoot never reads past the wired ones; a slot picked while
+/// unconnected yields an empty geometry.
+pub struct GeometrySwitchProcessor;
+
+impl NodeProcessor for GeometrySwitchProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let Some(last) = inputs.iter().rposition(Option::is_some) else {
+            return Ok(Arc::new(Geometry::new()));
+        };
+        let index = (params.i32_or("index", 0).max(0) as usize).min(last);
+        match &inputs[index] {
+            Some(input) if input.downcast_ref::<Geometry>().is_some() => Ok(input.clone()),
+            Some(_) => anyhow::bail!("geometry.switch: input {index} is not Geometry"),
+            None => Ok(Arc::new(Geometry::new())),
+        }
+    }
+}
+
+/// `geometry.null`: the identity. Returns the input `Arc` itself, no copy.
+pub struct GeometryNullProcessor;
+
+impl NodeProcessor for GeometryNullProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        geometry_input(inputs, 0, "geometry.null")?;
+        Ok(inputs[0]
+            .as_ref()
+            .expect("checked by geometry_input")
+            .clone())
     }
 }
 
@@ -2553,5 +2684,347 @@ mod tests {
             staggered(Some("x")),
             [(10, 2.0), (11, 0.0), (12, 1.0), (13, 3.0)]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // geometry.switch / geometry.null
+    // -----------------------------------------------------------------------
+
+    /// Geometry with `n` points, so which input was picked reads off the count.
+    fn n_points(n: usize) -> Arc<Geometry> {
+        Arc::new(Geometry::from_points(vec![Vec2(0.0, 0.0); n]))
+    }
+
+    /// Runs `geometry.switch` with one source per entry of `sources` (`None`
+    /// leaves that slot unconnected) and returns the node's output.
+    fn eval_switch(index: i32, sources: &[Option<Arc<Geometry>>]) -> Arc<dyn NodeData> {
+        let mut node = Node::new(NodeId::new(100), "geometry.switch")
+            .with_output("output", DataTypeId::GEOMETRY)
+            .with_param("index", ParameterValue::Int(index));
+        for i in 0..sources.len() {
+            node = node.with_input(format!("geometry_{i}"), &[DataTypeId::GEOMETRY]);
+        }
+        let mut graph = Graph::new();
+        let mut ev = Evaluator::new();
+        let mut edges = Vec::new();
+        for (i, source) in sources.iter().enumerate() {
+            if let Some(geo) = source {
+                let id = NodeId::new(i as u64 + 1);
+                graph = graph
+                    .add_node(Node::new(id, "test.source").with_output("out", DataTypeId::GEOMETRY))
+                    .unwrap();
+                ev.register(id, Arc::new(Fixed(geo.clone())));
+                edges.push((i, id));
+            }
+        }
+        graph = graph.add_node(node).unwrap();
+        for (slot, from) in edges {
+            graph = graph
+                .add_edge(
+                    EdgeId::new(slot as u64 + 1),
+                    from,
+                    OutputPortIndex(0),
+                    NodeId::new(100),
+                    InputPortIndex(slot as u32),
+                )
+                .unwrap();
+        }
+        ev.register(NodeId::new(100), Arc::new(GeometrySwitchProcessor));
+        ev.evaluate(&graph, NodeId::new(100), &ctx()).unwrap()
+    }
+
+    #[test]
+    fn switch_picks_the_indexed_input_and_clamps_out_of_range() {
+        let sources = [Some(n_points(1)), Some(n_points(2)), Some(n_points(3))];
+        let picked = |index| as_geometry(&eval_switch(index, &sources)).point_count();
+        assert_eq!(picked(0), 1);
+        assert_eq!(picked(1), 2);
+        assert_eq!(picked(2), 3);
+        assert_eq!(picked(99), 3, "past the end clamps to the last input");
+        assert_eq!(picked(-4), 1, "negative clamps to the first input");
+    }
+
+    #[test]
+    fn switch_clamps_to_the_last_connected_input_and_shares_it() {
+        let a = n_points(1);
+        let b = n_points(2);
+        // Slot 2 is the empty trailing slot a fresh variadic group leaves.
+        let out = eval_switch(5, &[Some(a), Some(b.clone()), None]);
+        assert!(std::ptr::eq(as_geometry(&out), b.as_ref()));
+        // Nothing connected is an empty geometry, not an error.
+        assert_eq!(as_geometry(&eval_switch(0, &[None])).point_count(), 0);
+    }
+
+    #[test]
+    fn null_returns_the_input_arc_without_copying() {
+        let input: Arc<dyn NodeData> = n_points(3);
+        let node = Node::new(NodeId::new(1), "geometry.null")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_output("output", DataTypeId::GEOMETRY);
+        let mut scope = Evaluator::new();
+        let out = GeometryNullProcessor
+            .process(
+                &node,
+                &ctx(),
+                &[Some(input.clone())],
+                &ResolvedParams::default(),
+                &mut scope,
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&out, &input));
+    }
+
+    // -----------------------------------------------------------------------
+    // geometry.blast
+    // -----------------------------------------------------------------------
+
+    /// Runs `geometry.blast` with `params` over `geo`.
+    fn eval_blast(params: &[(&str, ParameterValue)], geo: Arc<Geometry>) -> Geometry {
+        let mut node = Node::new(NodeId::new(2), "geometry.blast")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_output("output", DataTypeId::GEOMETRY);
+        for (key, value) in params {
+            node = node.with_param(*key, value.clone());
+        }
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "test.source").with_output("out", DataTypeId::GEOMETRY),
+            )
+            .unwrap()
+            .add_node(node)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(Fixed(geo)));
+        ev.register(NodeId::new(2), Arc::new(GeometryBlastProcessor));
+        let output = ev.evaluate(&graph, NodeId::new(2), &ctx()).unwrap();
+        output.downcast_ref::<Geometry>().unwrap().clone()
+    }
+
+    /// Four points, a Bool `doomed` on the points and another on the instances,
+    /// the two flagging different rows so the `domain` parameter shows.
+    fn blast_input() -> Arc<Geometry> {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0); 4]);
+        geometry
+            .points_mut()
+            .insert(
+                "doomed",
+                AttributeArray::Bool(vec![true, false, false, false]),
+            )
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0); 3]))
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert("doomed", AttributeArray::Bool(vec![true, true, false]))
+            .unwrap();
+        Arc::new(geometry)
+    }
+
+    fn text(value: &str) -> ParameterValue {
+        ParameterValue::String(value.into())
+    }
+
+    /// `domain`, `group` and `invert` each change the outcome, and an unset
+    /// or unresolvable group deletes nothing rather than everything.
+    #[test]
+    fn every_blast_parameter_reaches_the_operation() {
+        let counts = |params: &[(&str, ParameterValue)]| {
+            let out = eval_blast(params, blast_input());
+            (out.point_count(), out.instance_count())
+        };
+        assert_eq!(counts(&[("group", text("doomed"))]), (3, 3), "point domain");
+        assert_eq!(
+            counts(&[("group", text("doomed")), ("domain", text("instance"))]),
+            (4, 1)
+        );
+        assert_eq!(
+            counts(&[
+                ("group", text("doomed")),
+                ("invert", ParameterValue::Bool(true))
+            ]),
+            (1, 3)
+        );
+        assert_eq!(counts(&[]), (4, 3), "no group, no deletion");
+        assert_eq!(counts(&[("group", text("missing"))]), (4, 3));
+    }
+
+    #[test]
+    fn blast_gives_the_same_result_on_every_evaluation() {
+        let params = [("group", text("doomed"))];
+        let (a, b) = (
+            eval_blast(&params, blast_input()),
+            eval_blast(&params, blast_input()),
+        );
+        assert_eq!(a.point_count(), b.point_count());
+        for (name, column) in a.points().iter() {
+            assert_eq!(Some(column), b.points().get(name), "{name}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // geometry.resample
+    // -----------------------------------------------------------------------
+
+    /// Runs `geometry.resample` with `params` over a straight 10-long path.
+    fn eval_resample(params: &[(&str, ParameterValue)]) -> Geometry {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(10.0, 0.0)]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        let mut node = Node::new(NodeId::new(2), "geometry.resample")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_output("output", DataTypeId::GEOMETRY);
+        for (key, value) in params {
+            node = node.with_param(*key, value.clone());
+        }
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "test.source").with_output("out", DataTypeId::GEOMETRY),
+            )
+            .unwrap()
+            .add_node(node)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(Fixed(Arc::new(geometry))));
+        ev.register(NodeId::new(2), Arc::new(GeometryResampleProcessor));
+        let output = ev.evaluate(&graph, NodeId::new(2), &ctx()).unwrap();
+        output.downcast_ref::<Geometry>().unwrap().clone()
+    }
+
+    #[test]
+    fn resample_parameters_pick_the_spacing() {
+        let count = |params: &[(&str, ParameterValue)]| eval_resample(params).point_count();
+        assert_eq!(count(&[("length", ParameterValue::Float(2.0))]), 6);
+        assert_eq!(count(&[("segments", ParameterValue::Int(4))]), 5);
+        assert_eq!(
+            count(&[
+                ("length", ParameterValue::Float(5.0)),
+                ("segments", ParameterValue::Int(40)),
+            ]),
+            3,
+            "length wins over segments when positive"
+        );
+        assert_eq!(count(&[]), 17, "the default is 16 segments");
+        assert_eq!(
+            count(&[("segments", ParameterValue::Int(-3))]),
+            2,
+            "at least one segment"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // geometry.measure
+    // -----------------------------------------------------------------------
+
+    /// Runs `geometry.measure` with `params` over a 4x3 rectangle.
+    fn eval_measure(params: &[(&str, ParameterValue)]) -> Geometry {
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(4.0, 0.0),
+            Vec2(4.0, 3.0),
+            Vec2(0.0, 3.0),
+        ]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        let mut node = Node::new(NodeId::new(2), "geometry.measure")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_output("output", DataTypeId::GEOMETRY);
+        for (key, value) in params {
+            node = node.with_param(*key, value.clone());
+        }
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "test.source").with_output("out", DataTypeId::GEOMETRY),
+            )
+            .unwrap()
+            .add_node(node)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(Fixed(Arc::new(geometry))));
+        ev.register(NodeId::new(2), Arc::new(GeometryMeasureProcessor));
+        let output = ev.evaluate(&graph, NodeId::new(2), &ctx()).unwrap();
+        output.downcast_ref::<Geometry>().unwrap().clone()
+    }
+
+    /// Every `measure` string the template offers reaches its own quantity on
+    /// its own domain, and an unknown one falls back to `perimeter`.
+    #[test]
+    fn every_measure_parameter_reaches_its_quantity() {
+        let measure_of = |value: &str| vec![("measure", text(value))];
+        let primitive_f32 = |g: &Geometry, name: &str| {
+            g.primitive_attrs()
+                .get(name)
+                .unwrap()
+                .as_f32(name)
+                .unwrap()
+                .to_vec()
+        };
+        let out = eval_measure(&measure_of("perimeter"));
+        assert_eq!(primitive_f32(&out, "perimeter"), [14.0]);
+        let out = eval_measure(&measure_of("area"));
+        assert_eq!(primitive_f32(&out, "area"), [12.0]);
+        let out = eval_measure(&measure_of("segment_length"));
+        assert_eq!(
+            out.points()
+                .get("segment_length")
+                .unwrap()
+                .as_f32("segment_length")
+                .unwrap(),
+            [4.0, 3.0, 4.0, 3.0]
+        );
+        let out = eval_measure(&measure_of("curvature"));
+        assert_eq!(out.points().get("curvature").unwrap().len(), 4);
+        let out = eval_measure(&measure_of("bounds"));
+        assert_eq!(
+            out.detail()
+                .get("bounds")
+                .unwrap()
+                .as_vec4("bounds")
+                .unwrap(),
+            [ravel_core::types::Vec4(0.0, 0.0, 4.0, 3.0)]
+        );
+        let out = eval_measure(&measure_of("size"));
+        assert_eq!(
+            out.primitive_attrs()
+                .get("size")
+                .unwrap()
+                .as_vec2("size")
+                .unwrap(),
+            [Vec2(4.0, 3.0)]
+        );
+        // Unknown falls back; `name` renames.
+        let out = eval_measure(&measure_of("sideways"));
+        assert_eq!(primitive_f32(&out, "perimeter"), [14.0]);
+        let out = eval_measure(&[("measure", text("area")), ("name", text("a"))]);
+        assert_eq!(primitive_f32(&out, "a"), [12.0]);
     }
 }

@@ -1109,6 +1109,39 @@ end = "Where along the axis the taper reaches its final width."
 amount = "How much width is lost by the end of the range. 0 leaves it alone, 1 closes it to a point, negative widens."
 group = "Name of a boolean point attribute. Only flagged points move. Empty moves every point."
 
+[node."geometry.blast"]
+label = "Blast"
+description = "Deletes the elements a boolean group attribute flags (or, inverted, the ones it does not). Deleting a point also deletes every primitive that used it. index is renumbered; id is kept. An empty or unresolvable group deletes nothing."
+[node."geometry.blast".params]
+domain = "Which elements are deleted. Deleting primitives keeps their points."
+group = "Name of the boolean attribute on that domain that flags the elements to delete. Empty deletes nothing."
+invert = "Delete the elements the group does not flag instead."
+
+[node."geometry.resample"]
+label = "Resample"
+description = "Re-places the points of every path at even arc-length spacing. Attributes are interpolated from the original points; in_tan and out_tan are dropped. Points no path uses are dropped."
+[node."geometry.resample".params]
+length = "Target spacing. The path is divided into the nearest whole number of equal segments. When 0, segments decides instead."
+segments = "Number of equal segments per path. Used when length is 0."
+keep_corners = "Keep the points where a path turns sharply, and resample each stretch between them on its own."
+
+[node."geometry.measure"]
+label = "Measure"
+description = "Writes a geometric measurement as an attribute a field can read. Perimeter, area and size go on the primitives, curvature and segment length on the points, bounds on the detail."
+[node."geometry.measure".params]
+measure = "What to measure. Area is signed (counter-clockwise is positive) and treats an open path as closed. Curvature is the signed 1/R at each point. Bounds is (min x, min y, max x, max y); size is (width, height) per primitive."
+name = "Name of the attribute written. Empty uses the measurement's own name."
+
+[node."geometry.switch"]
+label = "Switch"
+description = "Passes one of its geometry inputs through, picked by index. An index past the last connected input picks the last one."
+[node."geometry.switch".params]
+index = "Which input to pass through, counting from 0."
+
+[node."geometry.null"]
+label = "Null"
+description = "Passes its input through unchanged. For tidying a graph and giving links a stable place to point at."
+
 [node."geometry.from_image"]
 label = "Image to Geometry"
 description = "Wraps an image as one instance that stamps it, so geometry nodes can repeat and place it. The rectangle is the source's pixel size, centred on the origin; scaling a copy up makes it blurry."

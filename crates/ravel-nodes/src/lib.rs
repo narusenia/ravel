@@ -23,6 +23,7 @@ pub mod flatten;
 pub mod geometry;
 pub mod geometry_ops;
 mod gpu_util;
+pub mod iterate;
 pub use gpu_util::{GpuImage, begin_upload_scope, clone_frame_value, ensure_cpu, ensure_gpu};
 pub mod layer_info;
 pub mod layer_ref;
@@ -255,6 +256,7 @@ pub fn processor_for_node(
         "geometry.connect" => Some(Arc::new(geometry::GeometryConnectProcessor::from_node(
             node,
         ))),
+        "geometry.iterate" => Some(Arc::new(iterate::IterateProcessor::from_node(node))),
         "geometry.sort" => Some(Arc::new(geometry::GeometrySortProcessor::from_node(node))),
         "geometry.group_index" => Some(Arc::new(
             geometry_ops::GeometryGroupIndexProcessor::from_node(node),

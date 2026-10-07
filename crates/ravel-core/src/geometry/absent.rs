@@ -293,7 +293,7 @@ mod tests {
     /// Reserved names that no reader gives an absent meaning to. Every other
     /// reserved name must answer on at least one domain, so adding a name to
     /// `names::ALL` without teaching `absent` fails here.
-    const WITHOUT_READING: [&str; 20] = [
+    const WITHOUT_READING: [&str; 21] = [
         names::P,
         names::ANCHOR,
         names::INDEX,
@@ -314,6 +314,7 @@ mod tests {
         names::LINE_INDEX,
         names::CHAR_PROGRESS,
         names::ADVANCE,
+        names::PIECE,
     ];
 
     #[test]

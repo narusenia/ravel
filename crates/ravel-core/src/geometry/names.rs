@@ -135,10 +135,15 @@ pub const IN_TAN: &str = "in_tan";
 /// segment). Reserved for pen-drawn paths (REQ-UI-011).
 pub const OUT_TAN: &str = "out_tan";
 
+/// Piece number (I32, Primitive): which fragment a primitive belongs to.
+/// `geometry.iterate` splits a geometry by this column's values by default
+/// (REQ-CORE-013), and a fracture writes it.
+pub const PIECE: &str = "piece";
+
 /// Every reserved name above, in declaration order. `geometry::absent`'s
 /// coverage test walks this list, so a name added here has to be given an
 /// absent value (or listed as having none) before the tests pass.
-pub const ALL: [&str; 33] = [
+pub const ALL: [&str; 34] = [
     P,
     ANCHOR,
     INDEX,
@@ -172,6 +177,7 @@ pub const ALL: [&str; 33] = [
     LINE_INDEX,
     CHAR_PROGRESS,
     ADVANCE,
+    PIECE,
 ];
 
 #[cfg(test)]
@@ -219,6 +225,7 @@ mod tests {
                 "line_index",
                 "char_progress",
                 "advance",
+                "piece",
             ]
         );
     }

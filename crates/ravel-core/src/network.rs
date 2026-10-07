@@ -1221,6 +1221,60 @@ fn seed_subnet_node_with(node: &mut Node, mut mint: impl FnMut() -> NodeId) {
     adopt_subnet_inner(node, new_subnet_inner_graph(next(), next()));
 }
 
+/// `type_key` of the per-piece iteration node (REQ-CORE-013).
+pub const ITERATE_TYPE_KEY: &str = "geometry.iterate";
+/// The inner `net.in` output and `net.out` input that carry one piece's
+/// geometry through a `geometry.iterate` body.
+pub const ITERATE_PORT_GEOMETRY: &str = "geometry";
+/// The inner `net.in` output carrying the zero-based iteration number
+/// (a `Scalar`).
+pub const ITERATE_PORT_INDEX: &str = "index";
+
+/// The body a fresh `geometry.iterate` starts with: `net.in` (`geometry`,
+/// `index`) wired straight through to `net.out` (`geometry`), so an empty
+/// body returns each piece unchanged.
+pub fn new_iterate_inner_graph(in_id: NodeId, out_id: NodeId) -> Graph {
+    debug_assert_ne!(
+        in_id, out_id,
+        "an iterate body's In and Out need distinct ids"
+    );
+    let mut in_node = Node::new(in_id, NET_IN_TYPE_KEY)
+        .with_output(ITERATE_PORT_GEOMETRY, DataTypeId::GEOMETRY)
+        .with_output(ITERATE_PORT_INDEX, DataTypeId::SCALAR);
+    in_node.metadata.position = (0.0, 0.0);
+    let mut out_node = Node::new(out_id, NET_OUT_TYPE_KEY)
+        .with_input(ITERATE_PORT_GEOMETRY, &[DataTypeId::GEOMETRY]);
+    out_node.metadata.position = (360.0, 0.0);
+    Graph::new()
+        .add_node(in_node)
+        .and_then(|graph| graph.add_node(out_node))
+        .and_then(|graph| {
+            graph.add_edge(
+                EdgeId::next(),
+                in_id,
+                OutputPortIndex(0),
+                out_id,
+                InputPortIndex(0),
+            )
+        })
+        .expect("two distinct ids into an empty graph")
+}
+
+/// Give a bare `geometry.iterate` node its body. Unlike a subnet its pins
+/// are fixed by the template, so nothing is derived from the body. Mints two
+/// node ids, skipping `node.id` for the reason [`seed_subnet_node`] gives.
+pub fn seed_iterate_node(node: &mut Node) {
+    let owner = node.id;
+    let next = || loop {
+        let id = NodeId::next();
+        if id != owner {
+            return id;
+        }
+    };
+    let (in_id, out_id) = (next(), next());
+    node.subnet = Some(Arc::new(new_iterate_inner_graph(in_id, out_id)));
+}
+
 /// Make `node` a subnet node owning `inner`: derive its pins from the inner
 /// In / Out and promote the inner In's parameters onto it.
 ///

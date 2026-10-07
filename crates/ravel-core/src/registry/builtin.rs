@@ -1916,7 +1916,15 @@ fn color_ramp() -> NodeTemplate {
         .with_param_range("in_max", -1e9..=1e9, -10.0..=10.0)
 }
 
+/// `color_correct`: the all-in-one grading node. `brightness`, `contrast` and
+/// `saturation` are the original three (name and meaning unchanged, so saved
+/// projects load as before); everything else is appended with a neutral
+/// default. Four display groups mirror the Lumetri sections, each locale key
+/// `node.color_correct.group.<name>`. The wheels are RGB vectors, not colour
+/// parameters (the picker clamps to 0..1; `comp.lift_gamma_gain`). The maths is
+/// `ravel-nodes::color_correct`'s module comment.
 fn color_correct() -> NodeTemplate {
+    let neutral_hsl = || CurveParam::linear([(0.0, 0.5), (1.0, 0.5)]);
     NodeTemplate::new("color_correct", "Color Correct", NodeCategory::Color)
         .with_input(InputPort {
             name: "image".into(),
@@ -1928,21 +1936,82 @@ fn color_correct() -> NodeTemplate {
             name: "output".into(),
             data_type: DataTypeId::FRAME_BUFFER,
         })
-        .with_param(Parameter {
-            key: "brightness".into(),
-            value: ParameterValue::Float(0.0),
-        })
-        .with_param(Parameter {
-            key: "contrast".into(),
-            value: ParameterValue::Float(1.0),
-        })
-        .with_param(Parameter {
-            key: "saturation".into(),
-            value: ParameterValue::Float(1.0),
-        })
+        .with_param(float_parameter("brightness", 0.0))
+        .with_param(float_parameter("contrast", 1.0))
+        .with_param(float_parameter("saturation", 1.0))
+        .with_param(float_parameter("temperature", 0.0))
+        .with_param(float_parameter("tint", 0.0))
+        .with_param(float_parameter("exposure", 0.0))
+        .with_param(float_parameter("highlights", 0.0))
+        .with_param(float_parameter("shadows", 0.0))
+        .with_param(float_parameter("whites", 0.0))
+        .with_param(float_parameter("blacks", 0.0))
+        .with_param(float_parameter("vibrance", 0.0))
+        .with_param(curve_parameter("rgb", CurveParam::identity()))
+        .with_param(curve_parameter("red", CurveParam::identity()))
+        .with_param(curve_parameter("green", CurveParam::identity()))
+        .with_param(curve_parameter("blue", CurveParam::identity()))
+        .with_param(curve_parameter("hue_vs_hue", neutral_hsl()))
+        .with_param(curve_parameter("hue_vs_sat", neutral_hsl()))
+        .with_param(curve_parameter("hue_vs_lum", neutral_hsl()))
+        .with_param(channel3_parameter("lift", 0.0, 0.0, 0.0))
+        .with_param(channel3_parameter("gamma", 1.0, 1.0, 1.0))
+        .with_param(channel3_parameter("gain", 1.0, 1.0, 1.0))
+        .with_param(float_parameter("fade", 0.0))
+        .with_param(float_parameter("vignette", 0.0))
+        .with_param(float_parameter("vignette_midpoint", 0.5))
+        .with_param(float_parameter("vignette_feather", 0.5))
         .with_param_range("brightness", -1.0..=1.0, -1.0..=1.0)
         .with_param_range("contrast", 0.0..=10.0, 0.0..=2.0)
         .with_param_range("saturation", 0.0..=10.0, 0.0..=2.0)
+        .with_param_range("temperature", -4.0..=4.0, -1.0..=1.0)
+        .with_param_range("tint", -4.0..=4.0, -1.0..=1.0)
+        .with_param_range("exposure", -10.0..=10.0, -3.0..=3.0)
+        .with_param_range("highlights", -4.0..=4.0, -1.0..=1.0)
+        .with_param_range("shadows", -4.0..=4.0, -1.0..=1.0)
+        .with_param_range("whites", -4.0..=4.0, -1.0..=1.0)
+        .with_param_range("blacks", -4.0..=4.0, -1.0..=1.0)
+        .with_param_range("vibrance", -1.0..=10.0, -1.0..=1.0)
+        .with_param_range("lift", -10.0..=10.0, -1.0..=1.0)
+        .with_param_range("gamma", 0.01..=10.0, 0.1..=4.0)
+        .with_param_range("gain", 0.0..=10.0, 0.0..=4.0)
+        .with_param_range("fade", 0.0..=1.0, 0.0..=1.0)
+        .with_param_range("vignette", -1.0..=1.0, -1.0..=1.0)
+        .with_param_range("vignette_midpoint", 0.0..=1.0, 0.0..=1.0)
+        .with_param_range("vignette_feather", 0.0..=1.0, 0.0..=1.0)
+        .with_param_group(
+            "basic",
+            [
+                "temperature",
+                "tint",
+                "exposure",
+                "brightness",
+                "contrast",
+                "highlights",
+                "shadows",
+                "whites",
+                "blacks",
+                "saturation",
+                "vibrance",
+            ],
+        )
+        .with_param_group(
+            "curves",
+            [
+                "rgb",
+                "red",
+                "green",
+                "blue",
+                "hue_vs_hue",
+                "hue_vs_sat",
+                "hue_vs_lum",
+            ],
+        )
+        .with_param_group("wheels", ["lift", "gamma", "gain"])
+        .with_param_group(
+            "creative",
+            ["fade", "vignette", "vignette_midpoint", "vignette_feather"],
+        )
 }
 
 fn frame_buffer_input(name: &str) -> InputPort {

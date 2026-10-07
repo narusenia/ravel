@@ -23,7 +23,7 @@ mod distort;
 #[cfg(test)]
 mod fx_test_util;
 mod generate;
-mod grade;
+pub(crate) mod grade;
 mod key;
 mod mask;
 mod merge;

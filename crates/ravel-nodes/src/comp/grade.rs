@@ -52,7 +52,7 @@ use super::transparent;
 use crate::gpu_util;
 
 /// Entries in a baked curve table (the array length in the shader too).
-const TABLE_LEN: usize = 256;
+pub(crate) const TABLE_LEN: usize = 256;
 
 const SHADER_SRC: &str = include_str!("../shaders/comp_grade.wgsl");
 
@@ -148,40 +148,53 @@ impl GradeKind {
             // table[i] = (hue_vs_hue, hue_vs_sat, hue_vs_lum) at hue i / 256
             // (see the module comment); a missing curve is the neutral flat
             // 0.5.
-            Self::HslCurves => {
-                for (lane, key) in ["hue_vs_hue", "hue_vs_sat", "hue_vs_lum"]
-                    .into_iter()
-                    .enumerate()
-                {
-                    bake(
-                        &mut out.table,
-                        lane,
-                        p,
-                        key,
-                        || CurveParam::linear([(0.0, 0.5), (1.0, 0.5)]),
-                        |i| i as f32 / TABLE_LEN as f32,
-                    );
-                }
-            }
+            Self::HslCurves => bake_hsl(&mut out.table, p),
             // table[i] = (rgb, red, green, blue) curves at x = i / 255. A
             // missing curve is the identity. The curves clamp outside [0, 1]
             // (an input above 1 takes the curve's value at 1).
-            Self::Curves => {
-                for (lane, key) in ["rgb", "red", "green", "blue"].into_iter().enumerate() {
-                    bake(&mut out.table, lane, p, key, CurveParam::identity, |i| {
-                        i as f32 / (TABLE_LEN - 1) as f32
-                    });
-                }
-            }
+            Self::Curves => bake_curves(&mut out.table, p),
         }
         out
+    }
+}
+
+/// Bake the four `comp.curves` parameters into `table[..TABLE_LEN]`; shared
+/// with `color_correct`'s curves section.
+pub(crate) fn bake_curves(table: &mut [[f32; 4]], p: &ResolvedParams) {
+    for (lane, key) in ["rgb", "red", "green", "blue"].into_iter().enumerate() {
+        bake(
+            &mut table[..TABLE_LEN],
+            lane,
+            p,
+            key,
+            CurveParam::identity,
+            |i| i as f32 / (TABLE_LEN - 1) as f32,
+        );
+    }
+}
+
+/// Bake the three `comp.hsl_curves` parameters into `table[..TABLE_LEN]`;
+/// shared with `color_correct`'s HSL section.
+pub(crate) fn bake_hsl(table: &mut [[f32; 4]], p: &ResolvedParams) {
+    for (lane, key) in ["hue_vs_hue", "hue_vs_sat", "hue_vs_lum"]
+        .into_iter()
+        .enumerate()
+    {
+        bake(
+            &mut table[..TABLE_LEN],
+            lane,
+            p,
+            key,
+            || CurveParam::linear([(0.0, 0.5), (1.0, 0.5)]),
+            |i| i as f32 / TABLE_LEN as f32,
+        );
     }
 }
 
 /// Sample the curve parameter `key` into lane `lane` of every table entry, at
 /// the input `x(i)` of entry `i`.
 fn bake(
-    table: &mut [[f32; 4]; TABLE_LEN],
+    table: &mut [[f32; 4]],
     lane: usize,
     p: &ResolvedParams,
     key: &str,
@@ -214,10 +227,11 @@ impl CompGradeProcessor {
             gpu_util::uniform_layout_entry(2),
         ];
         // Shared by every kind: they differ only in the uniform.
+        let source = gpu_util::with_grade_stages(SHADER_SRC);
         let pipeline = shaders
             .compute_pipeline(
                 "comp_grade",
-                SHADER_SRC,
+                &source,
                 "main",
                 &layout,
                 gpu_util::WORKGROUP_SIZE,

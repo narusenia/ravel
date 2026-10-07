@@ -264,6 +264,7 @@ pub fn processor_for_node(
         "geometry.repeat" => Some(Arc::new(geometry_ops::GeometryRepeatProcessor::from_node(
             node,
         ))),
+        "geometry.distribute" => Some(Arc::new(geometry_ops::GeometryDistributeProcessor)),
         "geometry.bend" => Some(Arc::new(geometry_ops::GeometryDeformProcessor::bend())),
         "geometry.twist" => Some(Arc::new(geometry_ops::GeometryDeformProcessor::twist())),
         "geometry.taper" => Some(Arc::new(geometry_ops::GeometryDeformProcessor::taper())),

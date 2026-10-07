@@ -1076,6 +1076,14 @@ translate = "Offset added by each step, in the previous copy's own turned and sc
 rotate = "Turn added by each step, in degrees."
 scale = "Scale multiplied in by each step. A scale of 0 collapses every copy after the first."
 
+[node."geometry.distribute"]
+label = "Distribute"
+description = "Aligns or spaces the elements by their size. Moves the paths when there are any, otherwise the instances (a stamped source counts at its size times the instance scale). Spacing keeps the first and last element, ordered by centre, where they are. A point shared by several paths moves with the first of them only, which can distort the others. Elements with a non-finite size are left alone."
+
+[node."geometry.distribute".params]
+axis = "The axis the elements move along."
+mode = "min, center and max align the left/top edges, the centres or the right/bottom edges with the group's bounds. centers spaces centres evenly. gaps spaces the empty gaps between edges evenly. With fewer than three elements the spacing modes change nothing."
+
 [node."geometry.bend"]
 label = "Bend"
 description = "Bends the axis into an arc. Points before the range stay, points past it follow the end of the arc straight on. Bezier tangents are carried along, so curves stay smooth."

@@ -2111,6 +2111,63 @@ fn instance_bounds(
     bounds
 }
 
+/// The rectangle each instance occupies once its source is stamped: the
+/// source's own extent times the instance's scale, turn and shear, put at its
+/// `P`. One entry per instance, in index order, with the same walk
+/// [`drawn_bounds`] uses (so a source's stroke reach is included, a nested
+/// instance domain is followed, and an out-of-range `source_index` clamps).
+///
+/// An instance whose source draws nothing, or a geometry with no source at
+/// all, gets the zero-sized rectangle at its own placement — it still is an
+/// element, it just has no size. `None` when there is no instance domain, or
+/// its `P` is 3D (the walk is planar, as everywhere else).
+///
+/// Lives beside [`measure`] because `geometry.distribute` is the second reader
+/// of "how big is this element" and must not re-derive it.
+pub fn instance_extents(geometry: &Geometry) -> Option<Vec<Rect>> {
+    let offsets = geometry.positions(Domain::Instance)?.ok()?.planar()?;
+    let sources = geometry.sources();
+    let instances = geometry.instances();
+    let columns = InstanceColumns::lenient(instances);
+    let source_indices = instances
+        .get(names::SOURCE_INDEX)
+        .and_then(|column| column.as_i32(names::SOURCE_INDEX).ok());
+    let widths = instances
+        .get(names::STROKE_WIDTH)
+        .and_then(|column| column.as_f32(names::STROKE_WIDTH).ok());
+    let miter = root_miter(geometry);
+    Some(
+        offsets
+            .iter()
+            .enumerate()
+            .map(|(index, offset)| {
+                let placement = columns.placement(index, *offset);
+                // The instance's own `stroke_width` narrows onto what it
+                // stamps, as in `instance_bounds`.
+                let width = widths
+                    .and_then(|values| values.get(index).copied())
+                    .unwrap_or(0.0);
+                let rect = if sources.is_empty() {
+                    None
+                } else {
+                    match &sources[source_slot(sources.len(), source_indices, index)] {
+                        InstanceSource::Image(image) => placed_rect(image.rect(), placement),
+                        InstanceSource::Geometry(source) => {
+                            drawn_bounds_at(source, 1, placement, width, miter)
+                        }
+                    }
+                };
+                rect.unwrap_or(Rect {
+                    x: placement.offset.0,
+                    y: placement.offset.1,
+                    width: 0.0,
+                    height: 0.0,
+                })
+            })
+            .collect(),
+    )
+}
+
 /// A source rectangle placed by one instance: the axis-aligned bounds of its
 /// four placed corners.
 ///

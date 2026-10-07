@@ -1893,6 +1893,10 @@ pub struct Evaluator {
     /// Live `TimeShift` scopes per owner node, least recently entered first
     /// (see [`MAX_TIME_SHIFT_SCOPES_PER_OWNER`]).
     time_shift_scopes: HashMap<NodeId, Vec<PathId>>,
+    /// Iteration scopes by the node that opened them, so dirtying a node
+    /// finds its scopes without scanning every scope. Kept in step with
+    /// `scope_owners` (inserted on entry, pruned in `prune_scope_state`).
+    iteration_scopes: HashMap<NodeKey, Vec<PathId>>,
     /// Evicted shift scopes whose ids are released at the next top-level
     /// pull (see [`PathInterner`]).
     retired_scopes: Vec<PathId>,
@@ -2468,6 +2472,7 @@ impl Evaluator {
         // (MED-CORE-07).
         self.scope_owners.clear();
         self.time_shift_scopes.clear();
+        self.iteration_scopes.clear();
         self.retired_scopes.clear();
         self.scope_bindings.clear();
         self.scope_reach.clear();
@@ -2515,6 +2520,10 @@ impl Evaluator {
     /// (MED-CORE-07).
     fn prune_scope_state(&mut self, under: &HashSet<PathId>) {
         self.scope_owners.retain(|scope, _| !under.contains(scope));
+        self.iteration_scopes.retain(|_, scopes| {
+            scopes.retain(|scope| !under.contains(scope));
+            !scopes.is_empty()
+        });
         self.scope_bindings
             .retain(|scope, _| !under.contains(scope));
         self.scope_reach.retain(|scope, _| !under.contains(scope));
@@ -2549,17 +2558,11 @@ impl Evaluator {
     /// enters (fewer pieces) holding stale values until the owner is dirtied
     /// again; dropping them all here keeps them from outliving their input.
     fn drop_iteration_scopes(&mut self, dirtied: &HashSet<NodeKey>) {
-        let owned: Vec<PathId> = self
-            .scope_owners
+        let owned: Vec<PathId> = dirtied
             .iter()
-            .filter(|(scope, owner)| {
-                dirtied.contains(*owner)
-                    && matches!(
-                        self.paths.path(**scope).last(),
-                        Some(PathSegment::Iteration(..))
-                    )
-            })
-            .map(|(scope, _)| *scope)
+            .filter_map(|key| self.iteration_scopes.get(key))
+            .flatten()
+            .copied()
             .collect();
         if owned.is_empty() {
             return;
@@ -3542,6 +3545,12 @@ impl EvalScope for Evaluator {
         if let Some((owner, _depth)) = self.processing.last() {
             let owner = *owner;
             self.scope_owners.insert(self.path_id, owner);
+            if matches!(segment, PathSegment::Iteration(..)) {
+                let scopes = self.iteration_scopes.entry(owner).or_default();
+                if !scopes.contains(&self.path_id) {
+                    scopes.push(self.path_id);
+                }
+            }
         }
         // A scope re-entered with different bindings (e.g. an adjustment
         // layer's lower stack) may not reuse the cached values those
@@ -7432,6 +7441,52 @@ mod tests {
         assert!(ev.store.index_is_consistent());
         ev.evaluate(&graph, fan, &ctx_at(0)).unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 6, "every iteration reran");
+    }
+
+    /// The owner index holds exactly the live iteration scopes: dropping the
+    /// scopes (dirty, scope invalidation, full invalidation) leaves no stale id.
+    #[test]
+    fn the_iteration_scope_index_is_pruned_with_the_scopes() {
+        let (fan, inner_node) = (NodeId::new(2), NodeId::new(7));
+        let graph = Graph::new().add_node(scalar_node(fan.raw())).unwrap();
+        let inner = Graph::new()
+            .add_node(scalar_node(inner_node.raw()))
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(
+            inner_node,
+            Arc::new(CountingConst {
+                value: 1.0,
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        ev.register(
+            fan,
+            Arc::new(Fan {
+                inner,
+                inner_output: inner_node,
+                count: 3,
+            }),
+        );
+        let indexed = |ev: &Evaluator| ev.iteration_scopes.values().map(Vec::len).sum::<usize>();
+
+        ev.evaluate(&graph, fan, &ctx_at(0)).unwrap();
+        assert_eq!(indexed(&ev), 3);
+        // Entering the same scopes again does not duplicate ids.
+        ev.invalidate_node(fan);
+        ev.evaluate(&graph, fan, &ctx_at(0)).unwrap();
+        assert_eq!(indexed(&ev), 3);
+
+        ev.mark_dirty(&graph, fan);
+        assert_eq!(indexed(&ev), 0, "dirtying left stale ids");
+        assert!(ev.iteration_scopes.is_empty());
+
+        ev.evaluate(&graph, fan, &ctx_at(0)).unwrap();
+        assert_eq!(indexed(&ev), 3);
+        ev.invalidate_scope(&[PathSegment::Iteration(fan, 1)]);
+        assert_eq!(indexed(&ev), 2, "scope invalidation left a stale id");
+        ev.invalidate_all();
+        assert!(ev.iteration_scopes.is_empty());
     }
 
     /// Dirtying an unrelated node in the same graph leaves the iterations alone.

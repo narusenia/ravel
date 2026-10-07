@@ -1125,6 +1125,13 @@ length = "Target spacing. The path is divided into the nearest whole number of e
 segments = "Number of equal segments per path. Used when length is 0."
 keep_corners = "Keep the points where a path turns sharply, and resample each stretch between them on its own."
 
+[node."geometry.measure"]
+label = "Measure"
+description = "Writes a geometric measurement as an attribute a field can read. Perimeter, area and size go on the primitives, curvature and segment length on the points, bounds on the detail."
+[node."geometry.measure".params]
+measure = "What to measure. Area is signed (counter-clockwise is positive) and treats an open path as closed. Curvature is the signed 1/R at each point. Bounds is (min x, min y, max x, max y); size is (width, height) per primitive."
+name = "Name of the attribute written. Empty uses the measurement's own name."
+
 [node."geometry.switch"]
 label = "Switch"
 description = "Passes one of its geometry inputs through, picked by index. An index past the last connected input picks the last one."

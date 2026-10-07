@@ -181,6 +181,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(geometry_deformer("geometry.twist", "Twist", 90.0));
     reg.register(geometry_deformer("geometry.taper", "Taper", 0.5));
     reg.register(geometry_blast());
+    reg.register(geometry_measure());
     reg.register(geometry_resample());
     reg.register(geometry_switch());
     reg.register(geometry_null());
@@ -1829,6 +1830,30 @@ fn geometry_blast() -> NodeTemplate {
         })
 }
 
+/// `geometry.measure`: write one geometric quantity as an attribute.
+///
+/// The output domain follows the quantity (perimeter / area / size on the
+/// primitives, curvature / segment_length on the points, bounds on the detail),
+/// so `measure` is the one parameter and there is no `domain`.
+fn geometry_measure() -> NodeTemplate {
+    NodeTemplate::new("geometry.measure", "Measure", NodeCategory::Geometry)
+        .with_input(geometry_input("geometry"))
+        .with_output(geometry_output())
+        .with_param(string_parameter("measure", "perimeter"))
+        .with_param_options(
+            "measure",
+            [
+                "perimeter",
+                "area",
+                "curvature",
+                "segment_length",
+                "bounds",
+                "size",
+            ],
+        )
+        .with_param(string_parameter("name", ""))
+}
+
 /// `geometry.resample`: re-place the points of every path at even arc-length
 /// spacing. `length` wins when positive, otherwise `segments` decides.
 fn geometry_resample() -> NodeTemplate {
@@ -3425,14 +3450,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 127);
+        assert_eq!(reg.all_templates().count(), 128);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 37);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 38);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
@@ -4469,6 +4494,7 @@ mod tests {
             "geometry.bend",
             "geometry.group_index",
             "geometry.repeat",
+            "geometry.measure",
             "geometry.null",
             "geometry.resample",
             "geometry.sort",

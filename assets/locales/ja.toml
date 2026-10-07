@@ -1113,6 +1113,13 @@ length = "目標の間隔。最も近い整数個の等分割になる。0 の�
 segments = "パス 1 本あたりの等分割数。length が 0 のとき使う。"
 keep_corners = "鋭く曲がるポイントを残し、その間の区間ごとに打ち直す。"
 
+[node."geometry.measure"]
+label = "メジャー"
+description = "幾何的な計測値をフィールドから読めるアトリビュートとして書く。perimeter・area・size はプリミティブ、curvature・segment_length はポイント、bounds はディテールに書く。"
+[node."geometry.measure".params]
+measure = "計測する量。area は符号付き（反時計回りが正）で、開いたパスは閉じたものとして扱う。curvature は各ポイントの符号付き 1/R。bounds は (min x, min y, max x, max y)、size はプリミティブごとの (幅, 高さ)。"
+name = "書き込むアトリビュート名。空なら計測値自身の名前を使う。"
+
 [node."geometry.switch"]
 label = "スイッチ"
 description = "複数のジオメトリ入力から index で 1 つ選んで通す。接続済みの最後の入力より大きい index は最後の入力を選ぶ。"

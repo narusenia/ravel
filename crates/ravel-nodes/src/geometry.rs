@@ -3,7 +3,7 @@
 
 //! Geometry-level operations (CPU-only): `geometry.transform`,
 //! `geometry.merge`, `geometry.connect`, `geometry.sort`,
-//! `geometry.blast`, `geometry.resample`, `geometry.switch`, `geometry.null`, and `geometry.from_image`.
+//! `geometry.blast`, `geometry.measure`, `geometry.resample`, `geometry.switch`, `geometry.null`, and `geometry.from_image`.
 //!
 //! Operate on whole [`Geometry`] values with copy-on-write attribute
 //! columns — untouched columns keep sharing their `Arc` with the input.
@@ -13,8 +13,8 @@ use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::absent::absent_column;
 use ravel_core::geometry::{
     AttributeArray, AttributeSet, ConnectInterpolation, ConnectMode, Domain, Geometry,
-    InstanceColumns, InstanceImage, InstanceSource, InstanceTransform, SortMode, blast,
-    bounds_center, connect, names, resample, sort,
+    InstanceColumns, InstanceImage, InstanceSource, InstanceTransform, Measure, SortMode, blast,
+    bounds_center, connect, measure, names, resample, sort,
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{NodeData, Vec2, Vec3};
@@ -559,6 +559,39 @@ impl NodeProcessor for GeometryBlastProcessor {
             domain,
             params.str_or("group", ""),
             params.bool_or("invert", false),
+        )?))
+    }
+}
+
+/// `geometry.measure`: write one geometric measurement as an attribute.
+///
+/// The `measure` parameter picks the quantity and with it the domain the
+/// attribute lands on; an unknown string falls back to `perimeter` the way
+/// `geometry.sort`'s unknown `mode` falls back to `x`.
+pub struct GeometryMeasureProcessor;
+
+impl NodeProcessor for GeometryMeasureProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let geometry = geometry_input(inputs, 0, "geometry.measure")?;
+        let what = match params.str_or("measure", "perimeter") {
+            "area" => Measure::Area,
+            "curvature" => Measure::Curvature,
+            "segment_length" => Measure::SegmentLength,
+            "bounds" => Measure::Bounds,
+            "size" => Measure::Size,
+            _ => Measure::Perimeter,
+        };
+        Ok(Arc::new(measure(
+            geometry,
+            what,
+            params.str_or("name", ""),
         )?))
     }
 }
@@ -2896,5 +2929,102 @@ mod tests {
             2,
             "at least one segment"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // geometry.measure
+    // -----------------------------------------------------------------------
+
+    /// Runs `geometry.measure` with `params` over a 4x3 rectangle.
+    fn eval_measure(params: &[(&str, ParameterValue)]) -> Geometry {
+        let mut geometry = Geometry::from_points(vec![
+            Vec2(0.0, 0.0),
+            Vec2(4.0, 0.0),
+            Vec2(4.0, 3.0),
+            Vec2(0.0, 3.0),
+        ]);
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..4,
+            closed: true,
+        });
+        let mut node = Node::new(NodeId::new(2), "geometry.measure")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_output("output", DataTypeId::GEOMETRY);
+        for (key, value) in params {
+            node = node.with_param(*key, value.clone());
+        }
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "test.source").with_output("out", DataTypeId::GEOMETRY),
+            )
+            .unwrap()
+            .add_node(node)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(Fixed(Arc::new(geometry))));
+        ev.register(NodeId::new(2), Arc::new(GeometryMeasureProcessor));
+        let output = ev.evaluate(&graph, NodeId::new(2), &ctx()).unwrap();
+        output.downcast_ref::<Geometry>().unwrap().clone()
+    }
+
+    /// Every `measure` string the template offers reaches its own quantity on
+    /// its own domain, and an unknown one falls back to `perimeter`.
+    #[test]
+    fn every_measure_parameter_reaches_its_quantity() {
+        let measure_of = |value: &str| vec![("measure", text(value))];
+        let primitive_f32 = |g: &Geometry, name: &str| {
+            g.primitive_attrs()
+                .get(name)
+                .unwrap()
+                .as_f32(name)
+                .unwrap()
+                .to_vec()
+        };
+        let out = eval_measure(&measure_of("perimeter"));
+        assert_eq!(primitive_f32(&out, "perimeter"), [14.0]);
+        let out = eval_measure(&measure_of("area"));
+        assert_eq!(primitive_f32(&out, "area"), [12.0]);
+        let out = eval_measure(&measure_of("segment_length"));
+        assert_eq!(
+            out.points()
+                .get("segment_length")
+                .unwrap()
+                .as_f32("segment_length")
+                .unwrap(),
+            [4.0, 3.0, 4.0, 3.0]
+        );
+        let out = eval_measure(&measure_of("curvature"));
+        assert_eq!(out.points().get("curvature").unwrap().len(), 4);
+        let out = eval_measure(&measure_of("bounds"));
+        assert_eq!(
+            out.detail()
+                .get("bounds")
+                .unwrap()
+                .as_vec4("bounds")
+                .unwrap(),
+            [ravel_core::types::Vec4(0.0, 0.0, 4.0, 3.0)]
+        );
+        let out = eval_measure(&measure_of("size"));
+        assert_eq!(
+            out.primitive_attrs()
+                .get("size")
+                .unwrap()
+                .as_vec2("size")
+                .unwrap(),
+            [Vec2(4.0, 3.0)]
+        );
+        // Unknown falls back; `name` renames.
+        let out = eval_measure(&measure_of("sideways"));
+        assert_eq!(primitive_f32(&out, "perimeter"), [14.0]);
+        let out = eval_measure(&[("measure", text("area")), ("name", text("a"))]);
+        assert_eq!(primitive_f32(&out, "a"), [12.0]);
     }
 }

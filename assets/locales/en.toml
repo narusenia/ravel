@@ -1066,6 +1066,16 @@ domain = "Which elements the indices count."
 name = "Name of the boolean attribute that is written."
 invert = "Flag every element except the ones the range names."
 
+[node."geometry.repeat"]
+label = "Repeat"
+description = "Makes count copies of the input. Copy i is placed by the per-copy transform applied i times, so spirals and nested layouts build up. The output is instances, like the scatter nodes."
+
+[node."geometry.repeat".params]
+count = "Number of copies. The first copy is the input where it is."
+translate = "Offset added by each step, in the previous copy's own turned and scaled space."
+rotate = "Turn added by each step, in degrees."
+scale = "Scale multiplied in by each step. A scale of 0 collapses every copy after the first."
+
 [node."geometry.from_image"]
 label = "Image to Geometry"
 description = "Wraps an image as one instance that stamps it, so geometry nodes can repeat and place it. The rectangle is the source's pixel size, centred on the origin; scaling a copy up makes it blurry."

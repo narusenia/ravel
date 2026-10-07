@@ -176,6 +176,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(geometry_connect());
     reg.register(geometry_sort());
     reg.register(geometry_group_index());
+    reg.register(geometry_repeat());
     reg.register(geometry_from_image());
     reg.register(scene_add());
     reg.register(scene_merge());
@@ -1729,6 +1730,24 @@ fn geometry_group_index() -> NodeTemplate {
     })
 }
 
+/// `geometry.repeat`: the transform repeater. Output is on the instance
+/// domain with the source in `instance_source`, like `scatter.*`.
+///
+/// No transform section: the per-copy transform is this node's placement.
+fn geometry_repeat() -> NodeTemplate {
+    NodeTemplate::new("geometry.repeat", "Repeat", NodeCategory::Geometry)
+        .with_input(geometry_input("instance_source"))
+        .with_output(geometry_output())
+        .with_param(int_parameter("count", 5))
+        .with_param(channel2_parameter("translate", 10.0, 0.0))
+        .with_param(float_parameter("rotate", 0.0))
+        .with_param(channel2_parameter("scale", 1.0, 1.0))
+        .with_param_range("count", 0.0..=100_000.0, 0.0..=100.0)
+        .with_param_range("translate", -1e9..=1e9, -500.0..=500.0)
+        .with_param_range("rotate", -1e6..=1e6, -180.0..=180.0)
+        .with_param_range("scale", -1e6..=1e6, -2.0..=2.0)
+}
+
 /// `geometry.sort`: reorder the elements of one domain and renumber `index`.
 ///
 /// The `path` input is only read by `mode = "along_path"`, and `center` /
@@ -3259,14 +3278,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 119);
+        assert_eq!(reg.all_templates().count(), 120);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 29);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 30);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
@@ -4300,6 +4319,7 @@ mod tests {
             "field.apply",
             "geometry.connect",
             "geometry.group_index",
+            "geometry.repeat",
             "geometry.sort",
             "geometry.transform",
             "style.dash",

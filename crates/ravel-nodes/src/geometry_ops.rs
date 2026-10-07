@@ -12,8 +12,9 @@ use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::Geometry;
 use ravel_core::geometry::index_group::group_index;
+use ravel_core::geometry::repeat::{repeat, repeat_step};
 use ravel_core::graph::Node;
-use ravel_core::types::NodeData;
+use ravel_core::types::{NodeData, Vec2};
 
 fn geometry_input<'a>(
     inputs: &'a [Option<Arc<dyn NodeData>>],
@@ -60,13 +61,50 @@ impl NodeProcessor for GeometryGroupIndexProcessor {
     }
 }
 
+/// `geometry.repeat`: `count` copies of the source, copy `i` placed by the
+/// per-copy `translate` / `rotate` (degrees) / `scale` composed `i` times.
+/// Copy 0 is the source where it is. Output is an instance geometry shaped like
+/// `scatter.*`'s. The transforms act about the source's own origin.
+pub struct GeometryRepeatProcessor;
+
+impl GeometryRepeatProcessor {
+    pub fn from_node(_node: &Node) -> Self {
+        Self
+    }
+}
+
+impl NodeProcessor for GeometryRepeatProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        // The source is optional: with none wired the result is the bare
+        // instance points, as `scatter.*` gives.
+        let source = match inputs.first().and_then(|input| input.as_ref()) {
+            None => None,
+            Some(_) => Some(Arc::new(
+                geometry_input(inputs, 0, "geometry.repeat")?.clone(),
+            )),
+        };
+        let [tx, ty] = params.vec2_or("translate", [10.0, 0.0]);
+        let [sx, sy] = params.vec2_or("scale", [1.0, 1.0]);
+        let step = repeat_step(Vec2(tx, ty), params.f32_or("rotate", 0.0), Vec2(sx, sy));
+        let count = params.i32_or("count", 5).max(0) as usize;
+        Ok(Arc::new(repeat(source, count, step)?))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::field::ApplyFieldProcessor;
     use ravel_core::eval::{Evaluator, ResolvedValue};
     use ravel_core::geometry::{AttributeArray, ConstantField, Domain, FieldValue};
-    use ravel_core::types::{FrameRate, Vec2};
+    use ravel_core::types::FrameRate;
 
     pub(super) fn ctx() -> EvalContext {
         EvalContext::new(0, FrameRate::new(30, 1), (64, 64))
@@ -153,6 +191,32 @@ mod tests {
                 assert_eq!(after[i], before[i], "element {i} must not move");
             }
         }
+    }
+
+    #[test]
+    fn repeat_node_reads_count_and_the_per_copy_transform() {
+        let out = run(
+            &GeometryRepeatProcessor,
+            vec![points(1)],
+            &[
+                ("count", ResolvedValue::Int(3)),
+                ("translate", ResolvedValue::Vec2([2.0, 0.0])),
+            ],
+        )
+        .unwrap();
+        let p = out
+            .instances()
+            .get("P")
+            .unwrap()
+            .as_vec2("P")
+            .unwrap()
+            .to_vec();
+        assert_eq!(p, [Vec2(0.0, 0.0), Vec2(2.0, 0.0), Vec2(4.0, 0.0)]);
+        assert!(out.instance_source().is_some());
+        // No source wired: bare instances, not an error.
+        let bare = run(&GeometryRepeatProcessor, vec![], &[]).unwrap();
+        assert_eq!(bare.instance_count(), 5);
+        assert!(bare.instance_source().is_none());
     }
 
     fn run_apply(geometry: &Geometry, group: &str) -> Geometry {

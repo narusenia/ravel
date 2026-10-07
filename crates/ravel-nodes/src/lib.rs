@@ -259,6 +259,9 @@ pub fn processor_for_node(
         "geometry.group_index" => Some(Arc::new(
             geometry_ops::GeometryGroupIndexProcessor::from_node(node),
         )),
+        "geometry.repeat" => Some(Arc::new(geometry_ops::GeometryRepeatProcessor::from_node(
+            node,
+        ))),
         "geometry.from_image" => Some(Arc::new(geometry::GeometryFromImageProcessor::from_node(
             node,
         ))),

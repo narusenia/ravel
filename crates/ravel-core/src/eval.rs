@@ -889,6 +889,27 @@ pub trait NodeProcessor: Send + Sync {
         false
     }
 
+    /// Whether this processor pulls its (non-parameter) inputs itself, so the
+    /// evaluator must not evaluate them before [`Self::process`].
+    ///
+    /// A time node reads its upstream at a frame of its own choosing through
+    /// [`EvalScope::evaluate_input_at`]. The eager pull would first evaluate
+    /// that upstream at `ctx.frame`, which a freeze never uses and a remap
+    /// only uses by coincidence, and it would put a second cache entry for the
+    /// wrong frame in the way. Such a processor receives `None` in the slots of
+    /// its ordinary input ports; parameter ports are still pulled and applied.
+    ///
+    /// Cache correctness without the eager pull: besides the usual dirty and
+    /// frame-advance checks, the evaluator remembers the `(port, frame)` pulls
+    /// the last `process` made and replays them before serving a cached value;
+    /// a recomputed result counts as a fresh input and forces a re-run, as an
+    /// eager input's freshness does for an ordinary node. A processor that
+    /// returns `true` here and is time-independent must be a pure function of
+    /// the frames it names itself (a freeze).
+    fn pulls_inputs_itself(&self) -> bool {
+        false
+    }
+
     /// Whether a change to this processor's node requires constructing it
     /// again.
     ///
@@ -957,6 +978,25 @@ pub trait EvalScope {
             bindings,
         )
     }
+
+    /// Evaluate what is wired into input `port` of `node` at `frame` instead of
+    /// `ctx.frame`; `None` if nothing is connected there.
+    ///
+    /// `node` is the node being processed. The edge is resolved in the graph
+    /// that node is being evaluated in (which a processor does not hold), then
+    /// the source is pulled through [`Self::evaluate_time_shifted`], so the
+    /// shifted pull has its own cache entries and inherits that method's
+    /// limits. Pair it with [`NodeProcessor::pulls_inputs_itself`]; without
+    /// that the input has already been evaluated at `ctx.frame`. A multi-output
+    /// source yields the value of the connected output port. Only valid from
+    /// inside `process`.
+    fn evaluate_input_at(
+        &mut self,
+        node: &Node,
+        port: usize,
+        frame: u64,
+        ctx: &EvalContext,
+    ) -> Result<Option<Arc<dyn NodeData>>, EvalError>;
 
     /// Bindings offered by the caller of the innermost active scope.
     fn bindings(&self) -> &[(String, Arc<dyn NodeData>)];
@@ -1886,6 +1926,17 @@ pub struct Evaluator {
     /// per recursion level. [`EvalScope::evaluate_sub`] carries that depth
     /// across network boundaries instead of resetting the stack budget.
     processing: Vec<(NodeKey, usize)>,
+    /// The graph each entry of `processing` is evaluated in, so
+    /// [`EvalScope::evaluate_input_at`] can resolve a node's wires.
+    processing_graphs: Vec<Graph>,
+    /// Per self-pulling node ([`NodeProcessor::pulls_inputs_itself`]), the
+    /// `(port, frame)` shifted pulls its last `process` made. Such a node skips
+    /// the eager input pull that tells an ordinary node its input changed, so
+    /// its cache entry is validated by re-issuing these pulls (cheap while
+    /// their entries are cached) and treating a fresh result as a miss.
+    pull_log: HashMap<NodeKey, Vec<(usize, u64)>>,
+    /// Whether the last [`EvalScope::evaluate_sub`] recomputed its root.
+    last_sub_fresh: bool,
     /// Nested scope path → the node whose `process` opened it. Scoped
     /// invalidation uses this to drop the owner's cached value too, so a
     /// network edit propagates to the shell chain automatically.
@@ -2197,6 +2248,7 @@ impl Evaluator {
         for path in self.store.forget_node(node) {
             self.drop_scope_owner_caches(path);
         }
+        self.pull_log.retain(|key, _| key.node != node);
         self.store.mark_dirty(NodeKey {
             path: ROOT_PATH,
             node,
@@ -2444,18 +2496,27 @@ impl Evaluator {
         // dirtied node.
         let path_id = self.paths.intern(path);
         let index = self.graph_index(graph, path_id);
+        // Terminates on a walk-local set, not on "already dirty": a node that
+        // was registered but never pulled in this scope carries a dirty flag
+        // from registration, and stopping there would hide its downstream. A
+        // node reached only through a self-pulling time node
+        // ([`NodeProcessor::pulls_inputs_itself`]) is exactly that — it is only
+        // ever evaluated in shifted scopes.
+        let mut visited = HashSet::new();
         let mut stack = vec![node];
         let mut dirtied: HashSet<NodeKey> = HashSet::new();
         while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
             let key = NodeKey {
                 path: path_id,
                 node: current,
             };
-            if self.store.mark_dirty(key) {
-                stack.extend_from_slice(index.out_nodes(current));
-                self.drop_time_shift_scopes(path_id, current);
-                dirtied.insert(key);
-            }
+            self.store.mark_dirty(key);
+            stack.extend_from_slice(index.out_nodes(current));
+            self.drop_time_shift_scopes(path_id, current);
+            dirtied.insert(key);
         }
         self.drop_iteration_scopes(&dirtied);
         self.drop_scope_owner_caches(path_id);
@@ -2471,6 +2532,7 @@ impl Evaluator {
         // `scope_reach`) alive behind an otherwise empty cache
         // (MED-CORE-07).
         self.scope_owners.clear();
+        self.pull_log.clear();
         self.time_shift_scopes.clear();
         self.iteration_scopes.clear();
         self.retired_scopes.clear();
@@ -2529,6 +2591,7 @@ impl Evaluator {
         self.scope_reach.retain(|scope, _| !under.contains(scope));
         // Holds a `Graph` clone too, for the same reason.
         self.graph_index.retain(|scope, _| !under.contains(scope));
+        self.pull_log.retain(|key, _| !under.contains(&key.path));
     }
 
     /// Drop the cached values under every shift scope that `node` opened
@@ -2814,7 +2877,8 @@ impl Evaluator {
             Ok((_, fresh)) => tracing::debug!(fresh = fresh, "evaluation complete"),
             Err(err) => tracing::debug!(%err, "evaluation failed"),
         }
-        let (value, _fresh) = result?;
+        let (value, fresh) = result?;
+        self.last_sub_fresh = fresh;
         Ok(value)
     }
 
@@ -2944,7 +3008,19 @@ impl Evaluator {
 
         // Evaluate upstream inputs into per-port slots (port order). Slots
         // a failed bypass attempt already pulled are skipped.
+        let self_pulling = self
+            .processors
+            .get(&node)
+            .is_some_and(|p| p.pulls_inputs_itself());
         for (target_port, source, source_port) in in_edges {
+            if self_pulling
+                && !node_ref
+                    .inputs
+                    .get(target_port.0 as usize)
+                    .is_some_and(|port| port.is_param)
+            {
+                continue;
+            }
             self.pull_input(
                 graph,
                 node,
@@ -3069,6 +3145,18 @@ impl Evaluator {
             }
         };
 
+        // A self-pulling node has no eager pull to deliver its inputs'
+        // freshness: replay the shifted pulls its cached value was made from.
+        // Only worth doing when nothing else already forces a recompute.
+        let miss = if miss.is_none()
+            && processor.pulls_inputs_itself()
+            && self.shifted_pulls_are_fresh(graph, node, key, ctx)
+        {
+            Some(CacheMiss::InputFresh)
+        } else {
+            miss
+        };
+
         // A network interface node also carries the scope's bindings, which
         // are values and therefore outside `CacheIdentity`. Checking them
         // last is deliberate: `BindingsChanged` may only be the reason when
@@ -3160,12 +3248,15 @@ impl Evaluator {
             );
             let _guard = span.enter();
             self.processing.push((key, depth));
+            self.processing_graphs.push(graph.clone());
+            self.pull_log.remove(&key);
             let started = std::time::Instant::now();
             let produced = processor
                 .process(&node_ref, ctx, &input_values, &params, self)
                 .map_err(|source| EvalError::ProcessFailed { node, source });
             self.timings.push((node, started.elapsed()));
             self.processing.pop();
+            self.processing_graphs.pop();
             let value = produced?;
             self.store.insert(key, identity, value.clone());
             (value, true)
@@ -3215,6 +3306,36 @@ impl Evaluator {
             Some(ports) => ports.get(port.0 as usize).copied().unwrap_or(true),
             None => true,
         }
+    }
+
+    /// Replay the shifted pulls `node`'s cached value was made from; `true` if
+    /// any recomputed (or failed, which `process` then reports).
+    fn shifted_pulls_are_fresh(
+        &mut self,
+        graph: &Graph,
+        node: NodeId,
+        key: NodeKey,
+        ctx: &EvalContext,
+    ) -> bool {
+        let Some(pulls) = self.pull_log.get(&key).cloned() else {
+            return false;
+        };
+        let index = self.current_graph_index(graph);
+        let mut fresh = false;
+        for (port, frame) in pulls {
+            let Some(&(_, source, _)) = index
+                .in_edges(node)
+                .iter()
+                .find(|(target, _, _)| target.0 as usize == port)
+            else {
+                return true;
+            };
+            match self.evaluate_time_shifted(node, frame, graph, source, ctx) {
+                Ok(_) => fresh |= self.last_sub_fresh,
+                Err(_) => return true,
+            }
+        }
+        fresh
     }
 
     /// Pull the incoming edge at `target_port` of `node` into
@@ -3576,6 +3697,44 @@ impl EvalScope for Evaluator {
         self.path_id = outer_path_id;
         self.active_scopes.pop();
         result
+    }
+
+    fn evaluate_input_at(
+        &mut self,
+        node: &Node,
+        port: usize,
+        frame: u64,
+        ctx: &EvalContext,
+    ) -> Result<Option<Arc<dyn NodeData>>, EvalError> {
+        let Some(graph) = self.processing_graphs.last().cloned() else {
+            return Err(EvalError::ProcessFailed {
+                node: node.id,
+                source: anyhow::anyhow!("evaluate_input_at called outside process"),
+            });
+        };
+        let index = self.current_graph_index(&graph);
+        let Some(&(_, source, source_port)) = index
+            .in_edges(node.id)
+            .iter()
+            .find(|(target, _, _)| target.0 as usize == port)
+        else {
+            // Nothing wired: no dependency to replay, so nothing to record.
+            return Ok(None);
+        };
+        if let Some((key, _)) = self.processing.last() {
+            let log = self.pull_log.entry(*key).or_default();
+            if !log.contains(&(port, frame)) {
+                log.push((port, frame));
+            }
+        }
+        let value = self.evaluate_time_shifted(node.id, frame, &graph, source, ctx)?;
+        let port_count = graph.node(source).map_or(1, |n| n.outputs.len());
+        PortRecord::extract(&value, port_count, source_port)
+            .map(Some)
+            .ok_or_else(|| EvalError::ProcessFailed {
+                node: source,
+                source: anyhow::anyhow!("edge from port {source_port:?} has no value"),
+            })
     }
 
     fn bindings(&self) -> &[(String, Arc<dyn NodeData>)] {
@@ -7630,6 +7789,326 @@ mod tests {
 
     fn shift_scope(frame: u64) -> Vec<PathSegment> {
         vec![PathSegment::TimeShift(shift(), frame)]
+    }
+
+    // ---- self-pulling time nodes (`pulls_inputs_itself`) --------------------
+
+    /// Records every frame it is evaluated at.
+    struct RecordingSource {
+        seen: Arc<std::sync::Mutex<Vec<u64>>>,
+    }
+    impl NodeProcessor for RecordingSource {
+        fn process(
+            &self,
+            _node: &Node,
+            ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            self.seen.lock().unwrap().push(ctx.frame);
+            Ok(Arc::new(Scalar(ctx.frame as f32)))
+        }
+        fn is_time_dependent(&self) -> bool {
+            true
+        }
+    }
+
+    /// Pulls its input itself at `ctx.frame + 10`, or at a fixed frame when
+    /// `freeze` is set (then it is time-independent).
+    struct LazyShift {
+        freeze: Option<u64>,
+        /// Also pulls the next frame and returns the sum (a blend's two taps).
+        pair: bool,
+    }
+    impl NodeProcessor for LazyShift {
+        fn process(
+            &self,
+            node: &Node,
+            ctx: &EvalContext,
+            inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            assert!(inputs[0].is_none(), "the evaluator pulled a lazy input");
+            let frame = self.freeze.unwrap_or(ctx.frame + 10);
+            let first = scope
+                .evaluate_input_at(node, 0, frame, ctx)?
+                .expect("input is wired");
+            if !self.pair {
+                return Ok(first);
+            }
+            let second = scope
+                .evaluate_input_at(node, 0, frame + 1, ctx)?
+                .expect("input is wired");
+            let sum = first.downcast_ref::<Scalar>().unwrap().0
+                + second.downcast_ref::<Scalar>().unwrap().0;
+            Ok(Arc::new(Scalar(sum)))
+        }
+        fn pulls_inputs_itself(&self) -> bool {
+            true
+        }
+        fn is_time_dependent(&self) -> bool {
+            self.freeze.is_none()
+        }
+    }
+
+    /// `RecordingSource(7)` -> `LazyShift(1)` -> `CountingSum(2)`.
+    fn lazy_setup(
+        freeze: Option<u64>,
+    ) -> (
+        Evaluator,
+        Graph,
+        Arc<std::sync::Mutex<Vec<u64>>>,
+        Arc<AtomicUsize>,
+    ) {
+        lazy_setup_with(LazyShift {
+            freeze,
+            pair: false,
+        })
+    }
+
+    fn lazy_setup_with(
+        processor: LazyShift,
+    ) -> (
+        Evaluator,
+        Graph,
+        Arc<std::sync::Mutex<Vec<u64>>>,
+        Arc<AtomicUsize>,
+    ) {
+        let edge = |id, from: NodeId, to: NodeId| (EdgeId::new(id), from, to);
+        let mut graph = Graph::new();
+        for id in [1, 2, 7] {
+            graph = graph.add_node(scalar_node(id)).unwrap();
+        }
+        for (id, from, to) in [
+            edge(1, upstream(), shift()),
+            edge(2, shift(), NodeId::new(2)),
+        ] {
+            graph = graph
+                .add_edge(id, from, OutputPortIndex(0), to, InputPortIndex(0))
+                .unwrap();
+        }
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sum_calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(upstream(), Arc::new(RecordingSource { seen: seen.clone() }));
+        ev.register(shift(), Arc::new(processor));
+        ev.register(
+            NodeId::new(2),
+            Arc::new(CountingSum {
+                calls: sum_calls.clone(),
+            }),
+        );
+        (ev, graph, seen, sum_calls)
+    }
+
+    #[test]
+    fn a_self_pulling_node_never_evaluates_its_input_at_the_unshifted_frame() {
+        let (mut ev, graph, seen, _) = lazy_setup(None);
+        let out = ev.evaluate(&graph, NodeId::new(2), &ctx_at(3)).unwrap();
+        assert_eq!(scalar_of(&out), 14.0, "13 from the shifted pull, plus 1");
+        assert_eq!(*seen.lock().unwrap(), vec![13], "frame 3 was evaluated");
+        assert!(!ev.cache_contains(&[], upstream()));
+    }
+
+    /// The regression the cache key exists for: a consumer downstream of a time
+    /// node must follow the frame, and revisiting a frame must be a hit.
+    #[test]
+    fn downstream_of_a_time_node_never_serves_another_frames_value() {
+        let (mut ev, graph, seen, sum_calls) = lazy_setup(None);
+        let at = |ev: &mut Evaluator, f| {
+            scalar_of(&ev.evaluate(&graph, NodeId::new(2), &ctx_at(f)).unwrap())
+        };
+        assert_eq!(at(&mut ev, 3), 14.0);
+        assert_eq!(at(&mut ev, 4), 15.0, "frame 4 was served frame 3's value");
+        assert_eq!(at(&mut ev, 3), 14.0);
+        // Frame 3's shifted entry survived frame 4: no third source pull.
+        assert_eq!(*seen.lock().unwrap(), vec![13, 14]);
+        assert_eq!(sum_calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn a_freeze_downstream_is_one_pull_for_every_frame() {
+        let (mut ev, graph, seen, sum_calls) = lazy_setup(Some(9));
+        for frame in 0..6 {
+            let out = ev.evaluate(&graph, NodeId::new(2), &ctx_at(frame)).unwrap();
+            assert_eq!(scalar_of(&out), 10.0, "frame {frame}");
+        }
+        assert_eq!(*seen.lock().unwrap(), vec![9]);
+        assert_eq!(sum_calls.load(Ordering::Relaxed), 1);
+    }
+
+    /// Production edits go through `invalidate_node` (the GPU hook's sync),
+    /// which drops the edited node's entries but dirties nothing downstream: a
+    /// self-pulling node must still notice that its source changed. With the
+    /// source's shifted entry present, the scope-owner drop covers it; once the
+    /// budget has evicted that entry `invalidate_node` finds nothing to drop
+    /// and only the replayed pulls (`pull_log`) can tell. `evict` simulates it.
+    fn assert_source_edit_reaches(
+        processor: LazyShift,
+        frame: u64,
+        shifted: &[u64],
+        first: f32,
+        evict: bool,
+    ) {
+        let (mut ev, graph, seen, _) = lazy_setup_with(processor);
+        let out = ev.evaluate(&graph, NodeId::new(2), &ctx_at(frame)).unwrap();
+        assert_eq!(scalar_of(&out), first);
+        if evict {
+            for f in shifted {
+                let path = ev.paths.id_of(&shift_scope(*f)).expect("scope entered");
+                ev.store.remove(&NodeKey {
+                    path,
+                    node: upstream(),
+                });
+            }
+        }
+        let pulled = seen.lock().unwrap().len();
+        ev.invalidate_node(upstream());
+        ev.evaluate(&graph, NodeId::new(2), &ctx_at(frame)).unwrap();
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            pulled + shifted.len(),
+            "the edited source was not pulled again: stale output (evict = {evict})"
+        );
+    }
+
+    #[test]
+    fn invalidating_the_source_reaches_a_self_pulling_remap() {
+        for evict in [false, true] {
+            let remap = LazyShift {
+                freeze: None,
+                pair: false,
+            };
+            assert_source_edit_reaches(remap, 3, &[13], 14.0, evict);
+        }
+    }
+
+    #[test]
+    fn invalidating_the_source_reaches_a_self_pulling_freeze() {
+        for evict in [false, true] {
+            let freeze = LazyShift {
+                freeze: Some(9),
+                pair: false,
+            };
+            assert_source_edit_reaches(freeze, 3, &[9], 10.0, evict);
+        }
+    }
+
+    #[test]
+    fn invalidating_the_source_reaches_a_self_pulling_blend() {
+        for evict in [false, true] {
+            let blend = LazyShift {
+                freeze: None,
+                pair: true,
+            };
+            // Frames 13 and 14 sum to 27, plus the consumer's 1.
+            assert_source_edit_reaches(blend, 3, &[13, 14], 28.0, evict);
+        }
+    }
+
+    /// Asks for an input port nothing is wired to.
+    struct Unwired {
+        calls: Arc<AtomicUsize>,
+    }
+    impl NodeProcessor for Unwired {
+        fn process(
+            &self,
+            node: &Node,
+            ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            assert!(scope.evaluate_input_at(node, 0, 5, ctx)?.is_none());
+            Ok(Arc::new(Scalar(1.0)))
+        }
+        fn pulls_inputs_itself(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_self_pulling_node_with_an_unwired_port_is_a_cache_hit() {
+        let graph = Graph::new().add_node(scalar_node(1)).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut ev = Evaluator::new();
+        ev.register(
+            shift(),
+            Arc::new(Unwired {
+                calls: calls.clone(),
+            }),
+        );
+        for _ in 0..3 {
+            ev.evaluate(&graph, shift(), &ctx_at(3)).unwrap();
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 1, "recomputed on every pull");
+    }
+
+    #[test]
+    fn the_pull_log_does_not_outlive_a_dropped_scope() {
+        // source(7) <- A(1) <- B(3): evaluating B runs A inside TimeShift(B, 13).
+        let b = NodeId::new(3);
+        let mut graph = Graph::new();
+        for id in [1, 3, 7] {
+            graph = graph.add_node(scalar_node(id)).unwrap();
+        }
+        for (id, from, to) in [(1, upstream(), shift()), (2, shift(), b)] {
+            graph = graph
+                .add_edge(
+                    EdgeId::new(id),
+                    from,
+                    OutputPortIndex(0),
+                    to,
+                    InputPortIndex(0),
+                )
+                .unwrap();
+        }
+        let mut ev = Evaluator::new();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        ev.register(upstream(), Arc::new(RecordingSource { seen }));
+        ev.register(
+            shift(),
+            Arc::new(LazyShift {
+                freeze: None,
+                pair: false,
+            }),
+        );
+        ev.register(
+            b,
+            Arc::new(LazyShift {
+                freeze: None,
+                pair: false,
+            }),
+        );
+        ev.evaluate(&graph, b, &ctx_at(3)).unwrap();
+        let inner = ev
+            .paths
+            .id_of(&[PathSegment::TimeShift(b, 13)])
+            .expect("A ran in B's shifted scope");
+        assert!(
+            ev.pull_log.keys().any(|k| k.path == inner),
+            "A logged nothing"
+        );
+
+        ev.invalidate_scope(&[PathSegment::TimeShift(b, 13)]);
+        assert!(
+            ev.pull_log.keys().all(|k| k.path != inner),
+            "the log kept an entry for a dropped scope"
+        );
+        ev.invalidate_node(b);
+        assert!(ev.pull_log.keys().all(|k| k.node != b));
+    }
+
+    #[test]
+    fn an_upstream_edit_reaches_a_self_pulling_freeze() {
+        let (mut ev, graph, seen, _) = lazy_setup(Some(9));
+        ev.evaluate(&graph, NodeId::new(2), &ctx_at(0)).unwrap();
+        ev.mark_dirty(&graph, upstream());
+        ev.evaluate(&graph, NodeId::new(2), &ctx_at(0)).unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![9, 9], "the edit was ignored");
     }
 
     #[test]

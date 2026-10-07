@@ -217,7 +217,7 @@ pub fn apply_batch(doc: &Document, ops: &[EditOp], cx: &EditContext) -> Result<A
   ような型違いは拒否する
 - 従属する値と出力ポート型は、UI と同じ `dependent_param_updates` /
   `dependent_port_updates` で広げ、`set_params_and_output_types` で 1 回に書く
-- **UI と食い違う点（ユーザー判断あり、未決事項 1）**: キーフレーム済みで
+- **UI と食い違う点（2026-10-07 決定。末尾の「決定済みの未決事項」1）**: キーフレーム済みで
   `local_frame` が無いとき、現 UI は**定数で潰す**（`param_edit.rs:10` の
   `edited_channel` の `None` 腕）。UI にはプレイヘッドが必ずあるので起きないが、
   ヘッドレスの呼び出しでは「アニメを黙って消す」ことになる。推奨は
@@ -267,14 +267,22 @@ pub fn apply_batch(doc: &Document, ops: &[EditOp], cx: &EditContext) -> Result<A
 足すと、グループの閉じ忘れという新しい状態が生まれる。ジェスチャ中の更新
 （`apply_document`）は引き続き UI だけが使い、この層は関与しない。
 
-### 8. 同一バッチ内で作った ID を後続の操作が参照する仕組みは、今は持たない
+### 8. 同一バッチ内で作ったものは別名（`as`）で参照する
 
-ID は操作の中で採番され、結果として返る（`Created`）。バッチの**前に**存在する
-ID は参照できるが、同じバッチで作ったものは、まだ誰も知らない。
-`AI-3`（頭なし）はサーバがメモリ上で 1 操作ずつ適用し、結果の ID を返せば
-足りる。`AI-4`/`AI-5` のライブ編集で「ノードを作って、そのままつなぐ」を
-1 undo 段にしたくなったとき、**別名（`as: "n1"`）の導入を判断する**
-（未決事項 2）。必要が出る前に作らない。
+ID は操作の中で採番され、結果として返る（`Created`）。それだけだと、同じバッチで
+作ったノードを後続の操作が指せず、「ノードを作って、そのままつなぐ」を 1 回の
+呼び出し（undo 1 段）にまとめられない。そこで別名を**最初から**持つ
+（2026-10-07 決定。後から足すと `EditOp` の直列化形式が変わるため）。
+
+- 作る操作（`AddComposition` / `AddLayer` / `AddNode`）は省略可能な `as`
+  （例 `"as": "blur"`）を取る
+- 対象を指す引数は ID 直書きでなく参照型（`CompRef` / `LayerRef` / `NodeRef` =
+  `Id(..)` か `Alias(String)`）にする。JSON では数値なら ID、文字列なら別名
+- 別名の有効範囲は**1 バッチ**。バッチをまたいで残さない（永続化しない）
+- 同じバッチ内での別名の重複は `DuplicateAlias`、未定義の別名は `UnknownAlias`。
+  どちらもバッチ全体が不成功（文書は不変）
+- `Applied` は別名 → 採番された ID の対応を返す。`AI-3` の頭なし組み立ても、
+  1 操作ずつ送る使い方と、組み立てを 1 バッチで送る使い方の両方ができる
 
 ## 目標構成
 
@@ -327,6 +335,9 @@ AI-2a ──▶ AI-2b ──▶ AI-2c ──▶ AI-2d
 - 不正な引数（存在しないコンプ・レイヤー、未知のテンプレート、ロック済みレイヤーの
   削除）が `Err` を返し、**渡した `Document` が変わらない**（`==` で確認）
 - `apply_batch` が途中で失敗したとき、文書が変わらず、失敗した添字が返る
+- 別名: 同じバッチで `AddComposition { as }` → `AddLayer { comp: Alias }` が通り、
+  `Applied` が別名と ID の対応を返す。重複は `DuplicateAlias`、未定義は
+  `UnknownAlias` で、どちらも文書は不変
 - `EditOp` を JSON（`serde_json`、テスト限定の dev-dependency でなければ
   `ravel-cli` 側のテスト）に往復させて同値になる
 - `ravel-ui::document` の再エクスポート経由で既存の呼び出し元が**変更なしで**
@@ -367,8 +378,8 @@ AI-2a ──▶ AI-2b ──▶ AI-2c ──▶ AI-2d
   `edited_int_param` / `edited_string_param` / `edited_vector_param`）を `edit` へ移す。
   `ravel_ui::keyframes::set_curve_value` も `ravel-core` へ移し、再エクスポートする
 - 未知のキーは `UnknownParameter`、型違いは `ParameterTypeMismatch`、
-  アニメ済みで `local_frame` が無いときは `AnimatedParameter`（未決事項 1 の
-  回答に従う）
+  アニメ済みで `local_frame` が無いときは `AnimatedParameter`（決定事項 4。
+  キーを黙って消さない）
 - `NodeEditorPanel::apply_property_change`（`node_editor.rs:2072`）を `SetParameter` に
   置換。Properties パネルの書き込みも同じ関数を通る
 
@@ -379,7 +390,7 @@ AI-2a ──▶ AI-2b ──▶ AI-2c ──▶ AI-2d
 - 範囲外の値がクランプされる。未知のキー・型違い・存在しないノードが `Err` で
   文書は不変
 - アニメ済みのパラメータに `local_frame` を渡すとキーが打たれ、既存のキーが
-  残る。渡さないと `AnimatedParameter`（または未決事項 1 の回答）
+  残る。渡さないと `AnimatedParameter` で文書は不変
 - `attribute.set` の `type` を変えると `value` の形が追従し、`layer.ref` の
   出力ポート型が追従する（`dependent_*_updates` を通っていること）。
   1 回の `apply` が 1 つの `Document` を返す
@@ -437,13 +448,9 @@ AI-2a ──▶ AI-2b ──▶ AI-2c ──▶ AI-2d
 - ジャーナル（`GraphMutation`）の置き換え。別の目的（クラッシュ復旧）で、
   この層は載せ替えない
 
-## 未決事項（ユーザー判断）
+## 決定済みの未決事項（2026-10-07）
 
-1. **アニメ済みパラメータへの `SetParameter` で `local_frame` が無いときの挙動。**
-   現 UI は定数で潰す（キーが消える）。推奨は `AnimatedParameter` エラー。
-   代案は「潰す」（UI と同じだが、エージェントの 1 回の指示でアニメが消える）。
-   `AI-2c` の着手前に決める
-2. **同一バッチ内の参照**（別名 `as`）を入れるか。`AI-3` は不要（1 操作ずつ
-   結果の ID を返す）。`AI-4` / `AI-5` で、ライブ編集の「作ってつなぐ」を
-   1 undo 段にしたいときに要る。**今は入れない**のを推奨。決めるのは `AI-4` の
-   着手前でよい
+1. **アニメ済みパラメータへの `SetParameter` で `local_frame` が無いとき**:
+   `AnimatedParameter` エラー。現 UI の「定数で潰す」は採らない（エージェントの
+   1 回の指示でアニメが黙って消えるため）
+2. **同一バッチ内の参照**: 別名 `as` を入れる（決定事項 8）。`AI-2a` から参照型を使う

@@ -1109,6 +1109,14 @@ end = "Where along the axis the taper reaches its final width."
 amount = "How much width is lost by the end of the range. 0 leaves it alone, 1 closes it to a point, negative widens."
 group = "Name of a boolean point attribute. Only flagged points move. Empty moves every point."
 
+[node."geometry.blast"]
+label = "Blast"
+description = "Deletes the elements a boolean group attribute flags (or, inverted, the ones it does not). Deleting a point also deletes every primitive that used it. index is renumbered; id is kept. An empty or unresolvable group deletes nothing."
+[node."geometry.blast".params]
+domain = "Which elements are deleted. Deleting primitives keeps their points."
+group = "Name of the boolean attribute on that domain that flags the elements to delete. Empty deletes nothing."
+invert = "Delete the elements the group does not flag instead."
+
 [node."geometry.switch"]
 label = "Switch"
 description = "Passes one of its geometry inputs through, picked by index. An index past the last connected input picks the last one."

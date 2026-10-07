@@ -180,6 +180,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(geometry_deformer("geometry.bend", "Bend", 90.0));
     reg.register(geometry_deformer("geometry.twist", "Twist", 90.0));
     reg.register(geometry_deformer("geometry.taper", "Taper", 0.5));
+    reg.register(geometry_blast());
     reg.register(geometry_switch());
     reg.register(geometry_null());
     reg.register(geometry_from_image());
@@ -1808,6 +1809,25 @@ fn geometry_sort() -> NodeTemplate {
         .with_param_role("center", ParamRole::Position)
 }
 
+/// `geometry.blast`: delete the elements a Bool `group` attribute flags.
+///
+/// The `group` default is empty on purpose: elsewhere an empty group means
+/// every element, which for a deletion would empty the geometry the moment the
+/// node is created, so here it means none.
+fn geometry_blast() -> NodeTemplate {
+    NodeTemplate::new("geometry.blast", "Blast", NodeCategory::Geometry)
+        .with_input(geometry_input("geometry"))
+        .with_output(geometry_output())
+        // Detail holds exactly one element; there is nothing to delete from it.
+        .with_param(string_parameter("domain", "point"))
+        .with_param_options("domain", ["point", "primitive", "instance"])
+        .with_param(string_parameter("group", ""))
+        .with_param(Parameter {
+            key: "invert".into(),
+            value: ParameterValue::Bool(false),
+        })
+}
+
 /// `geometry.switch`: pass one of the variadic inputs through, picked by
 /// `index`. Out-of-range clamps to the last connected input.
 fn geometry_switch() -> NodeTemplate {
@@ -3388,14 +3408,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 125);
+        assert_eq!(reg.all_templates().count(), 126);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 35);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 36);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
@@ -4427,6 +4447,7 @@ mod tests {
             "attribute.set",
             "attribute.transfer",
             "field.apply",
+            "geometry.blast",
             "geometry.connect",
             "geometry.bend",
             "geometry.group_index",

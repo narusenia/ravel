@@ -3,7 +3,7 @@
 
 //! Geometry-level operations (CPU-only): `geometry.transform`,
 //! `geometry.merge`, `geometry.connect`, `geometry.sort`,
-//! `geometry.switch`, `geometry.null`, and `geometry.from_image`.
+//! `geometry.blast`, `geometry.switch`, `geometry.null`, and `geometry.from_image`.
 //!
 //! Operate on whole [`Geometry`] values with copy-on-write attribute
 //! columns — untouched columns keep sharing their `Arc` with the input.
@@ -13,8 +13,8 @@ use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::absent::absent_column;
 use ravel_core::geometry::{
     AttributeArray, AttributeSet, ConnectInterpolation, ConnectMode, Domain, Geometry,
-    InstanceColumns, InstanceImage, InstanceSource, InstanceTransform, SortMode, bounds_center,
-    connect, names, sort,
+    InstanceColumns, InstanceImage, InstanceSource, InstanceTransform, SortMode, blast,
+    bounds_center, connect, names, sort,
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{NodeData, Vec2, Vec3};
@@ -534,6 +534,32 @@ impl NodeProcessor for GeometrySortProcessor {
             _ => SortMode::X,
         };
         Ok(Arc::new(sort(geometry, domain, mode)?))
+    }
+}
+
+/// `geometry.blast`: delete the elements a Bool `group` attribute flags.
+///
+/// An empty or unresolvable `group` deletes nothing (see
+/// [`ravel_core::geometry::blast`]); `invert` flips which side goes.
+pub struct GeometryBlastProcessor;
+
+impl NodeProcessor for GeometryBlastProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let geometry = geometry_input(inputs, 0, "geometry.blast")?;
+        let domain = crate::attribute::domain_param(params, "domain", Domain::Point);
+        Ok(Arc::new(blast(
+            geometry,
+            domain,
+            params.str_or("group", ""),
+            params.bool_or("invert", false),
+        )?))
     }
 }
 
@@ -2688,5 +2714,102 @@ mod tests {
             )
             .unwrap();
         assert!(Arc::ptr_eq(&out, &input));
+    }
+
+    // -----------------------------------------------------------------------
+    // geometry.blast
+    // -----------------------------------------------------------------------
+
+    /// Runs `geometry.blast` with `params` over `geo`.
+    fn eval_blast(params: &[(&str, ParameterValue)], geo: Arc<Geometry>) -> Geometry {
+        let mut node = Node::new(NodeId::new(2), "geometry.blast")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_output("output", DataTypeId::GEOMETRY);
+        for (key, value) in params {
+            node = node.with_param(*key, value.clone());
+        }
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(1), "test.source").with_output("out", DataTypeId::GEOMETRY),
+            )
+            .unwrap()
+            .add_node(node)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                OutputPortIndex(0),
+                NodeId::new(2),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(Fixed(geo)));
+        ev.register(NodeId::new(2), Arc::new(GeometryBlastProcessor));
+        let output = ev.evaluate(&graph, NodeId::new(2), &ctx()).unwrap();
+        output.downcast_ref::<Geometry>().unwrap().clone()
+    }
+
+    /// Four points, a Bool `doomed` on the points and another on the instances,
+    /// the two flagging different rows so the `domain` parameter shows.
+    fn blast_input() -> Arc<Geometry> {
+        let mut geometry = Geometry::from_points(vec![Vec2(0.0, 0.0); 4]);
+        geometry
+            .points_mut()
+            .insert(
+                "doomed",
+                AttributeArray::Bool(vec![true, false, false, false]),
+            )
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert(names::P, AttributeArray::Vec2(vec![Vec2(0.0, 0.0); 3]))
+            .unwrap();
+        geometry
+            .instances_mut()
+            .insert("doomed", AttributeArray::Bool(vec![true, true, false]))
+            .unwrap();
+        Arc::new(geometry)
+    }
+
+    fn text(value: &str) -> ParameterValue {
+        ParameterValue::String(value.into())
+    }
+
+    /// `domain`, `group` and `invert` each change the outcome, and an unset
+    /// or unresolvable group deletes nothing rather than everything.
+    #[test]
+    fn every_blast_parameter_reaches_the_operation() {
+        let counts = |params: &[(&str, ParameterValue)]| {
+            let out = eval_blast(params, blast_input());
+            (out.point_count(), out.instance_count())
+        };
+        assert_eq!(counts(&[("group", text("doomed"))]), (3, 3), "point domain");
+        assert_eq!(
+            counts(&[("group", text("doomed")), ("domain", text("instance"))]),
+            (4, 1)
+        );
+        assert_eq!(
+            counts(&[
+                ("group", text("doomed")),
+                ("invert", ParameterValue::Bool(true))
+            ]),
+            (1, 3)
+        );
+        assert_eq!(counts(&[]), (4, 3), "no group, no deletion");
+        assert_eq!(counts(&[("group", text("missing"))]), (4, 3));
+    }
+
+    #[test]
+    fn blast_gives_the_same_result_on_every_evaluation() {
+        let params = [("group", text("doomed"))];
+        let (a, b) = (
+            eval_blast(&params, blast_input()),
+            eval_blast(&params, blast_input()),
+        );
+        assert_eq!(a.point_count(), b.point_count());
+        for (name, column) in a.points().iter() {
+            assert_eq!(Some(column), b.points().get(name), "{name}");
+        }
     }
 }

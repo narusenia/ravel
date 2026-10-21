@@ -2033,7 +2033,7 @@ impl ProjectState {
         &mut self,
         settings: CompositionSettings,
         cx: &mut Context<Self>,
-    ) -> CompId {
+    ) -> Option<CompId> {
         let op = EditOp::AddComposition {
             settings,
             alias: None,
@@ -2043,21 +2043,16 @@ impl ProjectState {
                 let id = applied.created.iter().find_map(|c| match c {
                     Created::Composition(id) => Some(*id),
                     _ => None,
-                });
+                })?;
                 self.commit_document(applied.document, InvalidationHint::Structural, cx);
-                // AddComposition always reports what it created; the fallback
-                // is the same never-committed id the error arm returns.
-                let id = id.unwrap_or_else(CompId::next);
                 self.set_active_composition(Some(id), cx);
-                id
+                Some(id)
             }
             Err(err) => {
-                // Only an already-invalid document refuses this. Nothing was
-                // committed; the signature promises an id, so a never-committed
-                // one is returned.
-                // ponytail: make this `Option` if a caller must react.
+                // Only an already-invalid document refuses this; nothing was
+                // committed and the active composition is untouched.
                 tracing::error!(%err, code = err.code(), "creating a composition failed");
-                CompId::next()
+                None
             }
         }
     }
@@ -5371,10 +5366,12 @@ mod tests {
             select_nodes(&network_a, vec![node], cx);
 
             // A second composition, made active and given something to render.
-            let other = project.create_composition(
-                ravel_ui::document::CompositionSettings::fallback("Other"),
-                cx,
-            );
+            let other = project
+                .create_composition(
+                    ravel_ui::document::CompositionSettings::fallback("Other"),
+                    cx,
+                )
+                .expect("composition is created");
             let document =
                 ravel_ui::document::add_layer(project.document(), other, content_layer()).unwrap();
             project.commit_document(document, InvalidationHint::Structural, cx);
@@ -5424,10 +5421,12 @@ mod tests {
             project.commit_document(document, InvalidationHint::Structural, cx);
 
             // A second composition holding the *same* node id.
-            let other = project.create_composition(
-                ravel_ui::document::CompositionSettings::fallback("Other"),
-                cx,
-            );
+            let other = project
+                .create_composition(
+                    ravel_ui::document::CompositionSettings::fallback("Other"),
+                    cx,
+                )
+                .expect("composition is created");
             let layer_other = layer_holding(shared, marker_other);
             let id_other = layer_other.id;
             let document =
@@ -6638,10 +6637,12 @@ mod tests {
         // switching back to the root is the bare switch.)
         let root = project.read_with(cx, |project, _| project.document().root_comp);
         project.update(cx, |project, cx| {
-            project.create_composition(
-                ravel_ui::document::CompositionSettings::fallback("Other"),
-                cx,
-            )
+            project
+                .create_composition(
+                    ravel_ui::document::CompositionSettings::fallback("Other"),
+                    cx,
+                )
+                .expect("composition is created")
         });
         let before_switch = epoch(cx);
         project.update(cx, |project, cx| project.set_active_composition(root, cx));

@@ -961,9 +961,10 @@ pub fn new_composition_from_asset(asset_id: AssetId, cx: &mut App) {
             .unwrap_or(CompositionSettings::FALLBACK_DURATION),
         background_color: ravel_core::types::Color::BLACK,
     };
-    project.update(cx, |project, cx| {
-        project.create_composition(settings, cx);
-    });
+    let created = project.update(cx, |project, cx| project.create_composition(settings, cx));
+    if created.is_none() {
+        return;
+    }
     // The new composition is active now; the layer lands on it through the
     // same import path as "add as layer".
     add_asset_as_layer(asset_id, cx);

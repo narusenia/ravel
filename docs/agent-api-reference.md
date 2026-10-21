@@ -692,6 +692,28 @@ processor with `params.ramp(key)`. Properties renders it as a
 `PropertyField::Ramp` row — a gradient band that expands
 `widgets::param_ramp_editor` inline, the same shape a curve row has.
 
+### `edit` — Typed edit operations
+
+`ravel_core::edit` (`docs/implementation/edit-operations-plan.md`). A closed,
+serde-serializable `EditOp` applied to a `Document` without a UI; the pure
+transforms it is built from (`NetworkPath`, `CompositionSettings`,
+`add_composition`, `add_layer_from_template`, …) live in `edit::document` and
+`ravel-ui::document` re-exports them.
+
+```rust
+// Operations so far: AddComposition / RemoveComposition / AddLayer / RemoveLayer.
+// JSON: {"op":"add_layer","comp":"shot","template":"solid","as":"bg"}
+// (a number is an id, a string an alias defined earlier in the same batch).
+edit::apply(&Document, &EditOp, &EditContext) -> Result<Applied, EditError>
+edit::apply_batch(&Document, &[EditOp], &EditContext) -> Result<Applied, BatchError>
+Applied { document, created: Vec<Created>, aliases: BTreeMap<String, Created> }
+EditError::code() -> &'static str   // "layer-locked", "unknown-alias", ...
+```
+
+The input document is never touched, so a refused operation changes nothing; a
+batch is all-or-nothing and `BatchError::index` names the failing operation.
+Committing the result (one `commit_document` = one undo step) is the caller's.
+
 ### `exposed` — Exposed parameter declarations (REQ-PROJ-006)
 
 `ravel_core::exposed`. A project's **external parameter contract**: what a CLI

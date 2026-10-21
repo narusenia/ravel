@@ -50,7 +50,9 @@ fn creating_a_composition_activates_it_and_is_one_undo_step(cx: &mut TestAppCont
     let root = project.read_with(cx, |project, _| project.document().root_comp.unwrap());
 
     let created = project.update(cx, |project, cx| {
-        project.create_composition(settings("Shot 1"), cx)
+        project
+            .create_composition(settings("Shot 1"), cx)
+            .expect("composition is created")
     });
 
     project.read_with(cx, |project, cx| {
@@ -171,7 +173,9 @@ fn deleting_a_composition_moves_the_active_one_to_its_neighbour(cx: &mut TestApp
     let project = project(cx);
     let first = project.read_with(cx, |project, _| project.document().root_comp.unwrap());
     let second = project.update(cx, |project, cx| {
-        project.create_composition(settings("Second"), cx)
+        project
+            .create_composition(settings("Second"), cx)
+            .expect("composition is created")
     });
 
     // The active composition is the second one; deleting it falls back to the
@@ -194,7 +198,9 @@ fn deleting_a_composition_moves_the_active_one_to_its_neighbour(cx: &mut TestApp
 
     // …and a new composition brings the project back, adopting the model root.
     let created = project.update(cx, |project, cx| {
-        project.create_composition(settings("Fresh"), cx)
+        project
+            .create_composition(settings("Fresh"), cx)
+            .expect("composition is created")
     });
     project.read_with(cx, |project, cx| {
         assert_eq!(panels::active_composition(cx), Some(created));
@@ -212,7 +218,9 @@ fn deleting_another_composition_keeps_the_active_one(cx: &mut TestAppContext) {
     let project = project(cx);
     let active = project.read_with(cx, |project, _| project.document().root_comp.unwrap());
     let other = project.update(cx, |project, cx| {
-        let id = project.create_composition(settings("Other"), cx);
+        let id = project
+            .create_composition(settings("Other"), cx)
+            .expect("composition is created");
         // Switch back: `other` exists but is not what the UI shows.
         project.set_active_composition(Some(active), cx);
         id
@@ -236,7 +244,9 @@ fn composition_commands_target_the_selected_row_then_the_active_composition(
     let project = project(cx);
     let active = project.read_with(cx, |project, _| project.document().root_comp.unwrap());
     let other = project.update(cx, |project, cx| {
-        let id = project.create_composition(settings("Other"), cx);
+        let id = project
+            .create_composition(settings("Other"), cx)
+            .expect("composition is created");
         project.set_active_composition(Some(active), cx);
         id
     });
@@ -272,7 +282,9 @@ fn deleting_the_inspected_composition_drops_its_properties_target(cx: &mut TestA
     let project = project(cx);
     let active = project.read_with(cx, |project, _| project.document().root_comp.unwrap());
     let other = project.update(cx, |project, cx| {
-        let id = project.create_composition(settings("Other"), cx);
+        let id = project
+            .create_composition(settings("Other"), cx)
+            .expect("composition is created");
         project.set_active_composition(Some(active), cx);
         id
     });

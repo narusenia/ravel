@@ -757,10 +757,12 @@ fn a_composition_switch_sync_counts(cx: &mut TestAppContext) {
         .read_with(cx, |project, _| project.document().root_comp)
         .expect("root comp");
     harness.project.update(cx, |project, cx| {
-        project.create_composition(
-            ravel_ui::document::CompositionSettings::fallback("Other"),
-            cx,
-        )
+        project
+            .create_composition(
+                ravel_ui::document::CompositionSettings::fallback("Other"),
+                cx,
+            )
+            .expect("composition is created")
     });
     cx.run_until_parked();
 
@@ -799,10 +801,12 @@ fn a_bare_composition_global_write_still_moves_the_mirrors(cx: &mut TestAppConte
     let harness = open_panels(cx);
     add_layer(&harness, cx);
     let other = harness.project.update(cx, |project, cx| {
-        project.create_composition(
-            ravel_ui::document::CompositionSettings::fallback("Other"),
-            cx,
-        )
+        project
+            .create_composition(
+                ravel_ui::document::CompositionSettings::fallback("Other"),
+                cx,
+            )
+            .expect("composition is created")
     });
     let root = harness
         .project
@@ -851,10 +855,12 @@ fn either_arrival_of_a_switch_leaves_the_other_with_nothing_to_do(cx: &mut TestA
     let harness = open_panels(cx);
     add_layer(&harness, cx);
     let other = harness.project.update(cx, |project, cx| {
-        project.create_composition(
-            ravel_ui::document::CompositionSettings::fallback("Other"),
-            cx,
-        )
+        project
+            .create_composition(
+                ravel_ui::document::CompositionSettings::fallback("Other"),
+                cx,
+            )
+            .expect("composition is created")
     });
     let root = harness
         .project
@@ -1067,10 +1073,12 @@ fn a_composition_switch_leaves_every_gate_open_for_the_next_edit(cx: &mut TestAp
         .project
         .read_with(cx, |project, _| project.document().root_comp);
     let other = harness.project.update(cx, |project, cx| {
-        project.create_composition(
-            ravel_ui::document::CompositionSettings::fallback("Other"),
-            cx,
-        )
+        project
+            .create_composition(
+                ravel_ui::document::CompositionSettings::fallback("Other"),
+                cx,
+            )
+            .expect("composition is created")
     });
     cx.run_until_parked();
     assert_eq!(
@@ -1567,10 +1575,12 @@ fn a_composition_switch_behind_a_tab_is_taken_up_on_the_return(cx: &mut TestAppC
         .read_with(cx, |project, _| project.document().root_comp)
         .expect("root comp");
     let other = harness.project.update(cx, |project, cx| {
-        project.create_composition(
-            ravel_ui::document::CompositionSettings::fallback("Other"),
-            cx,
-        )
+        project
+            .create_composition(
+                ravel_ui::document::CompositionSettings::fallback("Other"),
+                cx,
+            )
+            .expect("composition is created")
     });
     cx.run_until_parked();
     assert_eq!(

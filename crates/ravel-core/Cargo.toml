@@ -28,6 +28,7 @@ unicode-bidi = { workspace = true }
 unicode-linebreak = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 criterion = { workspace = true }
 tempfile = { workspace = true }
 # The gpui warning `logging::PINNED_QUIET` silences arrives through the

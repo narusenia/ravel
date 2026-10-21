@@ -29,6 +29,7 @@ use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::color::DisplayChannel;
 use ravel_core::composition::compile::{CompileError, compile_composition};
 use ravel_core::composition::{AssetPath, Composition, Document, MediaAssetEntry};
+use ravel_core::edit::{CompRef, Created, EditContext, EditError, EditOp};
 use ravel_core::eval::{EvalContext, Quality};
 use ravel_core::graph::Graph;
 use ravel_core::id::{AssetId, CompId, LayerId, NodeId};
@@ -45,9 +46,8 @@ use ravel_nodes::DisplayFrame;
 use ravel_project::settings::SettingsLayer;
 use ravel_project::ui_state::UiState;
 use ravel_ui::document::{
-    CompositionSettings, DocumentStore, add_composition, add_layer_from_template, default_document,
-    duplicate_composition, neighbour_composition, next_composition_name, remove_composition,
-    update_composition,
+    CompositionSettings, DocumentStore, default_document, duplicate_composition,
+    neighbour_composition, next_composition_name, remove_composition, update_composition,
 };
 use ravel_ui::layout_doc::LayoutDocument;
 use ravel_ui::panels::timeline::BpmGrid;
@@ -1764,23 +1764,34 @@ impl ProjectState {
         cx: &mut Context<Self>,
     ) -> Option<LayerId> {
         let comp = self.active_composition(cx)?.id;
-        let Some(template) =
-            ravel_core::composition::templates::builtin_layer_template(template_key)
-        else {
-            tracing::warn!(template_key, "unknown layer template");
-            return None;
+        let op = EditOp::AddLayer {
+            comp: CompRef::Id(comp),
+            template: template_key.to_string(),
+            alias: None,
         };
-        match add_layer_from_template(self.store.document(), comp, template, &self.registry) {
-            Ok(Some((doc, layer_id))) => {
-                self.commit_document(doc, InvalidationHint::Structural, cx);
-                Some(layer_id)
+        match self.apply_edit_op(&op) {
+            Ok(applied) => {
+                let layer_id = applied.created.iter().find_map(|c| match c {
+                    Created::Layer(id) => Some(*id),
+                    _ => None,
+                });
+                self.commit_document(applied.document, InvalidationHint::Structural, cx);
+                layer_id
             }
-            Ok(None) => None,
             Err(err) => {
-                tracing::error!(%err, template_key, "layer template instantiation failed");
+                tracing::error!(%err, code = err.code(), template_key, "adding a layer failed");
                 None
             }
         }
+    }
+
+    /// Apply one edit operation to the live document without committing it.
+    fn apply_edit_op(&self, op: &EditOp) -> Result<ravel_core::edit::Applied, EditError> {
+        let cx = EditContext {
+            registry: &self.registry,
+            local_frame: None,
+        };
+        ravel_core::edit::apply(self.store.document(), op, &cx)
     }
 
     // ----- media import (REQ-UI-010) -------------------------------------------
@@ -2023,10 +2034,32 @@ impl ProjectState {
         settings: CompositionSettings,
         cx: &mut Context<Self>,
     ) -> CompId {
-        let (doc, id) = add_composition(self.store.document(), settings);
-        self.commit_document(doc, InvalidationHint::Structural, cx);
-        self.set_active_composition(Some(id), cx);
-        id
+        let op = EditOp::AddComposition {
+            settings,
+            alias: None,
+        };
+        match self.apply_edit_op(&op) {
+            Ok(applied) => {
+                let id = applied.created.iter().find_map(|c| match c {
+                    Created::Composition(id) => Some(*id),
+                    _ => None,
+                });
+                self.commit_document(applied.document, InvalidationHint::Structural, cx);
+                // AddComposition always reports what it created; the fallback
+                // is the same never-committed id the error arm returns.
+                let id = id.unwrap_or_else(CompId::next);
+                self.set_active_composition(Some(id), cx);
+                id
+            }
+            Err(err) => {
+                // Only an already-invalid document refuses this. Nothing was
+                // committed; the signature promises an id, so a never-committed
+                // one is returned.
+                // ponytail: make this `Option` if a caller must react.
+                tracing::error!(%err, code = err.code(), "creating a composition failed");
+                CompId::next()
+            }
+        }
     }
 
     /// Replace a composition's settings, keeping its layers. One undo step.

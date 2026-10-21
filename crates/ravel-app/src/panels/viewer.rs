@@ -5372,6 +5372,37 @@ fn create_drawn_shape(
     Some((doc, node_id))
 }
 
+/// Stack a Shape template layer on `comp` through the edit layer.
+fn add_shape_layer(
+    doc: &Document,
+    comp: ravel_core::id::CompId,
+    registry: &ravel_core::registry::NodeRegistry,
+) -> Option<(Document, ravel_core::id::LayerId)> {
+    use ravel_core::edit::{CompRef, Created, EditContext, EditOp};
+    let op = EditOp::AddLayer {
+        comp: CompRef::Id(comp),
+        template: "shape".to_string(),
+        alias: None,
+    };
+    let cx = EditContext {
+        registry,
+        local_frame: None,
+    };
+    match ravel_core::edit::apply(doc, &op, &cx) {
+        Ok(applied) => {
+            let layer = applied.created.iter().find_map(|c| match c {
+                Created::Layer(id) => Some(*id),
+                _ => None,
+            })?;
+            Some((applied.document, layer))
+        }
+        Err(err) => {
+            tracing::error!(%err, code = err.code(), "adding the shape layer failed");
+            None
+        }
+    }
+}
+
 /// Auto-create a Shape template layer for a drawing gesture and make the
 /// drawn shape its wired content: the template's placeholder generator is
 /// repurposed when it matches the drawn type, otherwise removed (its edges
@@ -5385,16 +5416,7 @@ fn create_layer_with_drawn_shape(
     kind: ShapeDrawKind,
     geo: DragGeometry,
 ) -> Option<(Document, NetworkPath, NodeId)> {
-    let template = ravel_core::composition::templates::builtin_layer_template("shape")?;
-    let (doc, layer) =
-        match ravel_ui::document::add_layer_from_template(doc, comp, template, registry) {
-            Ok(Some(pair)) => pair,
-            Ok(None) => return None,
-            Err(err) => {
-                tracing::error!(%err, "shape template instantiation failed");
-                return None;
-            }
-        };
+    let (doc, layer) = add_shape_layer(doc, comp, registry)?;
     let path = NetworkPath::layer(comp, layer);
     let graph = ravel_ui::document::resolve_network(&doc, &path)?.clone();
     let placeholder = graph
@@ -5470,16 +5492,7 @@ fn create_layer_with_custom_path(
     registry: &ravel_core::registry::NodeRegistry,
     points: Vec<PathPoint>,
 ) -> Option<(Document, NetworkPath, NodeId)> {
-    let template = ravel_core::composition::templates::builtin_layer_template("shape")?;
-    let (doc, layer) =
-        match ravel_ui::document::add_layer_from_template(doc, comp, template, registry) {
-            Ok(Some(pair)) => pair,
-            Ok(None) => return None,
-            Err(err) => {
-                tracing::error!(%err, "shape template instantiation failed");
-                return None;
-            }
-        };
+    let (doc, layer) = add_shape_layer(doc, comp, registry)?;
     let path = NetworkPath::layer(comp, layer);
     let graph = ravel_ui::document::resolve_network(&doc, &path)?.clone();
     let placeholder = graph

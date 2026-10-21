@@ -318,7 +318,7 @@ AI-2a ──▶ AI-2b ──▶ AI-2c ──▶ AI-2d
 エラー型と `apply` の骨格を決める。並行に進めると `EditOp` / `EditError` で
 衝突する。
 
-### `AI-2a` 骨格、コンポジションとレイヤーの操作
+### `AI-2a` ✅ 骨格、コンポジションとレイヤーの操作
 
 - `crates/ravel-core/src/edit/`（`mod.rs`、`error.rs`、`ops.rs`）を新設。
   `EditOp` / `EditContext` / `Applied` / `Created` / `EditError`（`code()` 付き）/

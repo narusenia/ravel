@@ -12,6 +12,8 @@
 pub mod document;
 mod error;
 mod ops;
+#[cfg(test)]
+mod tests;
 
 use crate::composition::Document;
 use crate::composition::templates::builtin_layer_template;

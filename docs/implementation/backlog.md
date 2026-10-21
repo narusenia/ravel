@@ -1064,7 +1064,7 @@ CM-1〜5（自前の固定変換で骨格を作る単位）は #363 でマージ
 | AI-1 | 🟡 | `ravel-cli mcp`（stdio）: 列挙・検査・書き出し | — |
 | AI-2a | ⬜ | 編集操作の層の骨格（`ravel-core::edit`）とコンポジション・レイヤーの操作。計画: `edit-operations-plan.md` | — |
 | AI-2b | ⬜ | 編集操作: ノードの追加・削除・接続（`edit-operations-plan.md`） | AI-2a |
-| AI-2c | ⬜ | 編集操作: パラメータ設定と書き込み規則の移設（`edit-operations-plan.md`。未決事項 1 の回答が要る） | AI-2b |
+| AI-2c | ⬜ | 編集操作: パラメータ設定と書き込み規則の移設（`edit-operations-plan.md`。`local_frame` が無いアニメ済みパラメータは `AnimatedParameter`） | AI-2b |
 | AI-2d | ⬜ | 編集操作: バッチの 1 undo 段、ホスト側の入口、保存・読み込みの検証、`docs/dev/`（`edit-operations-plan.md`） | AI-2c |
 | AI-3 | ⬜ | 新規ファイルへの組み立て（頭なし。既存ファイルは書き換えない） | AI-1, AI-2d |
 | AI-4 | ⬜ | アプリのローカル接続口（既定で閉じる） | AI-2d |

@@ -237,7 +237,7 @@ pub fn apply_batch(doc: &Document, ops: &[EditOp], cx: &EditContext) -> Result<A
 | `AddNode` | `path`、`type_key`、`position?`、`params?` | — | `NodeRegistry::create_node` + `replace_network` |
 | `RemoveNode` | `path`、`node` | はい | `remove_node_and_compact`（`node_editor.rs:332`） |
 | `Connect` | `path`、出力側 / 入力側（ノード + ポート名または番号） | — | `connect_edge_and_update_variadic_inputs`（`node_editor.rs:353`） |
-| `Disconnect` | `path`、`edge` | はい（接続の削除は undo で戻せるので**確認不要**。分類は `AI-5` で決める） | `remove_edge_and_compact` |
+| `Disconnect` | `path`、`edge` | はい（接続の削除は undo で戻せるので**確認しない**。`AI-5` の確認対象は削除と上書きだけで、`is_destructive()` の分類とは別） | `remove_edge_and_compact` |
 | `SetParameter` | `path`、`node`、`key`、`ParamInput` | — | `edited_param_value` + `set_params_and_output_types` |
 
 - `EditOp::is_destructive()` を持つ。確認ダイアログそのものは `AI-5`（アプリ側）で、

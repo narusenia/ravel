@@ -68,6 +68,8 @@ several plans here wait on its later units rather than on each other.
 | `ofx-host-plan.md` | The OpenFX host: an isolated C++ process, the suites, and the GPU interop — **OFX defines no D3D12 path, so Windows has no zero-copy route** | `gpu-backend-plan.md` (GPUBK-8, merged), `plugin-system-plan.md` (PLUG-1) | REQ-PLUGIN-001, REQ-PROJ-002 |
 | `geometry-fracture-plan.md` | Voronoi cell fracture in 2D and 3D, polygon triangulation, selectable algorithms | `3d-scene-plan.md` (unit 1, for the 3D variant) | REQ-CORE-010, REQ-MOGRAPH-001, REQ-3D-003 |
 | `viewer-scopes-plan.md` | Waveform monitor, vectorscope, histogram and parade: the counted linear-frame tap the pixel readout already needs, one bounded summary per published frame, and the four panels that draw it | — | REQ-UI-004, REQ-UI-005 |
+| `ai-assistant-mcp-plan.md` | Letting a model-agnostic agent work on a project over MCP: a read, render and new-file authoring server over `ravel-cli` first, then live edits in the running app as undoable document commits sharing REQ-PLUGIN-006's edit layer, with an in-app assistant panel deferred | — | REQ-PLUGIN-007, REQ-PLUGIN-006, REQ-INFRA-007 |
+| `edit-operations-plan.md` | The typed edit-operation layer (`ravel-core::edit`): `Document` → `Document` operations with typed errors, shared by the UI, MCP and automation; split into `AI-2a`–`AI-2d` | — | REQ-PLUGIN-006, REQ-PLUGIN-007 |
 
 `panel-placement-plan.md` (#181) is **superseded** by
 `done/free-pane-docking-plan.md`: the view-toggle problem is solved by
@@ -180,8 +182,6 @@ with the decisions the user has to make; it has no units in `backlog.md` or
 | File | Subject | Status | Related requirements |
 |---|---|---|---|
 | `svg-import-plan.md` | Importing SVG: an `import.svg` node that turns the file into editable path geometry with style attributes (recommended for v1), versus one-shot conversion into `shape.custom_path` nodes or a raster asset via `resvg` | 提案 — 2026-10-07 | REQ-MEDIA-004（案） |
-| `ai-assistant-mcp-plan.md` | Letting a model-agnostic agent work on a project over MCP: a read, render and new-file authoring server over `ravel-cli` first, then live edits in the running app as undoable document commits sharing REQ-PLUGIN-006's edit layer, with an in-app assistant panel deferred | 方針決定 — 2026-10-07 | REQ-PLUGIN-007（案）, REQ-PLUGIN-006, REQ-INFRA-007 |
-| `edit-operations-plan.md` | The typed edit-operation layer (`ravel-core::edit`): `Document` → `Document` operations with typed errors, shared by the UI, MCP and automation; split into `AI-2a`–`AI-2d` | 計画 — 2026-10-07 | REQ-PLUGIN-006, REQ-PLUGIN-007 |
 
 ## Reference
 

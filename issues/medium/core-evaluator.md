@@ -75,3 +75,25 @@ match から導く）。
 low でないのは、`docs/dev/add-node.md` 自身が警告している穴が
 **ノードを足すたびに踏まれる可能性を持ち続ける**ため。2026-09-03 の
 `MOD-3` / `MOD-4` / `OPS-2` の実装で**3 回独立に指摘された**。
+
+## MED-CORE-14 | debt | 評価失敗のメッセージが原因を落とし、ノード ID しか出ない
+
+**該当**: `crates/ravel-core/src/runtime/render.rs:271`
+（`#[error("evaluating frame {frame} failed: {source}")]`）、
+`crates/ravel-core/src/eval.rs:130`（`ProcessFailed` は `#[source]` に `anyhow::Error` を持つ）
+
+`render.rs` は `{source}` の `Display` だけを書くので、`ProcessFailed` の下にある
+**処理系のエラー本文（原因）が出ない**。殻の合成ノードがレイヤーネットワークの失敗を
+包むと、出るのは `evaluating frame 0 failed: processing failed for node node:25769813248`
+（シェル側のノード ID）だけで、どのレイヤーのどのノードが何で失敗したか分からない。
+`RUST_LOG=debug` でも出ない。
+
+**再現**: 種類の違う `scatter.grid` 2 つを `geometry.merge` するレイヤーを
+`ravel-cli render` する（`merge_pair` の「merging two distinct instance sources is
+unsupported」が原因と推測。原因メッセージは表示されないので未確認 — それ自体がこの課題）。
+
+**実害**: 中程度。CLI と（同じ型を使う）書き出しでの診断が効かない。MCP（`AI-1`）は
+このエラーをエージェントに返すので、原因が無いと自己修正できない。
+
+**修正方針**: 表示側でエラー連鎖を辿る（`anyhow` の `{:#}` 相当、または
+`std::error::Error::source` を順に連結）。ノード ID は型名とレイヤー名に解決して出す。

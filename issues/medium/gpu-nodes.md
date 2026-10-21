@@ -31,3 +31,24 @@
 が `Tier::Vram` に対してやっているのと同じ形）。ロック順は
 プール → 予算を守る。`GPUBK-9`（デバイス共有の契約）が構築 API を触るので、
 そこに相乗りするのが安い。
+
+## MED-GPU-11 | bug | `geometry.blast` でプリミティブを消すと、消した図形の頂点が点として描画される
+
+**該当**: `geometry.blast`（`domain = primitive`）→ `rasterize`
+
+プリミティブ削除は**点を残す**仕様（`procedural-geometry.md` のノード表）。
+残った孤立点（どのプリミティブにも参照されない点）を `rasterize` が描くため、
+消した rect の 4 隅に 1px 弱の点が見える。
+
+**再現**: `shape.rect`（180x120）→ `attribute.set`（primitive、bool `kill` = true）→
+`geometry.merge`（ellipse・star と合流）→ `geometry.blast`（primitive、group `kill`）→
+`rasterize`。フェーズ F のショーケース生成器（`test/node-showcase-project` ブランチの
+`crates/ravel-cli/examples/showcase_project.rs`、Geometry Ops コンプ）で目視確認
+（2026-10-07）。
+
+**実害**: 中程度。「消したはずのものが残って見える」形で出力に混ざる。
+
+**修正方針**: 原因を先に切り分ける — (a) `rasterize` が孤立点を描くのが意図か
+（点群の可視化として）、(b) primitive 削除で参照を失った点を落とすべきか。
+(a) が意図なら `blast` の primitive 削除に「未参照の点も消す」オプションを足し、
+既定をどちらにするか決める。

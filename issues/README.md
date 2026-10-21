@@ -10,8 +10,8 @@
 | --- | --- | --- | --- |
 | critical | 0 | 4 | — （全件解決） |
 | high | 1 | 34 | [high/](high/) — 1件1ファイル |
-| medium | 13 | 77 | [medium/](medium/) — 領域別5ファイル |
-| low | 43 | 13 | [low/backlog.md](low/backlog.md) — 1ファイル |
+| medium | 15 | 77 | [medium/](medium/) — 領域別5ファイル |
+| low | 46 | 13 | [low/backlog.md](low/backlog.md) — 1ファイル |
 
 解決済みの項目は個票を **[closed/](closed/)** へ移す。個票の中身は起票時のまま
 残し、各項目の `**解決済み**` 行が結果と PR 番号を記録する。critical / high は

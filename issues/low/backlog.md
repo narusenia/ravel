@@ -58,6 +58,13 @@ f32 出力では約 24 回で仮数を使い切り、文書化された要件 1e
 
 ---
 
+**LOW-CORE-07 | debt | `Graph::set_params` が存在しないキーを黙って無視する**
+`crates/ravel-core/src/graph.rs:1431`（`find` が `None` なら `continue`）
+タイポしたキーが何もしない更新になる。編集操作の層は「未知のキーはエラー」
+（`UnknownParameter`、`edit-operations-plan.md`）なので、規則が 2 つになる。
+→ `AI-2c` で書き込みを `edit` に寄せるとき、`set_params` を使う他の箇所も
+未知のキーを `Err` にするか、意図して無視する箇所を名指しする。
+
 ## ravel-gpu / ravel-nodes
 
 **LOW-GPU-02 | bug | `merge.wgsl` の最終 mix が直線アルファで動作する**
@@ -121,6 +128,12 @@ intrusive list に変更。
 その際 `comp.sharpen` 側の補正を外す（二重に掛かる）。
 
 ---
+
+**LOW-GPU-07 | bug | `comp.radial_blur`（zoom）で中心の縦線に継ぎ目が出る**
+`comp.radial_blur`（`mode = zoom`、`zoom = 0.4`）
+チェッカー入力で、中心を通る縦線に沿って左右の絵が食い違う。仕様か未確認
+（ショーケース生成器の FX Blur & Distort コンプで目視確認、2026-10-07）。
+→ サンプル方向の計算で中心の左右に符号の扱いの差が無いかを確かめる。
 
 ## ravel-media / ravel-audio
 
@@ -259,6 +272,13 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 → 対象が解決できない場合はコミットをスキップ。`selection_sub` のクリーンアップに `shape_drag` を追加。
 
 ---
+
+**LOW-UI-05 | debt | `remove_layers` がロック済みレイヤーを黙って飛ばす**
+`crates/ravel-ui/src/document.rs:319`（`remove_layers` の `continue`）
+UI では選択からロック済みを除く意図で妥当だが、理由を返さないので、呼び出し側は
+「消えなかった」ことしか分からない。編集操作の層（`AI-2a`、
+`edit-operations-plan.md`）へ移すときに `LayerLocked` エラーにする予定。
+→ `AI-2a` で解消する。それまで MCP や自動化から使わない。
 
 ## ravel-app / ravel-ui（軽微な負債）
 

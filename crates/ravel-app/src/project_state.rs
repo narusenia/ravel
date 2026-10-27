@@ -1797,7 +1797,10 @@ impl ProjectState {
             local_frame: None,
         };
         let applied = ravel_core::edit::apply_batch(self.store.document(), ops, &ctx)?;
-        self.commit_document(applied.document.clone(), InvalidationHint::Structural, cx);
+        // A batch that changes nothing must not leave an empty undo step.
+        if applied.document != *self.store.document() {
+            self.commit_document(applied.document.clone(), InvalidationHint::Structural, cx);
+        }
         Ok(applied)
     }
 
@@ -8169,6 +8172,19 @@ mod tests {
     fn switching_the_pixel_readout_fences_in_flight_results(cx: &mut TestAppContext) {
         assert_switch_fences_stale_results(cx, |project, cx| {
             project.set_pixel_readout(true, cx);
+        });
+    }
+
+    #[gpui::test]
+    fn an_edit_batch_that_changes_nothing_records_no_undo_step(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        project.update(cx, |project, cx| {
+            assert!(!project.store.can_undo());
+            project
+                .commit_edit_ops(&[], cx)
+                .expect("an empty batch applies");
+            assert!(!project.store.can_undo());
         });
     }
 

@@ -144,6 +144,33 @@ pub enum CliError {
     #[error("the output directory {path} is not under an allowed directory")]
     OutputNotAllowed { path: PathBuf },
 
+    /// `ravel-cli mcp`, assembling a new project in memory.
+    #[error("there is no draft project; call new_project first")]
+    NoDraft,
+
+    #[error("a draft project that was not saved is open; pass discard to replace it")]
+    DraftExists,
+
+    #[error("the edit failed at operation {index}: {source}")]
+    Edit {
+        index: usize,
+        #[source]
+        source: ravel_core::edit::EditError,
+    },
+
+    #[error("unknown node type {0:?}")]
+    UnknownNodeType(String),
+
+    /// A project is only ever saved to a path that does not exist yet.
+    #[error("{path} already exists; a draft is only saved to a new file")]
+    ProjectExists { path: PathBuf },
+
+    #[error("{path} is not a .ravprj path")]
+    BadProjectPath { path: PathBuf },
+
+    #[error("saving {path} failed: {detail}")]
+    SaveFailed { path: PathBuf, detail: String },
+
     #[error("no usable GPU adapter: {0}")]
     Gpu(String),
 
@@ -169,7 +196,14 @@ impl CliError {
             | Self::EmptyRange { .. }
             | Self::OutputName(_)
             | Self::NotInteractive
-            | Self::OutputNotAllowed { .. } => EXIT_USAGE,
+            | Self::OutputNotAllowed { .. }
+            | Self::NoDraft
+            | Self::DraftExists
+            | Self::Edit { .. }
+            | Self::UnknownNodeType(_)
+            | Self::BadProjectPath { .. } => EXIT_USAGE,
+            Self::ProjectExists { .. } => EXIT_OUTPUT_EXISTS,
+            Self::SaveFailed { .. } => EXIT_ENCODE,
             Self::CodecUnavailable { .. } | Self::CodecNoWriter { .. } => EXIT_CODEC,
             Self::OutputExists { .. } => EXIT_OUTPUT_EXISTS,
             Self::Eval(_) => EXIT_EVAL,
@@ -202,6 +236,13 @@ impl CliError {
             Self::Cancelled => "cancelled",
             Self::NotInteractive => "not-interactive",
             Self::OutputNotAllowed { .. } => "output-not-allowed",
+            Self::NoDraft => "no-draft",
+            Self::DraftExists => "draft-exists",
+            Self::Edit { source, .. } => source.code(),
+            Self::UnknownNodeType(_) => "unknown-node-type",
+            Self::ProjectExists { .. } => "project-exists",
+            Self::BadProjectPath { .. } => "bad-project-path",
+            Self::SaveFailed { .. } => "save-failed",
             Self::Gpu(_) => "no-gpu",
             Self::InterruptHandler(_) => "interrupt-handler",
             Self::Internal(_) => "internal",
@@ -265,6 +306,23 @@ impl CliError {
             Self::OutputNotAllowed { path } => {
                 t!("cli.error.output_not_allowed").replace("{path}", &path.display().to_string())
             }
+            Self::NoDraft => t!("cli.error.no_draft"),
+            Self::DraftExists => t!("cli.error.draft_exists"),
+            // The operation's own text is the diagnostic; a locale key cannot
+            // carry what it quotes.
+            Self::Edit { index, source } => t!("cli.error.edit")
+                .replace("{index}", &index.to_string())
+                .replace("{detail}", &source.to_string()),
+            Self::UnknownNodeType(key) => t!("cli.error.unknown_node_type").replace("{key}", key),
+            Self::ProjectExists { path } => {
+                t!("cli.error.project_exists").replace("{path}", &path.display().to_string())
+            }
+            Self::BadProjectPath { path } => {
+                t!("cli.error.bad_project_path").replace("{path}", &path.display().to_string())
+            }
+            Self::SaveFailed { path, detail } => t!("cli.error.save_failed")
+                .replace("{path}", &path.display().to_string())
+                .replace("{detail}", detail),
             Self::Gpu(detail) => t!("cli.error.gpu").replace("{detail}", detail),
             Self::InterruptHandler(detail) => {
                 t!("cli.error.interrupt_handler").replace("{detail}", detail)

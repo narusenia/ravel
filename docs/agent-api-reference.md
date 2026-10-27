@@ -4179,6 +4179,17 @@ mcp::serve(&Server, impl BufRead, impl Write) / mcp::run(&[PathBuf]) -> u8
 mcp::ensure_allowed(&Path, &[PathBuf]) -> Result<(), CliError>
     // canonical-prefix check; CliError::OutputNotAllowed = "output-not-allowed"
     // (EXIT_USAGE). Listings reuse listing::*_json — no second enumeration.
+// AI-3: assembling a new file (the draft; docs/dev/mcp-cli.md, "組み立て")
+mcp::Server::with_renderers(&[PathBuf], Box<Renderer>, Box<DraftRenderer>)
+    // tools new_project / edit (ravel_core::edit::apply_batch) / list_node_types /
+    // describe_node / save_project; inspect_document / check_warnings /
+    // render_preview take `draft: true`. Errors: CliError::{NoDraft, DraftExists,
+    // Edit{index, source}, UnknownNodeType, ProjectExists, BadProjectPath,
+    // SaveFailed} = "no-draft", "draft-exists", <EditError::code()>,
+    // "unknown-node-type", "project-exists", "bad-project-path", "save-failed"
+plan_from_draft(&RenderArgs, &ProjectFile) / render_draft(..) /
+render_draft_with_hooks(..)   // the in-memory twins of plan_from_args / render /
+                              // render_with_hooks; one plan, one writer
 
 // AI-4: the app's local live-edit door (docs/dev/live-edit.md), ravel-app
 live_edit::start(&Entity<ProjectState>, &mut App) -> Option<Entity<LiveEdit>>

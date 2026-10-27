@@ -121,7 +121,12 @@ fn initialize_list_and_call() {
             "inspect_document",
             "check_warnings",
             "render_preview",
-            "render"
+            "render",
+            "new_project",
+            "edit",
+            "list_node_types",
+            "describe_node",
+            "save_project"
         ]
     );
     assert_eq!(responses[2]["id"], 3);
@@ -243,4 +248,38 @@ fn output_outside_the_allowed_directories_is_refused() {
         assert_eq!(reply["result"]["structuredContent"]["code"], 2);
     }
     assert!(!outside.exists());
+}
+
+#[test]
+fn a_project_is_assembled_and_saved_over_the_wire() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("built.ravprj");
+    let ops = json!([
+        {"op": "add_composition", "as": "c", "settings": {
+            "name": "Main", "resolution": [8, 4], "frame_rate": {"num": 24, "den": 1},
+            "duration_frames": 4, "background_color": {"r": 0, "g": 0, "b": 0, "a": 1}}},
+        {"op": "add_layer", "comp": "c", "template": "solid", "as": "l"},
+        {"op": "add_node", "path": {"comp": "c", "layer": "l"}, "type_key": "shape.rect", "as": "r"},
+        {"op": "set_parameter", "path": {"comp": "c", "layer": "l"}, "node": "r",
+         "key": "width", "value": {"type": "float", "value": 150.0}},
+    ]);
+    let responses = session(
+        &[dir.path()],
+        &[
+            call(1, "new_project", json!({"name": "Built"})),
+            call(2, "edit", json!({"ops": ops})),
+            call(3, "save_project", json!({"path": path})),
+            call(4, "save_project", json!({"path": path})),
+        ],
+    );
+    assert_eq!(responses.len(), 4);
+    for reply in &responses[..3] {
+        assert_eq!(reply["result"]["isError"], false, "{reply}");
+    }
+    assert_eq!(
+        responses[3]["result"]["structuredContent"]["id"],
+        "project-exists"
+    );
+    let loaded = ProjectFile::load(&path).expect("the saved file loads");
+    assert_eq!(loaded.document.compositions.len(), 1);
 }

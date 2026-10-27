@@ -134,6 +134,9 @@ impl Server {
         };
         // A message without an id is a notification and is never answered.
         let id = object.get("id").cloned();
+        if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+            return id.map(|id| error_response(id, INVALID_REQUEST, "jsonrpc must be \"2.0\""));
+        }
         let Some(method) = object.get("method").and_then(Value::as_str) else {
             return id.map(|id| error_response(id, INVALID_REQUEST, "missing method"));
         };
@@ -733,6 +736,12 @@ mod tests {
                 .handle_line(r#"{"jsonrpc":"2.0","id":2,"method":"x"}"#)
                 .expect("answer")["error"]["code"],
             METHOD_NOT_FOUND
+        );
+        assert_eq!(
+            server
+                .handle_line(r#"{"id":3,"method":"ping"}"#)
+                .expect("answer")["error"]["code"],
+            INVALID_REQUEST
         );
         assert_eq!(
             call(&server, "nope", json!({}))["error"]["code"],

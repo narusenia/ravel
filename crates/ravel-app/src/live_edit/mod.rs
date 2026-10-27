@@ -142,8 +142,8 @@ fn serve_connection<S: Read + Write>(stream: S, tx: JobSender) {
         }
         let too_long = buf.len() > protocol::MAX_LINE_BYTES;
         let reply = match std::str::from_utf8(&buf) {
-            _ if too_long => protocol::parse_request("too long").unwrap_err(),
-            Err(_) => protocol::parse_request("not utf-8").unwrap_err(),
+            _ if too_long => protocol::bad_request("the request line exceeds 4 MiB"),
+            Err(_) => protocol::bad_request("the request line is not UTF-8"),
             Ok(line) if line.trim().is_empty() => continue,
             Ok(line) => match protocol::parse_request(line) {
                 Err(refusal) => refusal,
@@ -181,6 +181,64 @@ mod tests {
 
     fn mode(path: &std::path::Path) -> u32 {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    /// One connection's bytes: what the client sent, and what came back.
+    struct Duplex {
+        input: std::io::Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+
+    impl Read for Duplex {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.input.read(buf)
+        }
+    }
+
+    impl Write for Duplex {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.output.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn served(input: Vec<u8>) -> Vec<Value> {
+        let (tx, _rx) = futures::channel::mpsc::unbounded::<Job>();
+        let mut duplex = Duplex {
+            input: std::io::Cursor::new(input),
+            output: Vec::new(),
+        };
+        serve_connection(&mut duplex, tx);
+        String::from_utf8(duplex.output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn an_unreadable_line_is_refused_with_its_reason() {
+        let replies = served(b"\xff\xfe\n".to_vec());
+        assert_eq!(replies[0]["error"]["code"], "bad-request");
+        assert_eq!(
+            replies[0]["error"]["message"],
+            "the request line is not UTF-8"
+        );
+
+        let mut long = vec![b' '; protocol::MAX_LINE_BYTES + 1];
+        long.extend_from_slice(b"\n{}\n");
+        let replies = served(long);
+        assert_eq!(
+            replies.len(),
+            1,
+            "the connection closes after an oversize line"
+        );
+        assert_eq!(
+            replies[0]["error"]["message"],
+            "the request line exceeds 4 MiB"
+        );
     }
 
     #[gpui::test]

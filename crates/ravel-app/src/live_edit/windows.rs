@@ -23,7 +23,7 @@ use windows_sys::Win32::Security::{
     TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
+    FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
 };
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
@@ -77,6 +77,9 @@ impl Drop for Pipe {
     fn drop(&mut self) {
         // SAFETY: the handle is ours and closed exactly once.
         unsafe {
+            // Disconnecting discards what the client has not read yet; wait
+            // for it to take the last reply first.
+            FlushFileBuffers(self.0);
             DisconnectNamedPipe(self.0);
             CloseHandle(self.0);
         }

@@ -31,9 +31,14 @@ fn error_line(id: &Value, code: &str, index: Option<usize>, message: &str) -> St
     json!({"id": id, "error": {"code": code, "index": index, "message": message}}).to_string()
 }
 
+/// A `bad-request` response line saying why.
+pub fn bad_request(message: &str) -> String {
+    error_line(&Value::Null, "bad-request", None, message)
+}
+
 /// The request `line` holds, or the response line that refuses it.
 pub fn parse_request(line: &str) -> Result<Request, String> {
-    let bad = |e: String| error_line(&Value::Null, "bad-request", None, &e);
+    let bad = |e: String| bad_request(&e);
     let mut value: Value = serde_json::from_str(line).map_err(|e| bad(e.to_string()))?;
     let object = value
         .as_object_mut()

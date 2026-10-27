@@ -1824,14 +1824,22 @@ impl ProjectState {
             registry: &self.registry,
             local_frame,
         };
-        let mut document = self.store.document().clone();
         let mut refused = Vec::new();
-        for (index, op) in ops.iter().enumerate() {
-            match ravel_core::edit::apply(&document, op, &ctx) {
-                Ok(applied) => document = applied.document,
-                Err(error) => refused.push(ravel_core::edit::BatchError { index, error }),
+        // The whole batch first: a scrub calls this per pointer move, and one
+        // batch validates the document once instead of once per node.
+        let document = match ravel_core::edit::apply_batch(self.store.document(), ops, &ctx) {
+            Ok(applied) => applied.document,
+            Err(_) => {
+                let mut document = self.store.document().clone();
+                for (index, op) in ops.iter().enumerate() {
+                    match ravel_core::edit::apply(&document, op, &ctx) {
+                        Ok(applied) => document = applied.document,
+                        Err(error) => refused.push(ravel_core::edit::BatchError { index, error }),
+                    }
+                }
+                document
             }
-        }
+        };
         if refused.len() < ops.len() {
             if commit {
                 self.commit_document(document, hint, cx);

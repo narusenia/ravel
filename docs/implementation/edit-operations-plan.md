@@ -345,7 +345,7 @@ AI-2a ──▶ AI-2b ──▶ AI-2c ──▶ AI-2d
 - `ProjectState` の 2 つの入口が `edit::apply` を呼び、旧実装が残っていない
   （`rg "add_layer_from_template\("` で呼び出しが 1 系統）
 
-### `AI-2b` ネットワークの操作
+### `AI-2b` ✅ ネットワークの操作
 
 - `AddNode` / `RemoveNode` / `Connect` / `Disconnect`
 - 接続は**ポート番号と型の検証をこの層で行う**（`Graph::add_edge` は見ない。
@@ -372,6 +372,8 @@ AI-2a ──▶ AI-2b ──▶ AI-2c ──▶ AI-2d
   が `edit` の中だけ）
 
 ### `AI-2c` パラメータの操作
+
+- **AI-2b から持ち越し（#614）**: ノードエディタのドロップによる追加と Viewer のシェイプ / ペンツールは、作成時にパラメータを設定するので、まだ未確定のグラフ上で `edit::network` を直接呼んでいる。`SetParameter` が入るこの単位で `apply` 経由へ寄せ、`AddNode` に `params` を足す
 
 - `SetParameter` と `ParamInput`
 - `param_edit.rs` の書き込み規則（`edited_param_value` / `edited_float_param` /

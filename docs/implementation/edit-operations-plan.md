@@ -371,7 +371,7 @@ AI-2a ──▶ AI-2b ──▶ AI-2c ──▶ AI-2d
 - ノードエディタのヘルパが残っていない（`rg "connect_edge_and_update_variadic_inputs"`
   が `edit` の中だけ）
 
-### `AI-2c` パラメータの操作
+### `AI-2c` ✅ パラメータの操作
 
 - **AI-2b から持ち越し（#614）**: ノードエディタのドロップによる追加と Viewer のシェイプ / ペンツールは、作成時にパラメータを設定するので、まだ未確定のグラフ上で `edit::network` を直接呼んでいる。`SetParameter` が入るこの単位で `apply` 経由へ寄せ、`AddNode` に `params` を足す
 
@@ -398,6 +398,10 @@ AI-2a ──▶ AI-2b ──▶ AI-2c ──▶ AI-2d
   1 回の `apply` が 1 つの `Document` を返す
 - `ParamInput` が JSON で往復する
 - `param_edit.rs` の書き込み関数が残っていない
+
+**残した制約（#615）**: 式・ブレンド・ノード出力で駆動されたチャンネルへの書き込みを
+`set_parameter` は拒否しない（UI の規則をそのまま移したため。スカラーは定数で潰れ、
+ベクトルは変わらないまま `Ok`）。MCP に `SetParameter` を出す `AI-3` の前に、拒否するかを決める
 
 ### `AI-2d` バッチ、ホスト側の入口、実機相当の検証、文書
 

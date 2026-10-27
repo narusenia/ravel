@@ -5359,14 +5359,15 @@ fn create_drawn_shape(
     let node_id = node.id;
     let mut graph = graph.add_node(node).ok()?;
     if let Some((target, target_port)) = target {
-        graph = super::node_editor::connect_edge_and_update_variadic_inputs(
+        graph = ravel_core::edit::network::connect_edge_and_update_variadic_inputs(
             graph,
             EdgeId::next(),
             node_id,
             source_port,
             target,
             target_port,
-        )?;
+        )
+        .ok()?;
     }
     let doc = ravel_ui::document::replace_network(doc, path, graph)?;
     Some((doc, node_id))
@@ -5473,14 +5474,15 @@ fn create_custom_path(
     let node_id = node.id;
     let mut graph = graph.add_node(node).ok()?;
     if let Some((target, target_port)) = target {
-        graph = super::node_editor::connect_edge_and_update_variadic_inputs(
+        graph = ravel_core::edit::network::connect_edge_and_update_variadic_inputs(
             graph,
             EdgeId::next(),
             node_id,
             source_port,
             target,
             target_port,
-        )?;
+        )
+        .ok()?;
     }
     let doc = ravel_ui::document::replace_network(doc, path, graph)?;
     Some((doc, node_id))

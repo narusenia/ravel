@@ -51,7 +51,8 @@ in `.agents/rules/` (see **Path-specific rules**), not here.
   widgets that still borrow from gpui-component, and the entry point
 - `crates/ravel-cli`: the `ravel-cli` binary — headless rendering
   (`ravel-cli render`), the machine-readable enumerations
-  (`ravel-cli list comps | params | codecs`), and `ravel-cli interactive`.
+  (`ravel-cli list comps | params | codecs`), `ravel-cli interactive`, and
+  the stdio MCP server (`ravel-cli mcp`).
   Releases ship **two** binaries, `ravel` and `ravel-cli`
 - `assets`: locales, keybindings, workspace preset data, and the bundled UI
   fonts (`assets/fonts/`)

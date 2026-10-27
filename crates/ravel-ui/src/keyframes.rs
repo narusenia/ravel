@@ -34,6 +34,7 @@ use std::sync::Arc;
 
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::animation::curve::KeyframeCurve;
+pub use ravel_core::animation::curve::set_curve_value;
 use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::animation::step::StepCurve;
 use ravel_core::composition::Layer;
@@ -678,14 +679,6 @@ pub fn set_channel_value(
         }
         true
     })
-}
-
-/// Write `value` at `frame`, keeping an existing key's interpolation mode
-/// and tangents (a fresh key is Linear with zero tangents).
-pub fn set_curve_value(curve: &mut KeyframeCurve, frame: u64, value: f32) {
-    if !curve.modify(frame, value, None) {
-        curve.insert(frame, value, Interpolation::Linear);
-    }
 }
 
 /// Set one keyframe tangent, clamping newly saved handle x offsets to their

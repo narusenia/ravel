@@ -1,13 +1,25 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Shared parameter-write semantics for direct manipulation and Properties.
+//! Parameter-write semantics shared by direct manipulation, Properties and
+//! [`EditOp::SetParameter`](super::EditOp::SetParameter).
+//!
+//! The `edited_*` functions are pure and keep the long-standing UI rules: a
+//! constant is replaced, an animated parameter gets a key at `local_frame`,
+//! numbers are clamped by the registry range, and a write of the wrong shape
+//! is refused with `None`. They fall back to a constant when an animated
+//! parameter has no frame, because a gesture always has a playhead;
+//! [`set_parameter`] is the layer entry point and refuses that case instead.
 
-use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
-use ravel_core::graph::ParameterValue;
-use ravel_core::registry::ParamRange;
+use super::{EditContext, EditError, ParamInput};
+use crate::animation::channel::{AnimationChannel, ChannelSource};
+use crate::animation::curve::set_curve_value;
+use crate::composition::Composition;
+use crate::graph::{Graph, Parameter, ParameterValue};
+use crate::id::NodeId;
+use crate::registry::ParamRange;
 
-pub(super) fn edited_channel(
+pub fn edited_channel(
     channel: &AnimationChannel,
     value: f32,
     local_frame: Option<u64>,
@@ -17,7 +29,7 @@ pub(super) fn edited_channel(
         ChannelSource::Keyframes(curve) => match local_frame {
             Some(frame) => {
                 let mut curve = curve.clone();
-                ravel_ui::keyframes::set_curve_value(&mut curve, frame, value);
+                set_curve_value(&mut curve, frame, value);
                 AnimationChannel::keyframes(curve)
             }
             None => AnimationChannel::constant(value),
@@ -26,7 +38,7 @@ pub(super) fn edited_channel(
     }
 }
 
-pub(super) fn edited_float_param(
+pub fn edited_float_param(
     existing: &ParameterValue,
     value: f32,
     local_frame: Option<u64>,
@@ -39,7 +51,7 @@ pub(super) fn edited_float_param(
             ChannelSource::Keyframes(curve) => match local_frame {
                 Some(frame) => {
                     let mut curve = curve.clone();
-                    ravel_ui::keyframes::set_curve_value(&mut curve, frame, value);
+                    set_curve_value(&mut curve, frame, value);
                     ParameterValue::Channel(AnimationChannel::keyframes(curve))
                 }
                 None => ParameterValue::Float(value),
@@ -59,7 +71,7 @@ pub(super) fn edited_float_param(
 /// Without the `IntChannel` case a keyed count would be flattened to a
 /// constant by the first spinner edit, which is the destructive answer the row
 /// used to be read-only to avoid.
-pub(super) fn edited_int_param(
+pub fn edited_int_param(
     existing: &ParameterValue,
     value: i32,
     local_frame: Option<u64>,
@@ -72,7 +84,7 @@ pub(super) fn edited_int_param(
             ChannelSource::Keyframes(curve) => match local_frame {
                 Some(frame) => {
                     let mut curve = curve.clone();
-                    ravel_ui::keyframes::set_curve_value(&mut curve, frame, value as f32);
+                    set_curve_value(&mut curve, frame, value as f32);
                     ParameterValue::IntChannel(AnimationChannel::keyframes(curve))
                 }
                 // No frame to key at: the same fall-back to the constant
@@ -96,7 +108,7 @@ pub(super) fn edited_int_param(
 /// follows. With no frame to key at there is nothing to write into, so the
 /// value collapses to the constant spelling, exactly as
 /// [`edited_float_param`] does.
-pub(super) fn edited_string_param(
+pub fn edited_string_param(
     existing: &ParameterValue,
     value: &str,
     local_frame: Option<u64>,
@@ -117,7 +129,7 @@ pub(super) fn edited_string_param(
 /// caller does not supply — the Z of a `Channel3` driven by a 2D canvas
 /// gesture — are left untouched. `None` when `existing` is not a vector
 /// parameter or declares fewer components than `values`.
-pub(super) fn edited_vector_param(
+pub fn edited_vector_param(
     existing: &ParameterValue,
     values: &[f32],
     local_frame: Option<u64>,
@@ -150,15 +162,14 @@ pub(super) fn edited_vector_param(
     }
 }
 
-pub(super) fn edited_param_value(
+pub fn edited_param_value(
     existing: &ParameterValue,
-    value: &ravel_ui::properties::PropertyValue,
+    value: &ParamInput,
     range: Option<&ParamRange>,
     local_frame: Option<u64>,
 ) -> Option<ParameterValue> {
-    use ravel_ui::properties::PropertyValue;
     match value {
-        PropertyValue::Float(value) => {
+        ParamInput::Float(value) => {
             let value = range.map_or(*value, |range| range.clamp(*value));
             match existing {
                 ParameterValue::Channel2(_)
@@ -173,13 +184,13 @@ pub(super) fn edited_param_value(
                 _ => Some(edited_float_param(existing, value, local_frame)),
             }
         }
-        PropertyValue::Int(value) => {
+        ParamInput::Int(value) => {
             let value = range.map_or(*value, |range| range.clamp(*value as f32).round() as i32);
             Some(edited_int_param(existing, value, local_frame))
         }
-        PropertyValue::Bool(value) => Some(ParameterValue::Bool(*value)),
-        PropertyValue::String(value) => Some(edited_string_param(existing, value, local_frame)),
-        PropertyValue::Vector(components) => {
+        ParamInput::Bool(value) => Some(ParameterValue::Bool(*value)),
+        ParamInput::String(value) => Some(edited_string_param(existing, value, local_frame)),
+        ParamInput::Vector(components) => {
             let clamped: Vec<f32> = components
                 .iter()
                 .map(|value| range.map_or(*value, |range| range.clamp(*value)))
@@ -202,17 +213,17 @@ pub(super) fn edited_param_value(
         // A curve edit replaces the whole control-point set. It only applies
         // to a parameter that already is a curve: a stale binding must never
         // retype a scalar parameter into a structural one.
-        PropertyValue::Curve(curve) => match existing {
+        ParamInput::Curve(curve) => match existing {
             ParameterValue::Curve(_) => Some(ParameterValue::Curve(curve.clone())),
             _ => None,
         },
         // A ramp edit replaces the whole stop set, on the same terms and for
         // the same reason: a stale binding must never retype a parameter.
-        PropertyValue::Ramp(ramp) => match existing {
+        ParamInput::Ramp(ramp) => match existing {
             ParameterValue::Ramp(_) => Some(ParameterValue::Ramp(ramp.clone())),
             _ => None,
         },
-        PropertyValue::Color { r, g, b, a } => match existing {
+        ParamInput::Color { r, g, b, a } => match existing {
             ParameterValue::Channel4(channels) => Some(ParameterValue::Channel4([
                 edited_channel(&channels[0], *r, local_frame),
                 edited_channel(&channels[1], *g, local_frame),
@@ -224,12 +235,105 @@ pub(super) fn edited_param_value(
     }
 }
 
+/// Whether any component of `value` carries keys that a write without a frame
+/// would have to discard.
+fn is_keyframed(value: &ParameterValue) -> bool {
+    let keyed = |c: &AnimationChannel| matches!(c.source, ChannelSource::Keyframes(_));
+    match value {
+        ParameterValue::Channel(c) | ParameterValue::IntChannel(c) => keyed(c),
+        ParameterValue::Channel2(cs) => cs.iter().any(keyed),
+        ParameterValue::Channel3(cs) => cs.iter().any(keyed),
+        ParameterValue::Channel4(cs) => cs.iter().any(keyed),
+        ParameterValue::StringSteps(_) => true,
+        _ => false,
+    }
+}
+
+/// The kind of thing a parameter holds, ignoring whether it is animated. A
+/// write must stay inside the kind of the value it replaces.
+fn family(value: &ParameterValue) -> u8 {
+    match value {
+        ParameterValue::Float(_) | ParameterValue::Channel(_) => 0,
+        ParameterValue::Int(_) | ParameterValue::IntChannel(_) => 1,
+        ParameterValue::Bool(_) => 2,
+        ParameterValue::String(_) | ParameterValue::StringSteps(_) => 3,
+        ParameterValue::Channel2(_) => 4,
+        ParameterValue::Channel3(_) => 5,
+        ParameterValue::Channel4(_) => 6,
+        ParameterValue::Curve(_) => 7,
+        ParameterValue::Ramp(_) => 8,
+        _ => u8::MAX,
+    }
+}
+
+/// Write `value` to parameter `key` of `node_id` in `graph`: clamp it, keep the
+/// parameter's channel shape, then bring along everything the value decides
+/// (`attribute.set`'s `value` follows its `type`; `layer.ref`'s output port
+/// follows the port it references, resolved against `comp`) in one graph
+/// snapshot.
+///
+/// Refuses an unknown node or key, a value of another kind than the parameter
+/// holds, and an animated parameter when `cx.local_frame` is `None` (a key
+/// cannot be placed, and flattening would silently delete the animation).
+pub fn set_parameter(
+    graph: Graph,
+    node_id: NodeId,
+    key: &str,
+    value: &ParamInput,
+    cx: &EditContext,
+    comp: Option<&Composition>,
+) -> Result<Graph, EditError> {
+    let node = graph
+        .node(node_id)
+        .ok_or(EditError::NodeNotFound(node_id))?;
+    let existing = node
+        .parameters
+        .iter()
+        .find(|p| p.key == key)
+        .ok_or_else(|| EditError::UnknownParameter {
+            node: node_id,
+            key: key.to_string(),
+        })?;
+    let mismatch = || EditError::ParameterTypeMismatch {
+        node: node_id,
+        key: key.to_string(),
+    };
+    let animated = is_keyframed(&existing.value);
+    let range = cx.registry.param_range(&node.type_key, key);
+    // Without a frame an animated parameter is judged as if keyed at 0: the
+    // write is only used to tell a mismatch from an `AnimatedParameter`.
+    let frame = if animated {
+        cx.local_frame.or(Some(0))
+    } else {
+        cx.local_frame
+    };
+    let written = edited_param_value(&existing.value, value, range, frame).ok_or_else(mismatch)?;
+    if family(&written) != family(&existing.value) {
+        return Err(mismatch());
+    }
+    if animated && cx.local_frame.is_none() {
+        return Err(EditError::AnimatedParameter {
+            node: node_id,
+            key: key.to_string(),
+        });
+    }
+    // One write for the edit and everything it forces, so the node is never
+    // left half-converted and the snapshot stays one undo step.
+    let changed = Parameter {
+        key: key.to_string(),
+        value: written,
+    };
+    let mut updates = crate::registry::builtin::dependent_param_updates(node, &changed);
+    let retypes = crate::registry::builtin::dependent_port_updates(node, &changed, comp);
+    updates.insert(0, changed);
+    Ok(graph.set_params_and_output_types(node_id, &updates, &retypes)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravel_core::animation::curve::KeyframeCurve;
-    use ravel_core::animation::interpolation::Interpolation;
-    use ravel_ui::properties::PropertyValue;
+    use crate::animation::curve::KeyframeCurve;
+    use crate::animation::interpolation::Interpolation;
 
     /// An int edit on a keyed `IntChannel` keys it at the frame instead of
     /// flattening it, and the parameter stays an int channel — the whole point
@@ -242,7 +346,7 @@ mod tests {
         let existing = ParameterValue::IntChannel(AnimationChannel::keyframes(curve));
 
         let Some(ParameterValue::IntChannel(channel)) =
-            edited_param_value(&existing, &PropertyValue::Int(9), None, Some(5))
+            edited_param_value(&existing, &ParamInput::Int(9), None, Some(5))
         else {
             panic!("an int edit keeps the int channel");
         };
@@ -260,19 +364,14 @@ mod tests {
     fn int_edit_updates_a_constant_int_channel() {
         let existing = ParameterValue::IntChannel(AnimationChannel::constant(6.0));
         let Some(ParameterValue::IntChannel(channel)) =
-            edited_param_value(&existing, &PropertyValue::Int(9), None, Some(5))
+            edited_param_value(&existing, &ParamInput::Int(9), None, Some(5))
         else {
             panic!("expected an int channel");
         };
         assert!(matches!(channel.source, ChannelSource::Constant(v) if v == 9.0));
 
         assert_eq!(
-            edited_param_value(
-                &ParameterValue::Int(6),
-                &PropertyValue::Int(9),
-                None,
-                Some(5)
-            ),
+            edited_param_value(&ParameterValue::Int(6), &ParamInput::Int(9), None, Some(5)),
             Some(ParameterValue::Int(9))
         );
     }
@@ -281,7 +380,7 @@ mod tests {
     /// the other keys alone; a plain `String` is replaced whole.
     #[test]
     fn string_edit_writes_one_step_key() {
-        use ravel_core::animation::StepCurve;
+        use crate::animation::StepCurve;
         let mut steps = StepCurve::new("seed".to_string());
         steps.insert(0, "first".to_string());
         steps.insert(10, "second".to_string());
@@ -289,7 +388,7 @@ mod tests {
 
         let Some(ParameterValue::StringSteps(written)) = edited_param_value(
             &existing,
-            &PropertyValue::String("edited".into()),
+            &ParamInput::String("edited".into()),
             None,
             Some(10),
         ) else {
@@ -302,7 +401,7 @@ mod tests {
         assert_eq!(
             edited_param_value(
                 &ParameterValue::String("a".into()),
-                &PropertyValue::String("b".into()),
+                &ParamInput::String("b".into()),
                 None,
                 Some(10),
             ),
@@ -314,11 +413,11 @@ mod tests {
     /// the write would return a constant `Float` and take every key with it.
     #[test]
     fn a_float_edit_refuses_an_animated_int_or_string() {
-        use ravel_core::animation::StepCurve;
+        use crate::animation::StepCurve;
         assert!(
             edited_param_value(
                 &ParameterValue::IntChannel(AnimationChannel::constant(6.0)),
-                &PropertyValue::Float(9.0),
+                &ParamInput::Float(9.0),
                 None,
                 Some(5),
             )
@@ -327,7 +426,7 @@ mod tests {
         assert!(
             edited_param_value(
                 &ParameterValue::StringSteps(StepCurve::keyed(0, "a".to_string())),
-                &PropertyValue::Float(9.0),
+                &ParamInput::Float(9.0),
                 None,
                 Some(5),
             )
@@ -340,7 +439,7 @@ mod tests {
         assert_eq!(
             edited_param_value(
                 &ParameterValue::Float(1.0),
-                &PropertyValue::Float(4.0),
+                &ParamInput::Float(4.0),
                 None,
                 Some(7),
             ),
@@ -352,7 +451,7 @@ mod tests {
     fn float_edit_updates_constant_channel() {
         let existing = ParameterValue::Channel(AnimationChannel::constant(1.0));
         let Some(ParameterValue::Channel(channel)) =
-            edited_param_value(&existing, &PropertyValue::Float(4.0), None, Some(7))
+            edited_param_value(&existing, &ParamInput::Float(4.0), None, Some(7))
         else {
             panic!("expected channel");
         };
@@ -365,7 +464,7 @@ mod tests {
         curve.insert(0, 1.0, Interpolation::Linear);
         let existing = ParameterValue::Channel(AnimationChannel::keyframes(curve));
         let Some(ParameterValue::Channel(channel)) =
-            edited_param_value(&existing, &PropertyValue::Float(4.0), None, Some(7))
+            edited_param_value(&existing, &ParamInput::Float(4.0), None, Some(7))
         else {
             panic!("expected channel");
         };
@@ -382,7 +481,7 @@ mod tests {
             AnimationChannel::constant(0.0),
             AnimationChannel::constant(0.0),
         ]);
-        let value = PropertyValue::Vector(vec![4.0, -2.0]);
+        let value = ParamInput::Vector(vec![4.0, -2.0]);
         let Some(ParameterValue::Channel2(channels)) =
             edited_param_value(&existing, &value, None, None)
         else {
@@ -391,7 +490,7 @@ mod tests {
         assert!(matches!(channels[0].source, ChannelSource::Constant(4.0)));
         assert!(matches!(channels[1].source, ChannelSource::Constant(-2.0)));
 
-        let wrong = PropertyValue::Vector(vec![1.0, 2.0, 3.0]);
+        let wrong = ParamInput::Vector(vec![1.0, 2.0, 3.0]);
         assert!(edited_param_value(&existing, &wrong, None, None).is_none());
     }
 
@@ -399,12 +498,12 @@ mod tests {
     /// parameter that is not already a curve.
     #[test]
     fn curve_edits_replace_the_control_points_of_a_curve_parameter() {
-        use ravel_core::param_curve::CurveParam;
+        use crate::param_curve::CurveParam;
         let edited = CurveParam::linear([(0.0, 0.0), (0.5, 0.9), (1.0, 1.0)]);
         assert_eq!(
             edited_param_value(
                 &ParameterValue::Curve(CurveParam::identity()),
-                &PropertyValue::Curve(edited.clone()),
+                &ParamInput::Curve(edited.clone()),
                 None,
                 Some(7),
             ),
@@ -413,7 +512,7 @@ mod tests {
         assert!(
             edited_param_value(
                 &ParameterValue::Float(1.0),
-                &PropertyValue::Curve(edited),
+                &ParamInput::Curve(edited),
                 None,
                 None,
             )
@@ -425,13 +524,13 @@ mod tests {
     /// that is not already a ramp.
     #[test]
     fn ramp_edits_replace_the_stops_of_a_ramp_parameter() {
-        use ravel_core::param_ramp::RampParam;
-        use ravel_core::types::Color;
+        use crate::param_ramp::RampParam;
+        use crate::types::Color;
         let edited = RampParam::linear([(0.0, Color::WHITE), (0.5, Color::BLACK)]);
         assert_eq!(
             edited_param_value(
                 &ParameterValue::Ramp(RampParam::default()),
-                &PropertyValue::Ramp(edited.clone()),
+                &ParamInput::Ramp(edited.clone()),
                 None,
                 Some(7),
             ),
@@ -440,7 +539,7 @@ mod tests {
         assert!(
             edited_param_value(
                 &ParameterValue::Float(1.0),
-                &PropertyValue::Ramp(edited),
+                &ParamInput::Ramp(edited),
                 None,
                 None,
             )
@@ -459,7 +558,7 @@ mod tests {
             AnimationChannel::constant(0.5),
             AnimationChannel::constant(1.0),
         ]);
-        let value = PropertyValue::Color {
+        let value = ParamInput::Color {
             r: 0.25,
             g: 0.75,
             b: 0.75,

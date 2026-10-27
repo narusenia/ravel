@@ -55,6 +55,14 @@ pub struct KeyframeCurve {
     default_value: f32,
 }
 
+/// Write `value` at `frame`, keeping an existing key's interpolation mode
+/// and tangents (a fresh key is Linear with zero tangents).
+pub fn set_curve_value(curve: &mut KeyframeCurve, frame: u64, value: f32) {
+    if !curve.modify(frame, value, None) {
+        curve.insert(frame, value, Interpolation::Linear);
+    }
+}
+
 impl Default for KeyframeCurve {
     fn default() -> Self {
         Self::new()

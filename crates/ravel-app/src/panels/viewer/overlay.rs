@@ -854,7 +854,7 @@ pub enum ShellChannel {
 pub enum OverlayEdit {
     /// Replace one parameter of one node. The caller supplies the finished
     /// [`ParameterValue`], so keyframe-preserving writes stay in
-    /// `param_edit`.
+    /// `ravel_core::edit::param`.
     NodeParameter {
         network: NetworkPath,
         node: NodeId,
@@ -912,7 +912,7 @@ impl OverlayEdit {
                     ShellChannel::Scale(axis) => &mut transform.scale[axis.index()],
                     ShellChannel::Rotation => &mut transform.rotation,
                 };
-                *slot = crate::panels::param_edit::edited_channel(slot, *value, *local_frame);
+                *slot = ravel_core::edit::param::edited_channel(slot, *value, *local_frame);
             }),
             // All or nothing: a half-applied batch is a document nobody asked
             // for.
@@ -1880,10 +1880,10 @@ impl ShellState {
     }
 
     /// One channel write at the layer's own local frame. `Some(frame)` is what
-    /// keeps a keyframed channel keyframed: [`param_edit::edited_channel`]
+    /// keeps a keyframed channel keyframed: [`edited_channel`]
     /// only collapses a curve when the frame is `None`.
     ///
-    /// [`param_edit::edited_channel`]: crate::panels::param_edit::edited_channel
+    /// [`edited_channel`]: ravel_core::edit::param::edited_channel
     fn write(&self, channel: ShellChannel, value: f32) -> OverlayEdit {
         OverlayEdit::LayerTransform {
             comp: self.comp,
@@ -2507,12 +2507,12 @@ impl ParamState {
 /// no parameter spelling, so a node becomes manipulable by declaring a role in
 /// the registry and nothing here changes.
 ///
-/// Writes go through [`param_edit::edited_vector_param`], which is what keeps
+/// Writes go through [`edited_vector_param`], which is what keeps
 /// an animated parameter animated: a drag inserts a key at the layer-local
 /// frame instead of collapsing the curve, the same rule the Properties scrub
 /// follows.
 ///
-/// [`param_edit::edited_vector_param`]: crate::panels::param_edit::edited_vector_param
+/// [`edited_vector_param`]: ravel_core::edit::param::edited_vector_param
 pub struct ParamManipulator;
 
 impl ParamManipulator {
@@ -2656,7 +2656,7 @@ impl ViewerOverlay for ParamManipulator {
             .value;
         // Two components for a two-dimensional canvas: a `Channel3` keeps its
         // Z, and every component keeps its curve.
-        let value = crate::panels::param_edit::edited_vector_param(
+        let value = ravel_core::edit::param::edited_vector_param(
             existing,
             &[x, y],
             Some(state.local_frame),

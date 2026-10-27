@@ -1804,6 +1804,52 @@ impl ProjectState {
         Ok(applied)
     }
 
+    /// Apply `ops` one by one to a working copy of the live document, skipping
+    /// the refused ones, and publish the result once: a step of undo when
+    /// `commit`, otherwise a live update that records none. For edits that
+    /// fan out over a selection, where one node refusing must not stop the
+    /// others. Returns what was refused, by index; nothing is published when
+    /// every operation was refused. An accepted operation is published even if
+    /// it left the document equal: the committing end of a scrub writes the
+    /// value its live updates already put there, and that is the step.
+    pub fn edit_ops_skipping_refused(
+        &mut self,
+        ops: &[EditOp],
+        local_frame: Option<u64>,
+        hint: InvalidationHint,
+        commit: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<ravel_core::edit::BatchError> {
+        let ctx = EditContext {
+            registry: &self.registry,
+            local_frame,
+        };
+        let mut refused = Vec::new();
+        // The whole batch first: a scrub calls this per pointer move, and one
+        // batch validates the document once instead of once per node.
+        let document = match ravel_core::edit::apply_batch(self.store.document(), ops, &ctx) {
+            Ok(applied) => applied.document,
+            Err(_) => {
+                let mut document = self.store.document().clone();
+                for (index, op) in ops.iter().enumerate() {
+                    match ravel_core::edit::apply(&document, op, &ctx) {
+                        Ok(applied) => document = applied.document,
+                        Err(error) => refused.push(ravel_core::edit::BatchError { index, error }),
+                    }
+                }
+                document
+            }
+        };
+        if refused.len() < ops.len() {
+            if commit {
+                self.commit_document(document, hint, cx);
+            } else {
+                self.apply_document(document, hint, cx);
+            }
+        }
+        refused
+    }
+
     /// Apply one edit operation to the live document without committing it.
     fn apply_edit_op(&self, op: &EditOp) -> Result<ravel_core::edit::Applied, EditError> {
         let cx = EditContext {

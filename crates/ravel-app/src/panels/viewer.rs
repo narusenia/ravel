@@ -27,7 +27,7 @@ use ravel_i18n::t;
 use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::{Button, Icon};
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -38,7 +38,7 @@ use crate::project_state::{ProjectState, ProjectStateHandle};
 use ravel_core::color::DisplayChannel;
 use ravel_core::composition::transform::{Affine, world_matrix};
 use ravel_core::composition::{Guide, GuideAxis};
-use ravel_core::id::{CompId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
+use ravel_core::id::{CompId, InputPortIndex, LayerId, NodeId};
 use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::FrameBuffer;
 use ravel_gpu::GpuFrameBuffer;
@@ -46,12 +46,13 @@ use ravel_ui::document::NetworkPath;
 use ravel_ui::panels::viewer::{PixelReadoutFormat, ViewerResolution, display_channel_label_key};
 use viewport::ViewerViewport;
 
-use super::param_edit::edited_vector_param;
 use overlay::{
     ActiveDrag, BoxSelect, BoxSelectScope, DragModifiers, EvalResults, LabelPlacement,
     OverlayColors, OverlayContext, OverlayEdit, OverlayHandle, OverlayHandleId, OverlayPainter,
     OverlayRegistry, ShellHandle,
 };
+use ravel_core::edit::ParamInput;
+use ravel_core::edit::param::{edited_param_value, edited_vector_param};
 use snap::{SnapGuides, SnapLines};
 
 pub const KEY_CONTEXT: &str = "Viewer";
@@ -5265,33 +5266,46 @@ fn drag_geometry_degenerate(geo: DragGeometry) -> bool {
         || geo.half.1 <= 0.0
 }
 
-/// Overwrite a freshly created shape node's parameters with the drag
-/// geometry (rect takes full extents, ellipse takes radii). Values are plain
-/// Floats: the node comes straight from the registry, so there are no
-/// channels to preserve.
-fn drawn_shape_node(mut node: Node, kind: ShapeDrawKind, geo: DragGeometry) -> Node {
-    let mut values = vec![("center", ParameterValue::vec2(geo.center.0, geo.center.1))];
+/// The parameter writes that turn a freshly created shape node into the drag
+/// geometry (rect takes full extents, ellipse takes radii).
+fn drawn_shape_params(kind: ShapeDrawKind, geo: DragGeometry) -> BTreeMap<String, ParamInput> {
+    let mut values = vec![(
+        "center",
+        ParamInput::Vector(vec![geo.center.0, geo.center.1]),
+    )];
     match kind {
         ShapeDrawKind::Rect => {
-            values.push(("width", ParameterValue::Float(geo.half.0 * 2.0)));
-            values.push(("height", ParameterValue::Float(geo.half.1 * 2.0)));
+            values.push(("width", ParamInput::Float(geo.half.0 * 2.0)));
+            values.push(("height", ParamInput::Float(geo.half.1 * 2.0)));
         }
         ShapeDrawKind::Ellipse => {
-            values.push(("radius", ParameterValue::vec2(geo.half.0, geo.half.1)));
+            values.push(("radius", ParamInput::Vector(vec![geo.half.0, geo.half.1])));
         }
         // Only the outer radius: the side / point count and the star's inner
         // radius keep the registry defaults and are adjusted in Properties
         // after the shape is committed (`TOOLX-4`).
         ShapeDrawKind::Polygon => {
-            values.push(("radius", ParameterValue::Float(geo.half.0)));
+            values.push(("radius", ParamInput::Float(geo.half.0)));
         }
         ShapeDrawKind::Star => {
-            values.push(("outer_radius", ParameterValue::Float(geo.half.0)));
+            values.push(("outer_radius", ParamInput::Float(geo.half.0)));
         }
     }
-    for (key, value) in values {
-        if let Some(param) = node.parameters.iter_mut().find(|p| p.key == key) {
-            param.value = value;
+    values
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
+}
+
+/// Overwrite a node's parameters with the drag geometry, with the write rules
+/// of the edit layer (a constant channel stays a channel). A key the node does
+/// not have is skipped.
+fn drawn_shape_node(mut node: Node, kind: ShapeDrawKind, geo: DragGeometry) -> Node {
+    for (key, value) in drawn_shape_params(kind, geo) {
+        if let Some(param) = node.parameters.iter_mut().find(|p| p.key == key)
+            && let Some(written) = edited_param_value(&param.value, &value, None, None)
+        {
+            param.value = written;
         }
     }
     node
@@ -5321,21 +5335,11 @@ fn free_rasterize_geometry_input(graph: &Graph) -> Option<(NodeId, InputPortInde
     })
 }
 
-/// Add a drawn shape node to the network at `path` and auto-wire its
-/// geometry output to a free rasterize geometry input, if one exists. The
-/// node lands at the conventional offset from its rasterize (matching the
-/// Shape layer template layout) and on top of the z stack.
-fn create_drawn_shape(
-    doc: &Document,
-    path: &NetworkPath,
-    registry: &ravel_core::registry::NodeRegistry,
-    kind: ShapeDrawKind,
-    geo: DragGeometry,
-) -> Option<(Document, NodeId)> {
-    let graph = ravel_ui::document::resolve_network(doc, path)?.clone();
-    let mut node = registry.create_node(kind.type_key(), NodeId::next())?;
-    let target = free_rasterize_geometry_input(&graph);
-    node.metadata.position = target
+/// Where a node drawn into `graph` goes: the conventional offset from the
+/// rasterize it wires into (matching the Shape layer template layout), else the
+/// origin.
+fn drawn_node_position(graph: &Graph, target: Option<(NodeId, InputPortIndex)>) -> (f32, f32) {
+    target
         .and_then(|(id, _)| graph.node(id))
         .map(|rasterize| {
             (
@@ -5343,34 +5347,72 @@ fn create_drawn_shape(
                 rasterize.metadata.position.1 + 180.0,
             )
         })
-        .unwrap_or((0.0, 0.0));
-    node.metadata.z = graph
-        .nodes()
-        .filter(|n| !n.metadata.synthetic)
-        .map(|n| n.metadata.z)
-        .max()
-        .map_or(0, |z| z + 1);
-    let source_port = node
-        .outputs
-        .iter()
-        .position(|port| port.name == "output")
-        .map(|index| OutputPortIndex(index as u32))?;
-    let node = drawn_shape_node(node, kind, geo);
-    let node_id = node.id;
-    let mut graph = graph.add_node(node).ok()?;
+        .unwrap_or((0.0, 0.0))
+}
+
+/// Add a node of `type_key` with `params` to the network at `path` and wire
+/// its `output` into `target`, as one edit-layer batch (on top of the z stack).
+fn add_wired_node(
+    doc: &Document,
+    path: &NetworkPath,
+    registry: &ravel_core::registry::NodeRegistry,
+    type_key: &str,
+    params: BTreeMap<String, ParamInput>,
+    target: Option<(NodeId, InputPortIndex)>,
+) -> Option<(Document, NodeId)> {
+    use ravel_core::edit::{Created, EditContext, EditOp, Endpoint, NodeRef, PortRef};
+    let graph = ravel_ui::document::resolve_network(doc, path)?;
+    let alias = "drawn".to_string();
+    let mut ops = vec![EditOp::AddNode {
+        path: path.clone(),
+        type_key: type_key.to_string(),
+        position: Some(drawn_node_position(graph, target)),
+        params,
+        alias: Some(alias.clone()),
+    }];
     if let Some((target, target_port)) = target {
-        graph = ravel_core::edit::network::connect_edge_and_update_variadic_inputs(
-            graph,
-            EdgeId::next(),
-            node_id,
-            source_port,
-            target,
-            target_port,
-        )
-        .ok()?;
+        ops.push(EditOp::Connect {
+            path: path.clone(),
+            from: Endpoint {
+                node: NodeRef::Alias(alias),
+                port: PortRef::Name("output".to_string()),
+            },
+            to: Endpoint {
+                node: NodeRef::Id(target),
+                port: PortRef::Index(target_port.0),
+            },
+        });
     }
-    let doc = ravel_ui::document::replace_network(doc, path, graph)?;
-    Some((doc, node_id))
+    let cx = EditContext {
+        registry,
+        local_frame: None,
+    };
+    let applied = ravel_core::edit::apply_batch(doc, &ops, &cx).ok()?;
+    let node = applied.created.iter().find_map(|c| match c {
+        Created::Node(id) => Some(*id),
+        _ => None,
+    })?;
+    Some((applied.document, node))
+}
+
+/// Add a drawn shape node to the network at `path` and auto-wire its
+/// geometry output to a free rasterize geometry input, if one exists.
+fn create_drawn_shape(
+    doc: &Document,
+    path: &NetworkPath,
+    registry: &ravel_core::registry::NodeRegistry,
+    kind: ShapeDrawKind,
+    geo: DragGeometry,
+) -> Option<(Document, NodeId)> {
+    let target = free_rasterize_geometry_input(ravel_ui::document::resolve_network(doc, path)?);
+    add_wired_node(
+        doc,
+        path,
+        registry,
+        kind.type_key(),
+        drawn_shape_params(kind, geo),
+        target,
+    )
 }
 
 /// Stack a Shape template layer on `comp` through the edit layer.
@@ -5447,44 +5489,21 @@ fn create_custom_path(
     registry: &ravel_core::registry::NodeRegistry,
     points: Vec<PathPoint>,
 ) -> Option<(Document, NodeId)> {
-    let graph = ravel_ui::document::resolve_network(doc, path)?.clone();
-    let target = free_rasterize_geometry_input(&graph);
-    let mut node = registry.create_node("shape.custom_path", NodeId::next())?;
-    node.metadata.position = target
-        .and_then(|(id, _)| graph.node(id))
-        .map(|rasterize| {
-            (
-                rasterize.metadata.position.0 - 240.0,
-                rasterize.metadata.position.1 + 180.0,
-            )
-        })
-        .unwrap_or((0.0, 0.0));
-    node.metadata.z = graph
-        .nodes()
-        .filter(|candidate| !candidate.metadata.synthetic)
-        .map(|candidate| candidate.metadata.z)
-        .max()
-        .map_or(0, |z| z + 1);
-    let source_port = node
-        .outputs
-        .iter()
-        .position(|port| port.name == "output")
-        .map(|index| OutputPortIndex(index as u32))?;
-    let node = custom_path_node(node, points, false);
-    let node_id = node.id;
-    let mut graph = graph.add_node(node).ok()?;
-    if let Some((target, target_port)) = target {
-        graph = ravel_core::edit::network::connect_edge_and_update_variadic_inputs(
-            graph,
-            EdgeId::next(),
-            node_id,
-            source_port,
-            target,
-            target_port,
-        )
-        .ok()?;
-    }
-    let doc = ravel_ui::document::replace_network(doc, path, graph)?;
+    let target = free_rasterize_geometry_input(ravel_ui::document::resolve_network(doc, path)?);
+    let (doc, node_id) = add_wired_node(
+        doc,
+        path,
+        registry,
+        "shape.custom_path",
+        BTreeMap::new(),
+        target,
+    )?;
+    // `ParamInput` carries no path points, so they are written onto the node
+    // the edit layer just made.
+    let graph = ravel_ui::document::resolve_network(&doc, path)?;
+    let node = custom_path_node(graph.node(node_id)?.as_ref().clone(), points, false);
+    let graph = graph.clone().replace_node(Arc::new(node));
+    let doc = ravel_ui::document::replace_network(&doc, path, graph)?;
     Some((doc, node_id))
 }
 
@@ -5760,6 +5779,7 @@ fn transform_path_point(point: PathPoint, transform: &Affine) -> PathPoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ravel_core::id::{EdgeId, OutputPortIndex};
     // `use gpui::*` pulls in gpui's `test` attribute macro; shadow it back
     // to the built-in one for these plain unit tests.
     use core::prelude::v1::test;

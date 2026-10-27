@@ -703,12 +703,20 @@ transforms it is built from (`NetworkPath`, `CompositionSettings`,
 ```rust
 // Operations so far: AddComposition / RemoveComposition / AddLayer / RemoveLayer,
 // and in a network (`path: NetworkPath`, subnets included): AddNode / RemoveNode /
-// Connect / Disconnect.
+// Connect / Disconnect / SetParameter. AddNode takes `params` (written with
+// SetParameter's rules, after creation).
 // JSON: {"op":"add_layer","comp":"shot","template":"solid","as":"bg"}
 // (a number is an id, a string an alias defined earlier in the same batch).
 // {"op":"connect","path":{..},"from":{"node":"n","port":0},"to":{"node":5,"port":"geometry"}}
 // (a port is a number or a name; Connect checks port numbers and types, replaces
 // an edge on the input and keeps one free variadic slot).
+// {"op":"set_parameter","path":{..},"node":"n","key":"width","value":{"type":"float","value":2.0}}
+// (`ParamInput`: float / int / bool / string / color / vector / curve / ramp, adjacently
+// tagged because a bare number cannot tell an int from a float; it is also the UI's
+// `ravel_ui::properties::PropertyValue`). The value is clamped by the registry range;
+// an animated parameter is keyed at `EditContext::local_frame` and is
+// `AnimatedParameter` without one; `attribute.set`'s `value` and `layer.ref`'s
+// output port follow in the same step.
 edit::apply(&Document, &EditOp, &EditContext) -> Result<Applied, EditError>
 edit::apply_batch(&Document, &[EditOp], &EditContext) -> Result<Applied, BatchError>
 Applied { document, created: Vec<Created>, aliases: BTreeMap<String, Created> }
@@ -721,6 +729,13 @@ Committing the result (one `commit_document` = one undo step) is the caller's.
 `edit::network` holds the graph-level wiring (`connect_edge_and_update_variadic_inputs`,
 `remove_edge_and_compact`, `remove_node_and_compact`) for a caller wiring a network
 it has not committed yet; `edit::apply` runs the same functions.
+`edit::param` holds the parameter write rules: `set_parameter(Graph, NodeId, key,
+&ParamInput, &EditContext, Option<&Composition>)` for a graph in hand, and the pure
+`edited_param_value` / `edited_channel` / `edited_vector_param` / `edited_{float,int,string}_param`
+the Viewer gizmos call for a gesture write (they fall back to a constant when an
+animated parameter has no frame; the layer entry point refuses instead).
+`ravel_core::animation::curve::set_curve_value` (re-exported by `ravel_ui::keyframes`)
+writes a key keeping the interpolation of an existing one.
 
 ### `exposed` — Exposed parameter declarations (REQ-PROJ-006)
 

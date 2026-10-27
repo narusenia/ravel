@@ -7,7 +7,6 @@ pub mod attribute_spreadsheet;
 pub mod media_bin;
 pub mod node_editor;
 pub mod outliner;
-mod param_edit;
 pub mod timeline;
 mod timeline_colors;
 pub mod viewer;

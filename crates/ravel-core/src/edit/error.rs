@@ -39,6 +39,12 @@ pub enum EditError {
     BoundaryNode(NodeId),
     #[error("unknown node type {0:?}")]
     UnknownNodeType(String),
+    #[error("node {node:?} has no parameter {key:?}")]
+    UnknownParameter { node: NodeId, key: String },
+    #[error("parameter {key:?} of node {node:?} does not take that kind of value")]
+    ParameterTypeMismatch { node: NodeId, key: String },
+    #[error("parameter {key:?} of node {node:?} is animated and no frame was given to key")]
+    AnimatedParameter { node: NodeId, key: String },
     #[error("node {node:?} has no such port {port:?} (input side: {input})")]
     PortNotFound {
         node: NodeId,
@@ -78,6 +84,9 @@ impl EditError {
             Self::EdgeNotFound(_) => "edge-not-found",
             Self::BoundaryNode(_) => "boundary-node",
             Self::UnknownNodeType(_) => "unknown-node-type",
+            Self::UnknownParameter { .. } => "unknown-parameter",
+            Self::ParameterTypeMismatch { .. } => "parameter-type-mismatch",
+            Self::AnimatedParameter { .. } => "animated-parameter",
             Self::PortNotFound { .. } => "port-not-found",
             Self::PortTypeMismatch { .. } => "port-type-mismatch",
             Self::Graph(_) => "graph",

@@ -407,6 +407,11 @@ fn render_args(args: &Value, kind: Kind) -> Result<RenderArgs, RpcError> {
                 render.suffix = suffix.to_string();
             }
             if let Some(padding) = optional_u64(args, "padding")? {
+                // The export UI's `MAX_PADDING`; unbounded, a long-lived server
+                // could be made to allocate a gigantic file name.
+                if padding > 12 {
+                    return Err(RpcError::params("padding must be at most 12"));
+                }
                 render.padding = usize::try_from(padding)
                     .map_err(|_| RpcError::params("padding is too large"))?;
             }
@@ -598,7 +603,7 @@ fn tool_definitions() -> Value {
                     "png_depth": { "type": "string", "enum": ["8", "16"] },
                     "prefix": { "type": "string" },
                     "suffix": { "type": "string" },
-                    "padding": { "type": "integer", "minimum": 0 },
+                    "padding": { "type": "integer", "minimum": 0, "maximum": 12 },
                     "no_audio": { "type": "boolean", "description": "Leave out the companion WAV." },
                     "param": {
                         "type": "object",
@@ -617,18 +622,29 @@ fn tool_definitions() -> Value {
 // ===========================================================================
 
 /// Read request lines until EOF, writing one response line per answer.
-pub fn serve(server: &Server, input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
-    for line in input.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
+pub fn serve(
+    server: &Server,
+    mut input: impl BufRead,
+    mut output: impl Write,
+) -> std::io::Result<()> {
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        if input.read_until(b'\n', &mut buf)? == 0 {
+            return Ok(());
         }
-        if let Some(response) = server.handle_line(&line) {
+        // A line that is not UTF-8 is a parse error for that line, not the
+        // end of the session (`lines()` would stop the whole server).
+        let response = match std::str::from_utf8(&buf) {
+            Ok(line) if line.trim().is_empty() => continue,
+            Ok(line) => server.handle_line(line),
+            Err(error) => Some(error_response(Value::Null, PARSE_ERROR, &error.to_string())),
+        };
+        if let Some(response) = response {
             writeln!(output, "{response}")?;
             output.flush()?;
         }
     }
-    Ok(())
 }
 
 /// `ravel-cli mcp`. Ends with 0 on stdin EOF.
@@ -751,6 +767,35 @@ mod tests {
             call(&server, "list_comps", json!({}))["error"]["code"],
             INVALID_PARAMS
         );
+    }
+
+    #[test]
+    fn a_line_that_is_not_utf8_is_answered_and_the_session_continues() {
+        let server = gpu_less(&[]);
+        let mut input = b"\xff\xfe\n".to_vec();
+        input.extend_from_slice(br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#);
+        input.push(b'\n');
+        let mut output = Vec::new();
+        serve(&server, input.as_slice(), &mut output).expect("serve");
+        let replies: Vec<Value> = String::from_utf8(output)
+            .expect("utf-8")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("json"))
+            .collect();
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[0]["error"]["code"], PARSE_ERROR);
+        assert_eq!(replies[1]["id"], 1);
+        assert!(replies[1].get("result").is_some());
+    }
+
+    #[test]
+    fn padding_above_twelve_is_refused() {
+        let reply = call(
+            &gpu_less(&[]),
+            "render",
+            json!({"project": "/x", "output": "/y", "padding": 13}),
+        );
+        assert_eq!(reply["error"]["code"], INVALID_PARAMS);
     }
 
     #[test]

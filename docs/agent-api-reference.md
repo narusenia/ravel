@@ -701,9 +701,14 @@ transforms it is built from (`NetworkPath`, `CompositionSettings`,
 `ravel-ui::document` re-exports them.
 
 ```rust
-// Operations so far: AddComposition / RemoveComposition / AddLayer / RemoveLayer.
+// Operations so far: AddComposition / RemoveComposition / AddLayer / RemoveLayer,
+// and in a network (`path: NetworkPath`, subnets included): AddNode / RemoveNode /
+// Connect / Disconnect.
 // JSON: {"op":"add_layer","comp":"shot","template":"solid","as":"bg"}
 // (a number is an id, a string an alias defined earlier in the same batch).
+// {"op":"connect","path":{..},"from":{"node":"n","port":0},"to":{"node":5,"port":"geometry"}}
+// (a port is a number or a name; Connect checks port numbers and types, replaces
+// an edge on the input and keeps one free variadic slot).
 edit::apply(&Document, &EditOp, &EditContext) -> Result<Applied, EditError>
 edit::apply_batch(&Document, &[EditOp], &EditContext) -> Result<Applied, BatchError>
 Applied { document, created: Vec<Created>, aliases: BTreeMap<String, Created> }
@@ -713,6 +718,9 @@ EditError::code() -> &'static str   // "layer-locked", "unknown-alias", ...
 The input document is never touched, so a refused operation changes nothing; a
 batch is all-or-nothing and `BatchError::index` names the failing operation.
 Committing the result (one `commit_document` = one undo step) is the caller's.
+`edit::network` holds the graph-level wiring (`connect_edge_and_update_variadic_inputs`,
+`remove_edge_and_compact`, `remove_node_and_compact`) for a caller wiring a network
+it has not committed yet; `edit::apply` runs the same functions.
 
 ### `exposed` — Exposed parameter declarations (REQ-PROJ-006)
 

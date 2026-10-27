@@ -81,6 +81,18 @@ gpui_platform = { workspace = true, features = ["wgpu"] }
 # this one, so it says so itself rather than inheriting the feature from a
 # sibling's graph.
 gpui = { workspace = true, features = ["wgpu-surfaces"] }
+# The live-edit named pipe (`live_edit/windows.rs`): a pipe whose security
+# descriptor admits the current user and SYSTEM only. Already in the lock
+# graph through other crates; only the features the pipe needs are enabled.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

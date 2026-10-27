@@ -23,13 +23,12 @@ use ravel_core::edit::document::unique_layer_name;
 pub use ravel_core::edit::document::{
     CompositionSettings, NetworkPath, add_composition, add_layer, add_layer_from_template,
     apply_shape_center_default, compositions_in_order, neighbour_composition,
-    next_composition_name, remove_composition, remove_layer, unique_composition_name,
-    update_composition, update_layer,
+    next_composition_name, remove_composition, remove_layer, replace_network,
+    replace_network_renaming_pin, resolve_network, unique_composition_name, update_composition,
+    update_layer,
 };
-use ravel_core::exposed::KeyRename;
-use ravel_core::graph::{Graph, Node, ParameterValue, PortSide};
-use ravel_core::id::{AssetId, CompId, LayerId, NodeId};
-use ravel_core::network::PinRename;
+use ravel_core::graph::{Graph, Node, ParameterValue};
+use ravel_core::id::{AssetId, CompId, LayerId};
 use ravel_core::registry::NodeRegistry;
 use ravel_core::types::FrameRate;
 use ravel_core::undo::UndoStack;
@@ -603,104 +602,11 @@ pub fn duplicate_composition(doc: &Document, comp: CompId) -> Option<(Document, 
     Some((next, id))
 }
 
-/// Resolve the graph `path` points at: the layer's network, descended
-/// through each subnet node's inner graph.
-pub fn resolve_network<'a>(doc: &'a Document, path: &NetworkPath) -> Option<&'a Graph> {
-    let layer = doc.get_composition(path.comp)?.get_layer(path.layer)?;
-    let mut graph = &layer.network;
-    for subnet in &path.subnets {
-        graph = graph.node(*subnet)?.subnet.as_deref()?;
-    }
-    Some(graph)
-}
-
-/// Rebuild `doc` with the graph at `path` replaced by `network`, rebuilding
-/// the nested subnet chain up to the owning layer.
-///
-/// Every subnet node on that chain has its pins re-derived from the inner
-/// graph it now owns ([`ravel_core::network::sync_subnet_pins`]): editing a
-/// subnet's inner In / Out **is** editing the enclosing node's interface, and
-/// the two have to reach the document together or an outer edge is left
-/// pointing at a pin index that no longer means what it did. Doing it here
-/// rather than in the caller keeps it inside the caller's single Document
-/// commit, so one inner edit is still one undo step, and covers every writer
-/// of a nested network at once.
-pub fn replace_network(doc: &Document, path: &NetworkPath, network: Graph) -> Option<Document> {
-    replace_network_renaming_pin(doc, path, network, None)
-}
-
-/// [`replace_network`] told that the edit renamed a custom port of the
-/// network's own In / Out node.
-///
-/// Pin sync matches by name, so without this the enclosing subnet node's pin
-/// is removed and re-added: the outer edges, the promoted parameter's value
-/// and keyframes, and any `NodeOutput` binding that named the pin all go with
-/// it. [`ravel_core::network::rename_subnet_pin`] moves the pin first, and the
-/// declarations bound to the promoted parameter follow in the same snapshot —
-/// the same obligation [`ravel_core::network::rename_custom_port`] discharges
-/// one level down, one level up.
-///
-/// Only the subnet that **directly owns** the edited graph is affected: an
-/// ancestor's pins derive from its own In / Out, which this edit did not
-/// touch. A rename with no enclosing subnet (a layer root) changes nothing.
-pub fn replace_network_renaming_pin(
-    doc: &Document,
-    path: &NetworkPath,
-    network: Graph,
-    pin_rename: Option<&PinRename>,
-) -> Option<Document> {
-    let layer = doc.get_composition(path.comp)?.get_layer(path.layer)?;
-    let rebuilt = rebuild_subnets(&layer.network, &path.subnets, network, pin_rename)?;
-    let doc = update_layer(doc, path.comp, path.layer, |l| l.network = rebuilt)?;
-    Some(match (pin_rename, path.subnets.last()) {
-        (Some(rename), Some(subnet)) if rename.side == PortSide::Input => {
-            ravel_core::exposed::apply::follow_key_rename(
-                doc,
-                &KeyRename::new(*subnet, rename.old_name.clone(), rename.new_name.clone()),
-            )
-        }
-        _ => doc,
-    })
-}
-
-/// Replace the graph reached through `subnets` inside `graph` with `leaf`,
-/// re-wrapping each ancestor subnet node on the way back up and re-deriving
-/// its pins from the graph it ends up owning.
-fn rebuild_subnets(
-    graph: &Graph,
-    subnets: &[NodeId],
-    leaf: Graph,
-    pin_rename: Option<&PinRename>,
-) -> Option<Graph> {
-    let Some((first, rest)) = subnets.split_first() else {
-        return Some(leaf);
-    };
-    let node = graph.node(*first)?;
-    let inner = node.subnet.as_deref()?;
-    let new_inner = rebuild_subnets(inner, rest, leaf, pin_rename)?;
-    let mut updated = (**node).clone();
-    updated.subnet = Some(std::sync::Arc::new(new_inner));
-    let rebuilt = graph.clone().replace_node(std::sync::Arc::new(updated));
-    // `rest.is_empty()` is the subnet that owns the edited graph — the only
-    // one whose pins the rename names.
-    let rebuilt = match pin_rename.filter(|_| rest.is_empty()) {
-        Some(rename) => ravel_core::network::rename_subnet_pin(rebuilt, *first, rename),
-        None => rebuilt,
-    };
-    // A node that is not a subnet cannot be on this chain (`node.subnet` just
-    // answered), so a refusal here would be a bug rather than a state to
-    // carry. It is logged rather than dropped, and the edit still reaches the
-    // document with the pins it had.
-    Some(ravel_core::network::sync_subnet_pins_or_log(
-        rebuilt, *first,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ravel_core::graph::Node;
-    use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, OutputPortIndex};
+    use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::network as net;
     use ravel_core::registry::builtin::register_builtins;
     use ravel_core::types::Color;

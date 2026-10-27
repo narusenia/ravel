@@ -23,6 +23,8 @@ use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::animation::curve::KeyframeCurve;
 use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::animation::step::StepCurve;
+use ravel_core::edit::network::connect_edge_and_update_variadic_inputs;
+use ravel_core::edit::{EditOp, Endpoint, NodeRef, PortRef};
 use ravel_core::eval::EvalContext;
 use ravel_core::exposed::KeyRename;
 use ravel_core::graph::{Graph, PortSide};
@@ -289,111 +291,6 @@ pub(crate) fn first_compatible_port(
             .position(|port| accepted_types.is_empty() || accepted_types.contains(&port.data_type))
             .map(|index| index as u32)
     }
-}
-
-/// Restore the variadic-group invariant after one or more edges have been
-/// removed from `node_id`: connected slots stay ordered and exactly one empty
-/// slot remains at the end.
-fn compact_empty_variadic_inputs(mut graph: Graph, node_id: NodeId) -> Graph {
-    loop {
-        let Some(node) = graph.node(node_id) else {
-            return graph;
-        };
-        let Some((index, _)) = node.inputs.iter().enumerate().find(|(index, input)| {
-            input.is_variadic
-                && node.inputs[*index + 1..]
-                    .first()
-                    .is_some_and(|next| next.is_variadic)
-                && !graph.edges().any(|edge| {
-                    edge.target == node_id && edge.target_port == InputPortIndex(*index as u32)
-                })
-        }) else {
-            return graph;
-        };
-        let Ok(compacted) = graph
-            .clone()
-            .compact_variadic_input_group(node_id, InputPortIndex(index as u32))
-        else {
-            return graph;
-        };
-        graph = compacted;
-    }
-}
-
-/// Remove one edge and compact its target's variadic group in the same graph
-/// snapshot.
-fn remove_edge_and_compact(graph: Graph, edge_id: EdgeId) -> Option<Graph> {
-    let target = graph.edge(edge_id)?.target;
-    let removed = graph.remove_edge(edge_id).ok()?;
-    Some(compact_empty_variadic_inputs(removed, target))
-}
-
-/// Remove one node and compact every surviving variadic target reached by its
-/// outgoing edges.
-fn remove_node_and_compact(graph: Graph, node_id: NodeId) -> Option<Graph> {
-    let targets: HashSet<_> = graph
-        .edges()
-        .filter(|edge| edge.source == node_id)
-        .map(|edge| edge.target)
-        .collect();
-    let mut graph = graph.remove_node(node_id).ok()?;
-    for target in targets {
-        graph = compact_empty_variadic_inputs(graph, target);
-    }
-    Some(graph)
-}
-
-/// Replace any edge occupying `target_port`, connect the new edge, and grow a
-/// trailing variadic slot when the connection fills the group. Replacement of
-/// a variadic slot compacts first, so the replacement is appended after the
-/// surviving connected sources. Shared with the Viewer's shape drawing tools,
-/// which call it only on free inputs (no replacement).
-pub(super) fn connect_edge_and_update_variadic_inputs(
-    mut graph: Graph,
-    edge_id: EdgeId,
-    source: NodeId,
-    source_port: OutputPortIndex,
-    target: NodeId,
-    mut target_port: InputPortIndex,
-) -> Option<Graph> {
-    let target_is_variadic = graph
-        .node(target)?
-        .inputs
-        .get(target_port.0 as usize)
-        .is_some_and(|input| input.is_variadic);
-    let existing: Vec<_> = graph
-        .edges()
-        .filter(|edge| edge.target == target && edge.target_port == target_port)
-        .map(|edge| edge.id)
-        .collect();
-    for existing_edge in existing {
-        graph = remove_edge_and_compact(graph, existing_edge)?;
-    }
-
-    if target_is_variadic {
-        target_port = graph
-            .node(target)?
-            .inputs
-            .iter()
-            .enumerate()
-            .find(|(index, input)| {
-                input.is_variadic
-                    && !graph.edges().any(|edge| {
-                        edge.target == target && edge.target_port == InputPortIndex(*index as u32)
-                    })
-            })
-            .map(|(index, _)| InputPortIndex(index as u32))?;
-    }
-
-    let graph = graph
-        .add_edge(edge_id, source, source_port, target, target_port)
-        .ok()?;
-    Some(
-        graph
-            .clone()
-            .grow_variadic_input_group(target)
-            .unwrap_or(graph),
-    )
 }
 
 /// Parameters of `node` currently driven by a connected parameter port,
@@ -1290,6 +1187,32 @@ impl NodeEditorPanel {
         self.notify_properties_selection(cx);
     }
 
+    /// Apply `build`'s operations to the open network through the edit layer
+    /// as one Document undo step, then show the result. A refused edit leaves
+    /// the document and the panel as they were. Without a project and an open
+    /// network there is nothing to edit.
+    fn network_edit(
+        &mut self,
+        build: impl FnOnce(&NetworkPath) -> Vec<EditOp>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let (Some(project), Some(context)) = (self.project.clone(), self.context.clone()) else {
+            return false;
+        };
+        let ops = build(&context);
+        if let Err(err) = project.update(cx, |project, cx| project.commit_edit_ops(&ops, cx)) {
+            tracing::debug!(%err, code = err.error.code(), "node editor edit refused");
+            return false;
+        }
+        let Some(graph) = resolve_network(project.read(cx).document(), &context).cloned() else {
+            return false;
+        };
+        self.graph = graph;
+        self.refresh_graph_caches(cx);
+        self.notify_properties_selection(cx);
+        true
+    }
+
     /// Connect ports and normalize the target variadic group as one Document
     /// undo step.
     fn connect_ports(
@@ -1300,24 +1223,66 @@ impl NodeEditorPanel {
         target_port: InputPortIndex,
         cx: &mut Context<Self>,
     ) {
-        if let Some(graph) = connect_edge_and_update_variadic_inputs(
-            self.graph.clone(),
-            EdgeId::next(),
-            source,
-            source_port,
-            target,
-            target_port,
-        ) {
-            self.commit_graph(graph, None, cx);
-        }
+        let end = |node: NodeId, port: u32| Endpoint {
+            node: NodeRef::Id(node),
+            port: PortRef::Index(port),
+        };
+        self.network_edit(
+            |path| {
+                vec![EditOp::Connect {
+                    path: path.clone(),
+                    from: end(source, source_port.0),
+                    to: end(target, target_port.0),
+                }]
+            },
+            cx,
+        );
     }
 
     /// Remove an edge and normalize its target variadic group as one Document
     /// undo step.
     fn remove_edge(&mut self, edge_id: EdgeId, cx: &mut Context<Self>) {
-        if let Some(graph) = remove_edge_and_compact(self.graph.clone(), edge_id) {
-            self.commit_graph(graph, None, cx);
+        self.network_edit(
+            |path| {
+                vec![EditOp::Disconnect {
+                    path: path.clone(),
+                    edge: edge_id,
+                }]
+            },
+            cx,
+        );
+    }
+
+    /// Delete `edges`, then `nodes`, as one undo step and clear the selection.
+    /// Ids the open network no longer has are skipped rather than failing the
+    /// whole delete.
+    fn delete_items(&mut self, edges: Vec<EdgeId>, nodes: Vec<NodeId>, cx: &mut Context<Self>) {
+        let edges: Vec<_> = edges
+            .into_iter()
+            .filter(|id| self.graph.edge(*id).is_some())
+            .collect();
+        let nodes: Vec<_> = nodes
+            .into_iter()
+            .filter(|id| self.graph.node(*id).is_some())
+            .collect();
+        if !(edges.is_empty() && nodes.is_empty()) {
+            self.network_edit(
+                |path| {
+                    let disconnect = edges.iter().map(|edge| EditOp::Disconnect {
+                        path: path.clone(),
+                        edge: *edge,
+                    });
+                    let remove = nodes.iter().map(|node| EditOp::RemoveNode {
+                        path: path.clone(),
+                        node: NodeRef::Id(*node),
+                    });
+                    disconnect.chain(remove).collect()
+                },
+                cx,
+            );
         }
+        self.clear_selected_nodes(cx);
+        self.selected_edges.clear();
     }
 
     /// Toggle one parameter input port as one structural Document undo step.
@@ -2296,17 +2261,7 @@ impl NodeEditorPanel {
         }
 
         let edges: Vec<_> = self.selected_edges.iter().copied().collect();
-        let graph = edges
-            .into_iter()
-            .fold(self.graph.clone(), |graph, edge_id| {
-                remove_edge_and_compact(graph.clone(), edge_id).unwrap_or(graph)
-            });
-        let graph = nodes.into_iter().fold(graph, |graph, node_id| {
-            remove_node_and_compact(graph.clone(), node_id).unwrap_or(graph)
-        });
-        self.clear_selected_nodes(cx);
-        self.selected_edges.clear();
-        self.commit_graph(graph, None, cx);
+        self.delete_items(edges, nodes, cx);
     }
 
     fn trace_action(cx: &mut App, command: CommandId, outcome: &str) {
@@ -3321,7 +3276,7 @@ impl NodeEditorPanel {
                     InputPortIndex(from.port_index),
                 )
             };
-            if let Some(connected) = connect_edge_and_update_variadic_inputs(
+            if let Ok(connected) = connect_edge_and_update_variadic_inputs(
                 graph.clone(),
                 EdgeId::next(),
                 source,
@@ -3832,16 +3787,7 @@ impl Render for NodeEditorPanel {
                                 .on_click(move |_, _window, cx| {
                                     entity_del
                                         .update(cx, |this, cx| {
-                                            let graph = del_targets.iter().fold(
-                                                this.graph.clone(),
-                                                |g, nid| {
-                                                    remove_node_and_compact(g.clone(), *nid)
-                                                        .unwrap_or(g)
-                                                },
-                                            );
-                                            this.clear_selected_nodes(cx);
-                                            this.selected_edges.clear();
-                                            this.commit_graph(graph, None, cx);
+                                            this.delete_items(Vec::new(), del_targets.clone(), cx);
                                             cx.notify();
                                         })
                                         .ok();

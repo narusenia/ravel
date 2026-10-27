@@ -1,9 +1,12 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use super::document::NetworkPath;
+use super::ops::PortRef;
 use crate::composition::DocumentValidationError;
 use crate::composition::templates::TemplateError;
-use crate::id::{CompId, LayerId};
+use crate::graph::GraphError;
+use crate::id::{CompId, EdgeId, LayerId, NodeId};
 use thiserror::Error;
 
 /// Why an edit operation was refused. A refused operation leaves the caller's
@@ -26,6 +29,33 @@ pub enum EditError {
     UnknownAlias(String),
     #[error("alias {0:?} names a different kind of object than the operation needs")]
     AliasKindMismatch(String),
+    #[error("network {0:?} does not exist")]
+    NetworkNotFound(NetworkPath),
+    #[error("node {0:?} does not exist in the network")]
+    NodeNotFound(NodeId),
+    #[error("edge {0:?} does not exist in the network")]
+    EdgeNotFound(EdgeId),
+    #[error("node {0:?} is a network boundary node and cannot be removed")]
+    BoundaryNode(NodeId),
+    #[error("unknown node type {0:?}")]
+    UnknownNodeType(String),
+    #[error("node {node:?} has no such port {port:?} (input side: {input})")]
+    PortNotFound {
+        node: NodeId,
+        port: PortRef,
+        input: bool,
+    },
+    #[error(
+        "output {output_port} of node {output_node:?} is not accepted by input {input_port} of node {input_node:?}"
+    )]
+    PortTypeMismatch {
+        output_node: NodeId,
+        output_port: u32,
+        input_node: NodeId,
+        input_port: u32,
+    },
+    #[error("the graph refused the edit: {0}")]
+    Graph(#[from] GraphError),
     #[error("the edit produced an invalid document: {0}")]
     InvalidDocument(#[from] DocumentValidationError),
 }
@@ -43,6 +73,14 @@ impl EditError {
             Self::DuplicateAlias(_) => "duplicate-alias",
             Self::UnknownAlias(_) => "unknown-alias",
             Self::AliasKindMismatch(_) => "alias-kind-mismatch",
+            Self::NetworkNotFound(_) => "network-not-found",
+            Self::NodeNotFound(_) => "node-not-found",
+            Self::EdgeNotFound(_) => "edge-not-found",
+            Self::BoundaryNode(_) => "boundary-node",
+            Self::UnknownNodeType(_) => "unknown-node-type",
+            Self::PortNotFound { .. } => "port-not-found",
+            Self::PortTypeMismatch { .. } => "port-type-mismatch",
+            Self::Graph(_) => "graph",
             Self::InvalidDocument(_) => "invalid-document",
         }
     }

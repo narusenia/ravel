@@ -11,18 +11,27 @@
 
 pub mod document;
 mod error;
+pub mod network;
 mod ops;
 #[cfg(test)]
 mod tests;
 
 use crate::composition::Document;
 use crate::composition::templates::builtin_layer_template;
-use crate::id::{CompId, LayerId};
+use crate::graph::Graph;
+use crate::id::{CompId, EdgeId, LayerId, NodeId};
 use crate::registry::NodeRegistry;
 pub use document::{CompositionSettings, NetworkPath};
-use document::{add_composition, add_layer_from_template, remove_composition, remove_layer};
+use document::{
+    add_composition, add_layer_from_template, remove_composition, remove_layer, replace_network,
+    resolve_network,
+};
 pub use error::{BatchError, EditError};
-pub use ops::{CompRef, EditOp, LayerRef};
+use network::{
+    connect_edge_and_update_variadic_inputs, remove_edge_and_compact, remove_node_and_compact,
+    resolve_port,
+};
+pub use ops::{CompRef, EditOp, Endpoint, LayerRef, NodeRef, PortRef};
 use std::collections::BTreeMap;
 
 /// What an operation needs besides the document.
@@ -38,6 +47,10 @@ pub struct EditContext<'a> {
 pub enum Created {
     Composition(CompId),
     Layer(LayerId),
+    /// The node itself; the inner nodes a subnet or iterate brings are not
+    /// listed.
+    Node(NodeId),
+    Edge(EdgeId),
 }
 
 /// The result of an accepted edit.
@@ -116,6 +129,41 @@ fn resolve_layer(aliases: &Aliases, r: &LayerRef) -> Result<LayerId, EditError> 
     }
 }
 
+fn resolve_node(aliases: &Aliases, r: &NodeRef) -> Result<NodeId, EditError> {
+    match r {
+        NodeRef::Id(id) => Ok(*id),
+        NodeRef::Alias(name) => match aliases.get(name) {
+            Some(Created::Node(id)) => Ok(*id),
+            Some(_) => Err(EditError::AliasKindMismatch(name.clone())),
+            None => Err(EditError::UnknownAlias(name.clone())),
+        },
+    }
+}
+
+/// Rebuild `doc` with the network `path` addresses replaced by `f(network)`.
+fn edit_network<T>(
+    doc: &mut Document,
+    path: &NetworkPath,
+    f: impl FnOnce(Graph) -> Result<(Graph, T), EditError>,
+) -> Result<T, EditError> {
+    let composition = doc
+        .get_composition(path.comp)
+        .ok_or(EditError::CompositionNotFound(path.comp))?;
+    if composition.get_layer(path.layer).is_none() {
+        return Err(EditError::LayerNotFound {
+            comp: path.comp,
+            layer: path.layer,
+        });
+    }
+    let graph = resolve_network(doc, path)
+        .ok_or_else(|| EditError::NetworkNotFound(path.clone()))?
+        .clone();
+    let (graph, out) = f(graph)?;
+    *doc = replace_network(doc, path, graph)
+        .ok_or_else(|| EditError::NetworkNotFound(path.clone()))?;
+    Ok(out)
+}
+
 /// Run one operation against the working `doc`. May leave `doc` half-edited on
 /// `Err`; [`apply_batch`] discards it.
 fn step(
@@ -173,6 +221,76 @@ fn step(
                 *doc =
                     remove_layer(doc, comp, layer).ok_or(EditError::CompositionNotFound(comp))?;
             }
+            Ok(Vec::new())
+        }
+        EditOp::AddNode {
+            path,
+            type_key,
+            position,
+            alias,
+        } => {
+            check_alias(aliases, alias)?;
+            let id = edit_network(doc, path, |graph| {
+                let mut node = cx
+                    .registry
+                    .create_node(type_key, NodeId::next())
+                    .ok_or_else(|| EditError::UnknownNodeType(type_key.clone()))?;
+                if let Some(position) = position {
+                    node.metadata.position = *position;
+                }
+                node.metadata.z = graph
+                    .nodes()
+                    .filter(|n| !n.metadata.synthetic)
+                    .map(|n| n.metadata.z)
+                    .max()
+                    .map_or(0, |z| z + 1);
+                let id = node.id;
+                Ok((graph.add_node(node)?, id))
+            })?;
+            let made = Created::Node(id);
+            define_alias(aliases, alias, made);
+            Ok(vec![made])
+        }
+        EditOp::RemoveNode { path, node } => {
+            let node = resolve_node(aliases, node)?;
+            edit_network(doc, path, |graph| {
+                let found = graph.node(node).ok_or(EditError::NodeNotFound(node))?;
+                if crate::network::is_in_node(found) || crate::network::is_out_node(found) {
+                    return Err(EditError::BoundaryNode(node));
+                }
+                Ok((remove_node_and_compact(graph, node)?, ()))
+            })?;
+            Ok(Vec::new())
+        }
+        EditOp::Connect { path, from, to } => {
+            let from_node = resolve_node(aliases, &from.node)?;
+            let to_node = resolve_node(aliases, &to.node)?;
+            let edge = EdgeId::next();
+            edit_network(doc, path, |graph| {
+                let output = graph
+                    .node(from_node)
+                    .ok_or(EditError::NodeNotFound(from_node))?;
+                let output = resolve_port(output, &from.port, false)?;
+                let input = graph
+                    .node(to_node)
+                    .ok_or(EditError::NodeNotFound(to_node))?;
+                let input = resolve_port(input, &to.port, true)?;
+                let graph = connect_edge_and_update_variadic_inputs(
+                    graph,
+                    edge,
+                    from_node,
+                    crate::id::OutputPortIndex(output),
+                    to_node,
+                    crate::id::InputPortIndex(input),
+                )?;
+                Ok((graph, ()))
+            })?;
+            Ok(vec![Created::Edge(edge)])
+        }
+        EditOp::Disconnect { path, edge } => {
+            edit_network(doc, path, |graph| {
+                Ok((remove_edge_and_compact(graph, *edge)?, ()))
+            })?;
             Ok(Vec::new())
         }
     }

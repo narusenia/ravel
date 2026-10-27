@@ -14,6 +14,7 @@ pub mod export_dialog;
 pub mod fonts;
 pub mod keybindings;
 pub mod layout_persist;
+pub mod live_edit;
 pub mod media;
 pub mod node_editor;
 pub mod node_locale;

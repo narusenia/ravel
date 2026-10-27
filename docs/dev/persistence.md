@@ -55,6 +55,10 @@
   `crates/ravel-project/src/settings.rs`（`cache_limit_mb` /
   `cache_sim_reserve_ratio` / `cache_root_setting` / `usable_cache_budget`）に
   置く。`ravel-app` にあると CLI から呼べず、範囲のコピーが 2 つになる
+- **`[agent] live_edit_enabled` は global 層だけを読む。** project 層に書かれて
+  いても無視する（他人から届いた `.ravprj` がローカル編集ソケットを開けない
+  ように）。値は起動時に 1 回読み、実行中の切り替えは扱わない。詳細は
+  [`live-edit.md`](live-edit.md)
 - project 層は**ドキュメント差し替えの経路だけ**が入れ替える
   （`app_settings::set_project_layer`）。開いたプロジェクトの上書きが開いた
   瞬間から効き、閉じた瞬間に効かなくなる

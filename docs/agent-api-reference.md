@@ -4175,6 +4175,12 @@ mcp::ensure_allowed(&Path, &[PathBuf]) -> Result<(), CliError>
     // canonical-prefix check; CliError::OutputNotAllowed = "output-not-allowed"
     // (EXIT_USAGE). Listings reuse listing::*_json — no second enumeration.
 
+// AI-4: the app's local live-edit door (docs/dev/live-edit.md), ravel-app
+live_edit::start(&Entity<ProjectState>, &mut App) -> Option<Entity<LiveEdit>>
+    // global `[agent] live_edit_enabled` only; protocol::{parse_request,
+    // first_removal, ok_response, batch_error_response} are pure; apply() is
+    // one commit_edit_ops per request
+
 // EXPORT-7: the interactive mode, a layer over `listing` + `plan_render`
 interactive::gate(stdin_is_terminal: bool) -> Result<(), CliError>
 interactive::Prompt { select / text / confirm / note }   // stderr; testable

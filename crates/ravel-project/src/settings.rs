@@ -374,6 +374,28 @@ impl NodeEditorLayer {
     }
 }
 
+/// Settings for the agent entry points (`[agent]`).
+///
+/// **Only the global layer is consulted for `live_edit_enabled`.** The value is
+/// read from the project layer too (it is just a `SettingsLayer`), but the
+/// application ignores that one: a `.ravprj` is something a stranger can send,
+/// and a project that could switch the local edit socket on would let an
+/// untrusted file open a door into the user's session.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentLayer {
+    /// Open the local live-edit socket / pipe at startup. Default: off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_edit_enabled: Option<bool>,
+}
+
+impl AgentLayer {
+    fn merge(&self, over: &AgentLayer) -> AgentLayer {
+        AgentLayer {
+            live_edit_enabled: over.live_edit_enabled.or(self.live_edit_enabled),
+        }
+    }
+}
+
 /// A single, partial settings layer as read from one `settings.toml`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SettingsLayer {
@@ -393,6 +415,8 @@ pub struct SettingsLayer {
     pub cache: CacheLayer,
     #[serde(default)]
     pub node_editor: NodeEditorLayer,
+    #[serde(default)]
+    pub agent: AgentLayer,
 }
 
 impl SettingsLayer {
@@ -407,6 +431,7 @@ impl SettingsLayer {
             auto_save: self.auto_save.merge(&over.auto_save),
             cache: self.cache.merge(&over.cache),
             node_editor: self.node_editor.merge(&over.node_editor),
+            agent: self.agent.merge(&over.agent),
         }
     }
 
@@ -954,6 +979,23 @@ disk_enabled = false
             ResolvedSettings::resolve(&older).node_editor_edge_style,
             EdgeStyle::Bezier
         );
+    }
+
+    /// The live-edit switch is absent by default, merges like every field and
+    /// survives a TOML round trip.
+    #[test]
+    fn the_agent_section_is_optional_and_merges() {
+        let on = SettingsLayer::from_toml("[agent]\nlive_edit_enabled = true\n").unwrap();
+        assert_eq!(on.agent.live_edit_enabled, Some(true));
+        assert_eq!(
+            SettingsLayer::from_toml(&on.to_toml().unwrap()).unwrap(),
+            on
+        );
+        let older = SettingsLayer::from_toml("locale = \"ja\"\n").unwrap();
+        assert_eq!(older.agent, AgentLayer::default());
+        let off = SettingsLayer::from_toml("[agent]\nlive_edit_enabled = false\n").unwrap();
+        assert_eq!(on.merge(&off).agent.live_edit_enabled, Some(false));
+        assert_eq!(on.merge(&older).agent.live_edit_enabled, Some(true));
     }
 
     /// Both switches added for the transport/startup unit default to the

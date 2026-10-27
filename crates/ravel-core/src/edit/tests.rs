@@ -1151,3 +1151,87 @@ fn layer_ref_output_follows_the_port_it_names() {
         .outputs[0];
     assert_eq!(output.data_type, DataTypeId::GEOMETRY);
 }
+
+/// `Document::validate()` runs after every operation, so its cost is the floor
+/// of one `apply`. Not a regression test (timings are machine-bound): run it in
+/// release mode to refresh the numbers in the plan's 検証 section.
+///
+/// `cargo test --release -p ravel-core --lib edit::tests::measure -- --ignored --nocapture`
+#[test]
+#[ignore = "timing measurement"]
+fn measure_validate_and_apply_on_a_showcase_scale_document() {
+    use std::time::Instant;
+    let reg = registry();
+    let cx = cx(&reg);
+    // Showcase scale: 6 compositions, 43 layers, about 6 nodes a layer.
+    for (comps, layers_per_comp) in [(6usize, 7usize), (6, 28)] {
+        let mut ops = Vec::new();
+        for c in 0..comps {
+            ops.push(add_comp(&format!("C{c}"), alias(&format!("c{c}"))));
+            for l in 0..layers_per_comp {
+                ops.push(add_layer(
+                    CompRef::Alias(format!("c{c}")),
+                    "null",
+                    alias(&format!("l{c}_{l}")),
+                ));
+            }
+        }
+        let built = apply_batch(&Document::default(), &ops, &cx).unwrap();
+        // Paths name layers by id; add four nodes and one edge to every layer.
+        let mut fill = Vec::new();
+        let mut layers = 0;
+        for (name, made) in &built.aliases {
+            let Created::Layer(layer) = made else {
+                continue;
+            };
+            let comp = built
+                .document
+                .compositions
+                .iter()
+                .find(|(_, comp)| comp.get_layer(*layer).is_some())
+                .map(|(id, _)| *id)
+                .unwrap();
+            let path = NetworkPath::layer(comp, *layer);
+            fill.push(add_node(&path, "shape.rect", &format!("r{name}")));
+            fill.push(add_node(&path, "geometry.transform", &format!("x{name}")));
+            fill.push(add_node(&path, "style.stroke", &format!("s{name}")));
+            fill.push(add_node(&path, "constant", &format!("k{name}")));
+            fill.push(connect(
+                &path,
+                (&format!("r{name}"), PortRef::Index(0)),
+                (&format!("x{name}"), PortRef::Index(0)),
+            ));
+            layers += 1;
+        }
+        let doc = apply_batch(&built.document, &fill, &cx).unwrap().document;
+        let nodes: usize = doc
+            .compositions
+            .values()
+            .flat_map(|c| c.layers.iter())
+            .map(|l| l.network.node_count())
+            .sum();
+
+        const REPS: u32 = 200;
+        let start = Instant::now();
+        for _ in 0..REPS {
+            doc.validate().unwrap();
+        }
+        let validate = start.elapsed() / REPS;
+
+        let (comp, layer) = doc
+            .compositions
+            .iter()
+            .find_map(|(id, c)| c.layers.front().map(|l| (*id, l.id)))
+            .unwrap();
+        let op = add_node(&NetworkPath::layer(comp, layer), "constant", "k");
+        let start = Instant::now();
+        for _ in 0..REPS {
+            apply(&doc, &op, &cx).unwrap();
+        }
+        let apply_one = start.elapsed() / REPS;
+        println!(
+            "{comps} comps, {layers} layers, {nodes} nodes: validate {:?}/call, apply(AddNode) {:?}/op",
+            validate, apply_one
+        );
+    }
+}

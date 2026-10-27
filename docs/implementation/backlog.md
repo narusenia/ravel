@@ -37,7 +37,7 @@
 | STYLE-4 | 変調との結合検証と文書（`MOD-1` ✅ で依存が解けた） | `style-attributes-plan.md` |
 | FX-6 | 文書と実機確認（新ノードの追加メニュー到達） | `effects-library-plan.md` |
 | AI-3 | 新規ファイルへの組み立て（頭なし。`AI-1` ✅ で依存が解けた） | `ai-assistant-mcp-plan.md` |
-| AI-4 | アプリのローカル接続口（既定で閉じる。`AI-2d` ✅ で依存が解けた） | `ai-assistant-mcp-plan.md` |
+| AI-5 | `ravel-cli mcp --attach` と削除・上書きの確認ダイアログ（`AI-4` ✅ で依存が解けた） | `ai-assistant-mcp-plan.md` |
 | KIT-2 | gpui-component フォークの棚卸し（上流 PR は出さない。記録だけ） | `gpui-kit-migration-plan.md` |
 | KIT-4 | `ravel-dock`（2191 行）と `gpui-base` の `dock`（13251 行）の比較 | `gpui-kit-migration-plan.md` |
 | KIT-3 | 最初の Ravel コンポーネントを `gpui-base` で作り、作り方を `docs/dev/` に残す | `gpui-kit-migration-plan.md` |
@@ -1068,8 +1068,8 @@ CM-1〜5（自前の固定変換で骨格を作る単位）は #363 でマージ
 | AI-2c | ✅ #615 | 編集操作: パラメータ設定と書き込み規則の移設（`done/edit-operations-plan.md`。`local_frame` が無いアニメ済みパラメータは `AnimatedParameter`） | AI-2b |
 | AI-2d | ✅ #616 | 編集操作: バッチの 1 undo 段、ホスト側の入口、保存・読み込みの検証、`docs/dev/`（`done/edit-operations-plan.md`） | AI-2c |
 | AI-3 | 🟡 | 新規ファイルへの組み立て（頭なし。既存ファイルは書き換えない） | AI-1, AI-2d |
-| AI-4 | 🟡 | アプリのローカル接続口（既定で閉じる） | AI-2d |
-| AI-5 | ⬜ | `ravel-cli mcp --attach` と削除・上書きの確認ダイアログ | AI-1, AI-4 |
+| AI-4 | ✅ #618 | アプリのローカル接続口（既定で閉じる） | AI-2d |
+| AI-5 | 🟡 | `ravel-cli mcp --attach` と削除・上書きの確認ダイアログ | AI-1, AI-4 |
 | AI-6 | ❓ | アプリ内アシスタントパネル（段階 2 の後に再判断） | AI-5 |
 
 ### GPU バックエンド内製化（REQ-INFRA-009）

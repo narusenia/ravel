@@ -23,7 +23,6 @@ use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::animation::curve::KeyframeCurve;
 use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::animation::step::StepCurve;
-use ravel_core::edit::network::connect_edge_and_update_variadic_inputs;
 use ravel_core::edit::{EditOp, Endpoint, NodeRef, PortRef};
 use ravel_core::eval::EvalContext;
 use ravel_core::exposed::KeyRename;
@@ -65,11 +64,11 @@ use ravel_ui::command::CommandId;
 
 use ravel_core::graph::{Edge, Node, ParameterValue};
 
-use super::param_edit::edited_param_value;
-
 /// GPUI key context used by shortcuts local to the node editor.
 pub const KEY_CONTEXT: &str = "NodeEditor";
 
+/// Names the node a drop adds, so the wire of the same batch can reach it.
+const NEW_NODE_ALIAS: &str = "new";
 const CUSTOM_PATH_TYPE_KEY: &str = "shape.custom_path";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2049,84 +2048,40 @@ impl NodeEditorPanel {
         commit: bool,
         cx: &mut Context<Self>,
     ) {
-        let local_frame = self.current_local_frame(cx);
-        // The composition an output type is resolved against: `layer.ref`'s
-        // output carries what the referenced layer's port carries, and that
-        // port lives in another layer's network. Taken once, and owned, so
-        // the loop below holds no borrow of the project.
-        let comp = self.context.as_ref().and_then(|context| {
-            self.project
-                .as_ref()?
-                .read(cx)
-                .document()
-                .get_composition(context.comp)
-                .cloned()
-        });
-        let mut graph = self.graph.clone();
-        let mut touched = false;
-        for node_id in node_ids {
-            let Some(node) = graph.node(*node_id) else {
-                continue;
-            };
-            let range = self.registry.param_range(&node.type_key, key);
-            let param_value = {
-                let Some(param) = node.parameters.iter().find(|p| p.key == key) else {
-                    continue;
-                };
-                let Some(value) = edited_param_value(&param.value, value, range, local_frame)
-                else {
-                    continue;
-                };
-                value
-            };
-            // One command writes the edit and everything it forces —
-            // `attribute.set`'s `value` is reshaped when its `type` changes —
-            // so the Document snapshot stays a single undo step and the node
-            // is never committed half-converted.
-            let changed = ravel_core::graph::Parameter {
-                key: key.to_string(),
-                value: param_value,
-            };
-            let mut updates =
-                ravel_core::registry::builtin::dependent_param_updates(node, &changed);
-            // And the output port types the edit decides — `layer.ref`'s
-            // output follows the port it references — in the same call, so
-            // the value, its parameter ports and its output ports are one
-            // undo step. An unresolvable reference retypes nothing.
-            let retypes = ravel_core::registry::builtin::dependent_port_updates(
-                node,
-                &changed,
-                comp.as_deref(),
-            );
-            updates.insert(0, changed);
-            let next = match graph
-                .clone()
-                .set_params_and_output_types(*node_id, &updates, &retypes)
-            {
-                Ok(next) => next,
-                Err(err) => {
-                    // Dropping the edit silently would look like the panel
-                    // ignored the user; the surrounding loop still applies the
-                    // other selected nodes' edits.
-                    tracing::warn!(node = ?node_id, %key, %err, "parameter edit not applied");
-                    continue;
-                }
-            };
-            touched = true;
-            graph = next;
-        }
-        if !touched {
+        let (Some(project), Some(path)) = (self.project.clone(), self.context.clone()) else {
             return;
+        };
+        let ops: Vec<_> = node_ids
+            .iter()
+            .map(|node| EditOp::SetParameter {
+                path: path.clone(),
+                node: NodeRef::Id(*node),
+                key: key.to_string(),
+                value: value.clone(),
+            })
+            .collect();
+        let local_frame = self.current_local_frame(cx);
+        // A node that lacks the key, or whose edit is refused, is skipped; the
+        // other selected nodes still apply, all in one document.
+        let refused = project.update(cx, |project, cx| {
+            project.edit_ops_skipping_refused(
+                &ops,
+                local_frame,
+                InvalidationHint::Params(node_ids.to_vec()),
+                commit,
+                cx,
+            )
+        });
+        for refusal in &refused {
+            // Dropping the edit silently would look like the panel ignored
+            // the user.
+            tracing::warn!(node = ?node_ids[refusal.index], %key, err = %refusal.error, "parameter edit not applied");
         }
-
-        self.commit_to_document(
-            graph,
-            None,
-            None,
-            InvalidationHint::Params(node_ids.to_vec()),
-            commit,
-            cx,
-        );
+        let Some(graph) = resolve_network(project.read(cx).document(), &path).cloned() else {
+            return;
+        };
+        self.graph = graph;
+        self.refresh_graph_caches(cx);
         cx.notify();
     }
 
@@ -3245,52 +3200,75 @@ impl NodeEditorPanel {
             cx.notify();
             return;
         }
-        let Some(mut node) = self.registry.create_node(type_key, NodeId::next()) else {
+        let Some(probe) = self.registry.create_node(type_key, NodeId::next()) else {
             cx.notify();
             return;
         };
-        self.apply_default_shape_center(&mut node, cx);
         let (fx, fy) = self.viewport.screen_to_flow(local.0, local.1);
-        node.metadata.position = (fx, fy);
-        node.metadata.z = Self::next_z(&self.graph);
-        let compatible_port = first_compatible_port(&self.graph, &from, &node);
-        let new_node_id = node.id;
-        let Ok(mut graph) = self.graph.clone().add_node(node) else {
-            cx.notify();
-            return;
+        let params = self.new_node_params(type_key, cx);
+        let add = |path: &NetworkPath| EditOp::AddNode {
+            path: path.clone(),
+            type_key: type_key.to_string(),
+            position: Some((fx, fy)),
+            params: params.clone(),
+            alias: Some(NEW_NODE_ALIAS.to_string()),
         };
-
-        if let Some(port_index) = compatible_port {
-            let (source, source_port, target, target_port) = if from.is_output {
-                (
-                    from.node_id,
-                    OutputPortIndex(from.port_index),
-                    new_node_id,
-                    InputPortIndex(port_index),
-                )
-            } else {
-                (
-                    new_node_id,
-                    OutputPortIndex(port_index),
-                    from.node_id,
-                    InputPortIndex(from.port_index),
-                )
-            };
-            if let Ok(connected) = connect_edge_and_update_variadic_inputs(
-                graph.clone(),
-                EdgeId::next(),
-                source,
-                source_port,
-                target,
-                target_port,
-            ) {
-                graph = connected;
+        let new_node = || NodeRef::Alias(NEW_NODE_ALIAS.to_string());
+        let existing = |port: u32| Endpoint {
+            node: NodeRef::Id(from.node_id),
+            port: PortRef::Index(port),
+        };
+        let fresh = |port: u32| Endpoint {
+            node: new_node(),
+            port: PortRef::Index(port),
+        };
+        let connect = first_compatible_port(&self.graph, &from, &probe).map(|port| {
+            move |path: &NetworkPath| {
+                let (from_end, to_end) = if from.is_output {
+                    (existing(from.port_index), fresh(port))
+                } else {
+                    (fresh(port), existing(from.port_index))
+                };
+                EditOp::Connect {
+                    path: path.clone(),
+                    from: from_end,
+                    to: to_end,
+                }
             }
+        });
+        // The node and its first wire are one undo step. A wire the graph
+        // refuses must not lose the node, so it is retried without the wire.
+        let placed = connect
+            .is_some_and(|connect| self.network_edit(|path| vec![add(path), connect(path)], cx))
+            || self.network_edit(|path| vec![add(path)], cx);
+        if placed {
+            self.record_recent_type(type_key);
         }
-
-        self.commit_graph(graph, None, cx);
-        self.record_recent_type(type_key);
         cx.notify();
+    }
+
+    /// The parameter writes a node of `type_key` starts with: new shape
+    /// generators begin at the composition center instead of the registry
+    /// default `(0, 0)`. Registry templates and existing documents keep
+    /// their values.
+    fn new_node_params(
+        &self,
+        type_key: &str,
+        cx: &Context<Self>,
+    ) -> std::collections::BTreeMap<String, ravel_core::edit::ParamInput> {
+        let mut params = std::collections::BTreeMap::new();
+        let has_center = type_key.starts_with("shape.")
+            && self
+                .registry
+                .create_node(type_key, NodeId::next())
+                .is_some_and(|node| node.parameters.iter().any(|p| p.key == "center"));
+        if let (true, Some((x, y))) = (has_center, self.comp_center(cx)) {
+            params.insert(
+                "center".to_string(),
+                ravel_core::edit::ParamInput::Vector(vec![x, y]),
+            );
+        }
+        params
     }
 
     fn build_breadcrumb_bar(&self, cx: &mut Context<Self>) -> Div {
@@ -4070,6 +4048,7 @@ impl Render for NodeEditorPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ravel_core::edit::network::connect_edge_and_update_variadic_inputs;
     // `use super::*` re-exports gpui's `test` attribute macro (via the
     // panel's `use gpui::*`); shadow it back to the built-in one so
     // `#[gpui::test]`'s generated `#[test]` resolves correctly.

@@ -297,12 +297,14 @@ fn edit_ops_round_trip_through_json() {
             path: NetworkPath::layer(CompId::new(7), LayerId::new(3)).entered(NodeId::new(11)),
             type_key: "geometry.transform".into(),
             position: Some((10.0, -4.5)),
+            params: Default::default(),
             alias: alias("xf"),
         },
         EditOp::AddNode {
             path: NetworkPath::layer(CompId::new(7), LayerId::new(3)),
             type_key: "constant".into(),
             position: None,
+            params: Default::default(),
             alias: None,
         },
         EditOp::Connect {
@@ -369,6 +371,7 @@ fn add_node(path: &NetworkPath, type_key: &str, as_: &str) -> EditOp {
         path: path.clone(),
         type_key: type_key.to_string(),
         position: None,
+        params: Default::default(),
         alias: alias(as_),
     }
 }
@@ -788,6 +791,7 @@ fn fill_body_is_add_node_disconnect_connect() {
             path: body.clone(),
             type_key: "geometry.transform".into(),
             position: Some((180.0, 0.0)),
+            params: Default::default(),
             alias: alias("xf"),
         },
         EditOp::Connect {
@@ -818,4 +822,332 @@ fn fill_body_is_add_node_disconnect_connect() {
     assert!(wires.contains(&(xf, out_id)));
     // The pass-through wire is gone.
     assert!(!wires.contains(&(in_id, out_id)));
+}
+
+// ----- parameter writes -------------------------------------------------------
+
+use crate::animation::channel::{AnimationChannel, ChannelSource};
+use crate::animation::curve::KeyframeCurve;
+use crate::animation::interpolation::Interpolation;
+use crate::graph::{Parameter, ParameterValue};
+
+fn set_param(path: &NetworkPath, node: NodeRef, key: &str, value: ParamInput) -> EditOp {
+    EditOp::SetParameter {
+        path: path.clone(),
+        node,
+        key: key.to_string(),
+        value,
+    }
+}
+
+fn param_of(doc: &Document, path: &NetworkPath, node: NodeId, key: &str) -> ParameterValue {
+    network_of(doc, path)
+        .node(node)
+        .unwrap()
+        .parameters
+        .iter()
+        .find(|p| p.key == key)
+        .unwrap_or_else(|| panic!("no parameter {key}"))
+        .value
+        .clone()
+}
+
+/// An empty network holding one node of `type_key`, aliased `n`.
+fn doc_with_node(type_key: &str) -> (Document, NetworkPath, NodeId) {
+    let reg = registry();
+    let (doc, path) = empty_network();
+    let applied = apply(&doc, &add_node(&path, type_key, "n"), &cx(&reg)).unwrap();
+    let node = created_node(&applied, "n");
+    (applied.document, path, node)
+}
+
+/// The same document with `key` of `node` replaced by `value`, bypassing the
+/// edit layer: a way to put an animated parameter in place.
+fn with_param_value(
+    doc: &Document,
+    path: &NetworkPath,
+    node: NodeId,
+    key: &str,
+    value: ParameterValue,
+) -> Document {
+    let graph = network_of(doc, path)
+        .clone()
+        .set_params(
+            node,
+            &[Parameter {
+                key: key.to_string(),
+                value,
+            }],
+        )
+        .unwrap();
+    document::replace_network(doc, path, graph).unwrap()
+}
+
+fn keyed_channel() -> AnimationChannel {
+    let mut curve = KeyframeCurve::new();
+    curve.insert(0, 1.0, Interpolation::Linear);
+    curve.insert(10, 5.0, Interpolation::Linear);
+    AnimationChannel::keyframes(curve)
+}
+
+#[test]
+fn param_input_round_trips_through_json() {
+    use crate::param_curve::CurveParam;
+    use crate::param_ramp::RampParam;
+    use crate::types::Color;
+    let inputs = vec![
+        ParamInput::Float(1.0),
+        ParamInput::Int(1),
+        ParamInput::Bool(true),
+        ParamInput::String("point".into()),
+        ParamInput::Color {
+            r: 0.25,
+            g: 0.5,
+            b: 0.75,
+            a: 1.0,
+        },
+        ParamInput::Vector(vec![1.0, -2.0]),
+        ParamInput::Curve(CurveParam::linear([(0.0, 0.0), (0.5, 0.9), (1.0, 1.0)])),
+        ParamInput::Ramp(RampParam::linear([
+            (0.0, Color::WHITE),
+            (0.5, Color::BLACK),
+        ])),
+    ];
+    for input in &inputs {
+        let json = serde_json::to_string(input).unwrap();
+        let back: ParamInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(&back, input, "{json}");
+    }
+    // An int and a float stay apart on the wire.
+    assert_eq!(
+        serde_json::to_string(&ParamInput::Int(1)).unwrap(),
+        r#"{"type":"int","value":1}"#
+    );
+    let op = set_param(
+        &NetworkPath::layer(CompId::new(1), LayerId::new(2)),
+        NodeRef::Alias("n".into()),
+        "width",
+        ParamInput::Float(2.0),
+    );
+    let json = serde_json::to_string(&op).unwrap();
+    assert_eq!(serde_json::from_str::<EditOp>(&json).unwrap(), op);
+    assert!(!op.is_destructive());
+}
+
+#[test]
+fn add_node_params_round_trip_and_apply() {
+    let reg = registry();
+    let (doc, path) = empty_network();
+    let mut op = add_node(&path, "style.stroke", "s");
+    let EditOp::AddNode { params, .. } = &mut op else {
+        unreachable!()
+    };
+    params.insert("width".into(), ParamInput::Float(3.0));
+    let json = serde_json::to_string(&op).unwrap();
+    assert_eq!(serde_json::from_str::<EditOp>(&json).unwrap(), op);
+
+    let applied = apply(&doc, &op, &cx(&reg)).unwrap();
+    let node = created_node(&applied, "s");
+    assert!(
+        matches!(
+            param_of(&applied.document, &path, node, "width"),
+            ParameterValue::Float(3.0)
+        ) || matches!(
+            param_of(&applied.document, &path, node, "width"),
+            ParameterValue::Channel(AnimationChannel { source: ChannelSource::Constant(v), .. }) if v == 3.0
+        )
+    );
+
+    // An unknown key refuses the whole node: nothing is added.
+    let EditOp::AddNode { params, .. } = &mut op else {
+        unreachable!()
+    };
+    params.insert("no_such_key".into(), ParamInput::Float(1.0));
+    let before = doc.clone();
+    let err = apply(&doc, &op, &cx(&reg)).unwrap_err();
+    assert_eq!(err.code(), "unknown-parameter");
+    assert_eq!(doc, before);
+}
+
+#[test]
+fn set_parameter_clamps_to_the_registry_range() {
+    let reg = registry();
+    let (doc, path, node) = doc_with_node("style.stroke");
+    let range = reg.param_range("style.stroke", "width").unwrap().clone();
+    assert!(*range.hard.end() < 1e6, "the test needs a bounded range");
+    for (written, expected) in [
+        (*range.hard.end() + 5000.0, *range.hard.end()),
+        (*range.hard.start() - 3.0, *range.hard.start()),
+    ] {
+        let op = set_param(
+            &path,
+            NodeRef::Id(node),
+            "width",
+            ParamInput::Float(written),
+        );
+        let applied = apply(&doc, &op, &cx(&reg)).unwrap();
+        match param_of(&applied.document, &path, node, "width") {
+            ParameterValue::Float(v) => assert_eq!(v, expected),
+            ParameterValue::Channel(AnimationChannel {
+                source: ChannelSource::Constant(v),
+                ..
+            }) => assert_eq!(v, expected),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_refused_parameter_write_leaves_the_document_alone() {
+    let reg = registry();
+    let (doc, path, node) = doc_with_node("style.stroke");
+    let animated = with_param_value(
+        &doc,
+        &path,
+        node,
+        "width",
+        ParameterValue::Channel(keyed_channel()),
+    );
+    let missing = NodeId::next();
+    let cases: Vec<(&str, Document, EditOp)> = vec![
+        (
+            "unknown-parameter",
+            doc.clone(),
+            set_param(&path, NodeRef::Id(node), "nope", ParamInput::Float(1.0)),
+        ),
+        (
+            "parameter-type-mismatch",
+            doc.clone(),
+            set_param(&path, NodeRef::Id(node), "width", ParamInput::Bool(true)),
+        ),
+        (
+            "parameter-type-mismatch",
+            doc.clone(),
+            set_param(
+                &path,
+                NodeRef::Id(node),
+                "width",
+                ParamInput::String("x".into()),
+            ),
+        ),
+        (
+            "node-not-found",
+            doc.clone(),
+            set_param(&path, NodeRef::Id(missing), "width", ParamInput::Float(1.0)),
+        ),
+        (
+            "unknown-alias",
+            doc.clone(),
+            set_param(
+                &path,
+                NodeRef::Alias("ghost".into()),
+                "width",
+                ParamInput::Float(1.0),
+            ),
+        ),
+        (
+            "animated-parameter",
+            animated.clone(),
+            set_param(&path, NodeRef::Id(node), "width", ParamInput::Float(2.0)),
+        ),
+    ];
+    assert!(!cases.is_empty());
+    for (code, document, op) in &cases {
+        let before = document.clone();
+        let err = apply(document, op, &cx(&reg)).unwrap_err();
+        assert_eq!(err.code(), *code, "{op:?}");
+        assert_eq!(document, &before);
+    }
+}
+
+#[test]
+fn an_animated_parameter_gets_a_key_at_the_local_frame() {
+    let reg = registry();
+    let (doc, path, node) = doc_with_node("style.stroke");
+    let animated = with_param_value(
+        &doc,
+        &path,
+        node,
+        "width",
+        ParameterValue::Channel(keyed_channel()),
+    );
+    let at_frame = EditContext {
+        registry: &reg,
+        local_frame: Some(5),
+    };
+    let op = set_param(&path, NodeRef::Id(node), "width", ParamInput::Float(9.0));
+    let applied = apply(&animated, &op, &at_frame).unwrap();
+    let ParameterValue::Channel(channel) = param_of(&applied.document, &path, node, "width") else {
+        panic!("the parameter stays a channel");
+    };
+    let ChannelSource::Keyframes(curve) = channel.source else {
+        panic!("the animation survives");
+    };
+    assert_eq!(curve.len(), 3, "a key was added at frame 5");
+    assert_eq!(curve.sample(5.0), 9.0);
+    assert_eq!(curve.sample(0.0), 1.0, "the existing keys are untouched");
+    assert_eq!(curve.sample(10.0), 5.0, "the existing keys are untouched");
+}
+
+#[test]
+fn attribute_set_type_reshapes_the_value() {
+    let reg = registry();
+    let (doc, path, node) = doc_with_node("attribute.set");
+    let before_arity = param_of(&doc, &path, node, "value");
+    assert!(matches!(before_arity, ParameterValue::Channel(_)));
+    let op = set_param(
+        &path,
+        NodeRef::Id(node),
+        "type",
+        ParamInput::String("vec3".into()),
+    );
+    let applied = apply(&doc, &op, &cx(&reg)).unwrap();
+    assert!(
+        matches!(
+            param_of(&applied.document, &path, node, "value"),
+            ParameterValue::Channel3(_)
+        ),
+        "`value` follows `type` in the same document"
+    );
+}
+
+#[test]
+fn layer_ref_output_follows_the_port_it_names() {
+    use crate::composition::Layer;
+    use crate::id::DataTypeId;
+    let reg = registry();
+    // Layer A exposes a geometry port on its `net.out`; layer B will hold the
+    // reference.
+    let a = LayerId::new(900);
+    let b = LayerId::new(901);
+    let out = crate::graph::Node::new(NodeId::next(), crate::network::NET_OUT_TYPE_KEY)
+        .with_input("geo", &[DataTypeId::GEOMETRY]);
+    let comp_id = CompId::next();
+    let comp = Composition::new(comp_id, "C", (16, 16), FrameRate::new(30, 1), 100)
+        .add_layer(Layer::new(a, "A", Graph::new().add_node(out).unwrap()))
+        .add_layer(Layer::new(b, "B", Graph::new()));
+    let doc = Document::default().with_composition(comp);
+    let path = NetworkPath::layer(comp_id, b);
+    let ops = vec![
+        add_node(&path, "layer.ref", "r"),
+        set_param(
+            &path,
+            node_ref("r"),
+            "layer",
+            ParamInput::String("900".into()),
+        ),
+        set_param(
+            &path,
+            node_ref("r"),
+            "port",
+            ParamInput::String("geo".into()),
+        ),
+    ];
+    let applied = apply_batch(&doc, &ops, &cx(&reg)).unwrap();
+    let node = created_node(&applied, "r");
+    let output = &network_of(&applied.document, &path)
+        .node(node)
+        .unwrap()
+        .outputs[0];
+    assert_eq!(output.data_type, DataTypeId::GEOMETRY);
 }

@@ -13,6 +13,7 @@ pub mod document;
 mod error;
 pub mod network;
 mod ops;
+pub mod param;
 #[cfg(test)]
 mod tests;
 
@@ -31,14 +32,15 @@ use network::{
     connect_edge_and_update_variadic_inputs, remove_edge_and_compact, remove_node_and_compact,
     resolve_port,
 };
-pub use ops::{CompRef, EditOp, Endpoint, LayerRef, NodeRef, PortRef};
+pub use ops::{CompRef, EditOp, Endpoint, LayerRef, NodeRef, ParamInput, PortRef};
+use param::set_parameter;
 use std::collections::BTreeMap;
 
 /// What an operation needs besides the document.
 pub struct EditContext<'a> {
     pub registry: &'a NodeRegistry,
-    /// The frame animated parameters are keyed at. Unused until parameter
-    /// writes exist.
+    /// The layer-local frame animated parameters are keyed at. `None` makes a
+    /// write to an animated parameter an error.
     pub local_frame: Option<u64>,
 }
 
@@ -227,9 +229,11 @@ fn step(
             path,
             type_key,
             position,
+            params,
             alias,
         } => {
             check_alias(aliases, alias)?;
+            let comp = doc.get_composition(path.comp).cloned();
             let id = edit_network(doc, path, |graph| {
                 let mut node = cx
                     .registry
@@ -245,7 +249,11 @@ fn step(
                     .max()
                     .map_or(0, |z| z + 1);
                 let id = node.id;
-                Ok((graph.add_node(node)?, id))
+                let mut graph = graph.add_node(node)?;
+                for (key, value) in params {
+                    graph = set_parameter(graph, id, key, value, cx, comp.as_deref())?;
+                }
+                Ok((graph, id))
             })?;
             let made = Created::Node(id);
             define_alias(aliases, alias, made);
@@ -286,6 +294,20 @@ fn step(
                 Ok((graph, ()))
             })?;
             Ok(vec![Created::Edge(edge)])
+        }
+        EditOp::SetParameter {
+            path,
+            node,
+            key,
+            value,
+        } => {
+            let node = resolve_node(aliases, node)?;
+            let comp = doc.get_composition(path.comp).cloned();
+            edit_network(doc, path, |graph| {
+                let graph = set_parameter(graph, node, key, value, cx, comp.as_deref())?;
+                Ok((graph, ()))
+            })?;
+            Ok(Vec::new())
         }
         EditOp::Disconnect { path, edge } => {
             edit_network(doc, path, |graph| {

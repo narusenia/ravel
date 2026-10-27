@@ -290,30 +290,10 @@ pub struct DrivenParam {
     pub value: Option<String>,
 }
 
-/// The value half of a [`PropertyField`], used in change notifications.
-#[derive(Clone, Debug, PartialEq)]
-pub enum PropertyValue {
-    Float(f32),
-    Int(i32),
-    Bool(bool),
-    String(String),
-    Color {
-        r: f32,
-        g: f32,
-        b: f32,
-        a: f32,
-    },
-    Vector(Vec<f32>),
-    /// A whole edited curve. Curve edits replace the control-point set
-    /// rather than a scalar, so the gesture granularity is the same as a
-    /// scrub's: live edits apply uncommitted and the gesture's last value
-    /// records one undo step.
-    Curve(CurveParam),
-    /// A whole edited ramp, on the same terms as [`PropertyValue::Curve`]:
-    /// a stop move, an add, a remove, a colour change or an interpolation
-    /// switch all replace the stop set rather than one scalar.
-    Ramp(RampParam),
-}
+/// The value half of a [`PropertyField`], used in change notifications. The
+/// edit layer's input type, so the Properties panel and a headless caller
+/// write parameters through the same rules.
+pub use ravel_core::edit::ParamInput as PropertyValue;
 
 #[cfg(test)]
 mod tests {

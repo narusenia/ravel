@@ -238,6 +238,7 @@ GPU コンテキストを作る前に走る。したがって**アダプタの�
 
 ## 関連
 
+- エージェントから同じ機能を使う（MCP）: [mcp-cli.md](mcp-cli.md)
 - 何が今日実際に動くか: [`../ui-impl-status.md`](../ui-impl-status.md)
 - GUI 側の書き出し（ダイアログとレンダーキューパネル）の設計意図:
   [`../specifications/ui/render-queue.md`](../specifications/ui/render-queue.md)

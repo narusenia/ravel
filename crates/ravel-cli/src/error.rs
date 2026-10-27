@@ -140,6 +140,10 @@ pub enum CliError {
     #[error("the interactive mode needs a terminal on standard input")]
     NotInteractive,
 
+    /// `ravel-cli mcp`: the output directory is not under any `--allow-dir`.
+    #[error("the output directory {path} is not under an allowed directory")]
+    OutputNotAllowed { path: PathBuf },
+
     #[error("no usable GPU adapter: {0}")]
     Gpu(String),
 
@@ -164,7 +168,8 @@ impl CliError {
             | Self::BadRange { .. }
             | Self::EmptyRange { .. }
             | Self::OutputName(_)
-            | Self::NotInteractive => EXIT_USAGE,
+            | Self::NotInteractive
+            | Self::OutputNotAllowed { .. } => EXIT_USAGE,
             Self::CodecUnavailable { .. } | Self::CodecNoWriter { .. } => EXIT_CODEC,
             Self::OutputExists { .. } => EXIT_OUTPUT_EXISTS,
             Self::Eval(_) => EXIT_EVAL,
@@ -196,6 +201,7 @@ impl CliError {
             Self::Encode(_) => "encode-failed",
             Self::Cancelled => "cancelled",
             Self::NotInteractive => "not-interactive",
+            Self::OutputNotAllowed { .. } => "output-not-allowed",
             Self::Gpu(_) => "no-gpu",
             Self::InterruptHandler(_) => "interrupt-handler",
             Self::Internal(_) => "internal",
@@ -256,6 +262,9 @@ impl CliError {
             Self::Encode(detail) => t!("cli.error.encode").replace("{detail}", detail),
             Self::Cancelled => t!("cli.error.cancelled"),
             Self::NotInteractive => t!("cli.error.not_interactive"),
+            Self::OutputNotAllowed { path } => {
+                t!("cli.error.output_not_allowed").replace("{path}", &path.display().to_string())
+            }
             Self::Gpu(detail) => t!("cli.error.gpu").replace("{detail}", detail),
             Self::InterruptHandler(detail) => {
                 t!("cli.error.interrupt_handler").replace("{detail}", detail)
@@ -353,6 +362,9 @@ mod tests {
         assert_eq!(CliError::Cancelled.code(), EXIT_CANCELLED);
         assert_eq!(CliError::NotInteractive.code(), EXIT_USAGE);
         assert_eq!(CliError::NotInteractive.id(), "not-interactive");
+        let refused = CliError::OutputNotAllowed { path: "x".into() };
+        assert_eq!(refused.code(), EXIT_USAGE);
+        assert_eq!(refused.id(), "output-not-allowed");
         assert_eq!(CliError::Internal("x".into()).code(), EXIT_INTERNAL);
     }
 

@@ -4113,6 +4113,7 @@ ravel-cli list params <project.ravprj>     // ExposedListing's own JSON
 ravel-cli list codecs                      // every target, with route or reason
 ravel-cli interactive <project.ravprj>     // asks, then renders (needs a TTY
                                            // on **stdin**; refuses otherwise)
+ravel-cli mcp [--allow-dir DIR]…           // MCP server on stdio (AI-1)
 ```
 
 ```rust
@@ -4163,6 +4164,16 @@ audio::{OUTPUT_SAMPLE_RATE = 48_000, OUTPUT_CHANNELS = 2}
 execute::CancelFlag  // .request() / .is_requested(); safe in a signal handler
 report::Reporter { note / update / success / failure }  // bar, JSON, quiet
 error::CliError.code() / .id() / .localized()
+
+// AI-1: `ravel-cli mcp` (docs/dev/mcp-cli.md)
+mcp::Server::new(&[PathBuf]) / ::with_renderer(&[PathBuf], Box<Renderer>)
+    .handle_line(&str) -> Option<serde_json::Value>   // one request → ≤1 reply,
+                                                      // no I/O; tests inject a
+                                                      // GPU-less renderer
+mcp::serve(&Server, impl BufRead, impl Write) / mcp::run(&[PathBuf]) -> u8
+mcp::ensure_allowed(&Path, &[PathBuf]) -> Result<(), CliError>
+    // canonical-prefix check; CliError::OutputNotAllowed = "output-not-allowed"
+    // (EXIT_USAGE). Listings reuse listing::*_json — no second enumeration.
 
 // EXPORT-7: the interactive mode, a layer over `listing` + `plan_render`
 interactive::gate(stdin_is_terminal: bool) -> Result<(), CliError>

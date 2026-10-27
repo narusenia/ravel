@@ -101,7 +101,7 @@ div().key_context(KEY_CONTEXT)
 - A command that edits the document goes through `ravel_core::edit`
   (`ProjectState::commit_edit_ops`), not through its own `Graph` surgery: one
   path means typed errors, all-or-nothing batches and exactly one undo step per
-  batch, which the agent entry point (MCP) then shares with the UI.
+  batch, which the planned agent entry point (MCP) is to share with the UI.
 - Panel-specific shortcuts are key-context-scoped `KeyBinding`s (see
   `NodeEditor`), not raw `on_key_down` modifier checks. Raw key handling is
   reserved for genuinely low-level input (text entry, transient drag modes).

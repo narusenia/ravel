@@ -11,7 +11,8 @@ undo 1 段**が操作ごとに実装し直さずに手に入る（計画:
 
 - [ ] `crates/ravel-core/src/edit/ops.rs` の `EditOp` に variant を追加。JSON の形は
       `#[serde(tag = "op", rename_all = "snake_case")]` が決める。対象の参照は
-      `CompRef` / `LayerRef` / `NodeRef` / `PortRef`（数 = id、文字列 = エイリアス）、
+      `CompRef` / `LayerRef` / `NodeRef`（数 = id、文字列 = エイリアス）、ポートは
+      `PortRef`（数 = ポート番号、文字列 = ポート名）、
       ネットワーク内の操作は `path: NetworkPath` を取る
 - [ ] 何かを作る操作なら `#[serde(rename = "as", default, skip_serializing_if =
       "Option::is_none")] alias: Option<String>` を持たせる（既存の
@@ -25,7 +26,8 @@ undo 1 段**が操作ごとに実装し直さずに手に入る（計画:
       `edit::network` / `edit::param` / `edit::document` の既存関数を呼ぶ
       （UI からも使う関数をここに複製しない）
 - [ ] `EditOp::is_destructive()` に腕を追加（何かを消すなら `true`。分類だけで、
-      確認を取るのは呼び出し側）
+      確認を取るのは呼び出し側）。`edit/tests.rs` の `only_removals_are_destructive`
+      に新 variant を足す（網羅 `match` は腕の有無しか守らず、分類の誤りは見ない）
 - [ ] 失敗の種類が既存の `EditError` に無ければ `edit/error.rs` に variant を足し、
       **`code()` にも**足す（`code()` は翻訳しない安定した識別子。変えない）
 - [ ] `edit/tests.rs`: 失敗の全パターンを `refused_operations_leave_the_document_unchanged`

@@ -1163,7 +1163,8 @@ fn measure_validate_and_apply_on_a_showcase_scale_document() {
     use std::time::Instant;
     let reg = registry();
     let cx = cx(&reg);
-    // Showcase scale: 6 compositions, 43 layers, about 6 nodes a layer.
+    // Showcase scale (6 compositions, 43 layers, about 6 nodes a layer): 42
+    // layers here, then four times that.
     for (comps, layers_per_comp) in [(6usize, 7usize), (6, 28)] {
         let mut ops = Vec::new();
         for c in 0..comps {

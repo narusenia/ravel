@@ -8234,9 +8234,8 @@ mod tests {
         });
     }
 
-    /// One batch is one undo step: a composition, a layer in
-    /// it through an alias, and the layer's own nodes arrive as one step that
-    /// one `undo` takes back whole.
+    /// One batch is one undo step: a composition and a layer in it, reached
+    /// through an alias, arrive as one step that one `undo` takes back whole.
     #[gpui::test]
     fn a_multi_op_edit_batch_is_one_undo_step(cx: &mut TestAppContext) {
         use ravel_core::edit::{CompRef, CompositionSettings, EditOp};

@@ -59,7 +59,7 @@ fn a_document_built_from_edit_ops_saves_loads_and_validates() {
         };
         let path = NetworkPath::layer(comp, layer);
         let node = |key: &str, name: &str, params: BTreeMap<String, ParamInput>| EditOp::AddNode {
-            path: path.clone(),
+            path: path.clone().into(),
             type_key: key.into(),
             position: None,
             params,
@@ -77,7 +77,7 @@ fn a_document_built_from_edit_ops_saves_loads_and_validates() {
             BTreeMap::from([("width".into(), ParamInput::Float(2.0))]),
         ));
         ops.push(EditOp::Connect {
-            path: path.clone(),
+            path: path.clone().into(),
             from: endpoint(&format!("rect{i}"), 0),
             to: endpoint(&format!("xf{i}"), 0),
         });

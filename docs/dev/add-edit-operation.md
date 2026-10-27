@@ -13,7 +13,8 @@ undo 1 段**が操作ごとに実装し直さずに手に入る（計画:
       `#[serde(tag = "op", rename_all = "snake_case")]` が決める。対象の参照は
       `CompRef` / `LayerRef` / `NodeRef`（数 = id、文字列 = エイリアス）、ポートは
       `PortRef`（数 = ポート番号、文字列 = ポート名）、
-      ネットワーク内の操作は `path: NetworkPath` を取る
+      ネットワーク内の操作は `path: NetworkRef` を取る（`comp` / `layer` / `subnets` が
+      id でもエイリアスでもよい。`NetworkPath` からは `.into()`）
 - [ ] 何かを作る操作なら `#[serde(rename = "as", default, skip_serializing_if =
       "Option::is_none")] alias: Option<String>` を持たせる（既存の
       `AddComposition` / `AddLayer` / `AddNode` と同じ属性）。新しい種類のものを
@@ -58,9 +59,9 @@ undo 1 段**が操作ごとに実装し直さずに手に入る（計画:
   `edit_ops_skipping_refused` に `commit = false`、終わりの 1 回だけ `commit = true`。
   それ以外のドラッグ（ノードの移動など）は `apply_document` で、確定時に 1 段
   （[`ux.md`](../../.agents/rules/ux.md) の「1 操作 = undo 1 段」）
-- パスは id で層を指すので、**同じバッチ内で作った層のネットワークは `NetworkPath`
-  で指せない**（エイリアスは `CompRef` / `LayerRef` / `NodeRef` にだけ効く）。
-  層の作成とその中身の編集は別のバッチになる
+- ネットワークの指定は `NetworkRef` なので、**同じバッチ内で作った層のネットワークも
+  エイリアスで指せる**（`{"comp": "c", "layer": "l"}`。数の `path` もそのまま読める）。
+  適用時に解決済みの `NetworkPath` になる
 - 文書を変えない `Ok` はありうる（同じ値の書き込みなど）。`commit_edit_ops` は
   結果が元と等しければ commit しない。段を作りたい呼び出し側（スクラブの確定）は
   `edit_ops_skipping_refused` の `commit` を使う

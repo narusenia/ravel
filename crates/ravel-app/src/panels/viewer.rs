@@ -5364,7 +5364,7 @@ fn add_wired_node(
     let graph = ravel_ui::document::resolve_network(doc, path)?;
     let alias = "drawn".to_string();
     let mut ops = vec![EditOp::AddNode {
-        path: path.clone(),
+        path: path.clone().into(),
         type_key: type_key.to_string(),
         position: Some(drawn_node_position(graph, target)),
         params,
@@ -5372,7 +5372,7 @@ fn add_wired_node(
     }];
     if let Some((target, target_port)) = target {
         ops.push(EditOp::Connect {
-            path: path.clone(),
+            path: path.clone().into(),
             from: Endpoint {
                 node: NodeRef::Alias(alias),
                 port: PortRef::Name("output".to_string()),

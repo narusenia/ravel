@@ -401,7 +401,7 @@ mod tests {
         };
         let path = NetworkPath::layer(comp, layer);
         let add = [EditOp::AddNode {
-            path: path.clone(),
+            path: path.clone().into(),
             type_key: "style.stroke".into(),
             position: None,
             params: Default::default(),
@@ -437,7 +437,7 @@ mod tests {
         });
         let before = project.read_with(cx, |p, _| p.document().clone());
         let ops = [EditOp::SetParameter {
-            path,
+            path: path.into(),
             node: NodeRef::Id(node),
             key: "width".into(),
             value: ParamInput::Float(4.0),

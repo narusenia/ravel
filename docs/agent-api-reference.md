@@ -702,11 +702,14 @@ transforms it is built from (`NetworkPath`, `CompositionSettings`,
 
 ```rust
 // Operations so far: AddComposition / RemoveComposition / AddLayer / RemoveLayer,
-// and in a network (`path: NetworkPath`, subnets included): AddNode / RemoveNode /
+// and in a network (`path: NetworkRef` = `NetworkPath` whose parts may be aliases;
+// `NetworkPath::into()`; subnets included): AddNode / RemoveNode /
 // Connect / Disconnect / SetParameter. AddNode takes `params` (written with
 // SetParameter's rules, after creation).
 // JSON: {"op":"add_layer","comp":"shot","template":"solid","as":"bg"}
 // (a number is an id, a string an alias defined earlier in the same batch).
+// {"op":"add_node","path":{"comp":"shot","layer":"bg"},"type_key":"shape.rect"}
+// (`path` parts take aliases too, so one batch can create a layer and fill it).
 // {"op":"connect","path":{..},"from":{"node":"n","port":0},"to":{"node":5,"port":"geometry"}}
 // (a port is a number or a name; Connect checks port numbers and types, replaces
 // an edge on the input and keeps one free variadic slot).

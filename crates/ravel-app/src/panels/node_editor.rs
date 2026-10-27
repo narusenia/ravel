@@ -1229,7 +1229,7 @@ impl NodeEditorPanel {
         self.network_edit(
             |path| {
                 vec![EditOp::Connect {
-                    path: path.clone(),
+                    path: path.clone().into(),
                     from: end(source, source_port.0),
                     to: end(target, target_port.0),
                 }]
@@ -1244,7 +1244,7 @@ impl NodeEditorPanel {
         self.network_edit(
             |path| {
                 vec![EditOp::Disconnect {
-                    path: path.clone(),
+                    path: path.clone().into(),
                     edge: edge_id,
                 }]
             },
@@ -1268,11 +1268,11 @@ impl NodeEditorPanel {
             self.network_edit(
                 |path| {
                     let disconnect = edges.iter().map(|edge| EditOp::Disconnect {
-                        path: path.clone(),
+                        path: path.clone().into(),
                         edge: *edge,
                     });
                     let remove = nodes.iter().map(|node| EditOp::RemoveNode {
-                        path: path.clone(),
+                        path: path.clone().into(),
                         node: NodeRef::Id(*node),
                     });
                     disconnect.chain(remove).collect()
@@ -2054,7 +2054,7 @@ impl NodeEditorPanel {
         let ops: Vec<_> = node_ids
             .iter()
             .map(|node| EditOp::SetParameter {
-                path: path.clone(),
+                path: path.clone().into(),
                 node: NodeRef::Id(*node),
                 key: key.to_string(),
                 value: value.clone(),
@@ -3207,7 +3207,7 @@ impl NodeEditorPanel {
         let (fx, fy) = self.viewport.screen_to_flow(local.0, local.1);
         let params = self.new_node_params(type_key, cx);
         let add = |path: &NetworkPath| EditOp::AddNode {
-            path: path.clone(),
+            path: path.clone().into(),
             type_key: type_key.to_string(),
             position: Some((fx, fy)),
             params: params.clone(),
@@ -3230,7 +3230,7 @@ impl NodeEditorPanel {
                     (fresh(port), existing(from.port_index))
                 };
                 EditOp::Connect {
-                    path: path.clone(),
+                    path: path.clone().into(),
                     from: from_end,
                     to: to_end,
                 }

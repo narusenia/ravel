@@ -1,7 +1,8 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! `ravel-cli` — rendering a Ravel project without a window.
+//! `ravel-cli` — rendering a Ravel project without a window, and serving it
+//! to an MCP client (`ravel-cli mcp`, see [`mcp`]).
 //!
 //! # A separate binary, not a subcommand of `ravel`
 //!
@@ -46,6 +47,7 @@ pub mod error;
 pub mod execute;
 pub mod interactive;
 pub mod listing;
+pub mod mcp;
 pub mod params;
 pub mod plan;
 pub mod report;
@@ -296,6 +298,7 @@ pub fn run(cli: Cli) -> u8 {
             }
         },
         Command::Interactive(arg) => run_interactive(&arg.project),
+        Command::Mcp(arg) => mcp::run(&arg.allow_dir),
     }
 }
 

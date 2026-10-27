@@ -20,7 +20,7 @@ use ravel_core::media::{ImageFormat, VideoCodec};
 
 use crate::error::CliError;
 
-/// Headless rendering for Ravel projects.
+/// Headless rendering and an MCP tool server for Ravel projects.
 #[derive(Debug, Parser)]
 #[command(name = "ravel-cli", version, about, long_about = None)]
 pub struct Cli {
@@ -43,6 +43,16 @@ pub enum Command {
     /// weakening the non-interactive contract for the sake of the
     /// interactive one.
     Interactive(ProjectArg),
+    /// Serve the project tools to an MCP client over stdin / stdout.
+    Mcp(McpArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct McpArgs {
+    /// A directory renders may be written under, repeatable. With none given
+    /// every writing tool is refused; reading tools need no permission.
+    #[arg(long = "allow-dir", value_name = "DIR", value_parser = tilde_path())]
+    pub allow_dir: Vec<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]

@@ -725,7 +725,11 @@ EditError::code() -> &'static str   // "layer-locked", "unknown-alias", ...
 
 The input document is never touched, so a refused operation changes nothing; a
 batch is all-or-nothing and `BatchError::index` names the failing operation.
-Committing the result (one `commit_document` = one undo step) is the caller's.
+Committing the result (one `commit_document` = one undo step) is the caller's;
+the host entry is `ProjectState::commit_edit_ops(&[EditOp], cx) -> Result<Applied,
+BatchError>` (`apply_batch` + one commit, nothing recorded when the document is
+unchanged), and `edit_ops_skipping_refused` for a selection-wide write where one
+refusal must not stop the rest. How to add an operation: `docs/dev/add-edit-operation.md`.
 `edit::network` holds the graph-level wiring (`connect_edge_and_update_variadic_inputs`,
 `remove_edge_and_compact`, `remove_node_and_compact`) for a caller wiring a network
 it has not committed yet; `edit::apply` runs the same functions.

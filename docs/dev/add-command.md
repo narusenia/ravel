@@ -17,6 +17,9 @@
 - [ ] メニューに出すなら `crates/ravel-ui/src/menu.rs`
 - [ ] ハンドラを置く（パネル固有なら `on_action`、それ以外は
       `RavelWorkspace::dispatch_command`）
+- [ ] 文書を編集するコマンドなら、ハンドラは `ravel_core::edit` を通す
+      （`ProjectState::commit_edit_ops`）。足し方は
+      [add-edit-operation.md](add-edit-operation.md)
 - [ ] `mise run check`
 
 **忘れやすいもの**: ロケールキーは `CommandId` 全 variant を走査するテストが

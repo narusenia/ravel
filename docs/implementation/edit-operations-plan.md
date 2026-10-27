@@ -194,8 +194,8 @@ pub fn apply_batch(doc: &Document, ops: &[EditOp], cx: &EditContext) -> Result<A
 - **文書を変えずにエラー**は型で保証する: `apply` は `&Document` を取り新しい
   `Document` を返す。エラー時は呼び出し側の文書に何も起きない。成功時も
   `Document::validate()` を通ってから返す（`DuplicateNodeId` など、構造の破れを
-  その場で見つける）。**1 操作ごとの全文書走査のコストは未計測**。計測して
-  重ければ、触ったグラフだけを検査する形に狭める（`AI-2d` の完了条件）
+  その場で見つける）。1 操作ごとの全文書走査のコストは `AI-2d` で計測した
+  （「検証」の「`validate()` の計測」）。1 ms を大きく下回るので狭めていない
 - `EditError`（`thiserror`）は呼び出し側が分岐できる粒度で持つ:
   `CompositionNotFound` / `LayerNotFound` / `LayerLocked` / `NodeNotFound` /
   `EdgeNotFound` / `UnknownNodeType` / `UnknownParameter` /
@@ -405,9 +405,11 @@ AI-2a ──▶ AI-2b ──▶ AI-2c ──▶ AI-2d
 
 ### `AI-2d` バッチ、ホスト側の入口、実機相当の検証、文書
 
-- ホスト側の薄い入口: `ProjectState::apply_edit(ops, cx)`（`ravel-app`）。
-  `apply_batch` の結果を `commit_document` 1 回で確定する。`AI-4` のライブ口が
-  呼ぶ入口で、ここで **1 バッチ = undo 1 段**を固定する
+- ホスト側の薄い入口: `ProjectState::commit_edit_ops(ops, cx)`（`ravel-app`）。
+  `apply_batch` の結果を `commit_document` 1 回で確定する（何も変えないバッチは段を
+  作らない）。`AI-4` のライブ口が呼ぶ入口で、ここで **1 バッチ = undo 1 段**を
+  固定する。入口自体は `AI-2b` から実装にあり、この単位で足したのはテストと文書
+  （当初の名前 `apply_edit` は使わない。実装を正とする）
 - 1 操作あたりの `Document::validate()` の計測（大きなプロジェクト = ショーケース
   相当）。重ければ検査を触ったグラフに限る
 - ショーケースの手組みの一部（例: 1 コンプ・3 レイヤー・各レイヤー 2〜3 ノード）を
@@ -421,7 +423,7 @@ AI-2a ──▶ AI-2b ──▶ AI-2c ──▶ AI-2d
 
 **完了条件**
 
-- `apply_edit` が 1 バッチで undo 段を 1 つだけ増やし、`Cmd+Z` 相当の `undo` で
+- `commit_edit_ops` が 1 バッチで undo 段を 1 つだけ増やし、`Cmd+Z` 相当の `undo` で
   元の文書に戻る（`ravel-app` の `gpui::test`）
 - 失敗したバッチで undo 段が増えず、文書が変わらない
 - 手組みの代表例の保存・読み込み・検証のテスト
@@ -440,6 +442,26 @@ AI-2a ──▶ AI-2b ──▶ AI-2c ──▶ AI-2d
   十分に安定したら `scripts/lint-patterns.sh` に「`ravel-app` で `Graph::add_edge`
   を直接呼ばない」類の規則を足すかを判断する（足すなら `.agents/rules/` に理由を書く）
 - GPU・FFmpeg は要らない。`ravel-core::edit` のテストはヘッドレスで走る
+
+### `validate()` の計測（`AI-2d`）
+
+`Document::validate()` は `apply` の成功のたびに走る。ショーケース相当の文書で
+1 操作あたりの費用を測った（`edit::tests::measure_validate_and_apply_on_a_showcase_scale_document`、
+`#[ignore]`。`cargo test --release -p ravel-core --lib edit::tests::measure -- --ignored --nocapture`）。
+
+- 日付 2026-10-27、macOS・10 コア、計測時の load average 6.7 / 6.3 / 5.5
+  （他の作業と並行。絶対値は目安で、桁を見る）
+- ショーケース生成器は 6 コンプ・43 レイヤー・計 43 ノード種で、1 レイヤー約 6 ノード
+  （`net.in` / `net.out` を含む）。ほぼ同じ規模（42 レイヤー）を `null` テンプレートのレイヤー + 4 ノード
+  + 1 接続で組んだ。生成器そのものではない
+
+| 文書 | validate（1 回） | `apply(AddNode)`（1 操作、validate を含む） |
+|---|---|---|
+| 6 コンプ・42 レイヤー・252 ノード（ショーケース相当） | 61 µs | 52 µs |
+| 6 コンプ・168 レイヤー・1008 ノード（4 倍） | 122 µs | 118 µs |
+
+どちらも 1 ms の 1 割前後。`validate` と `apply` は順に測っただけ（交互実行もウォームアップも無い）なので、両者の大小は比べられない。読めるのは桁だけ。
+**検査を触ったグラフに狭める必要は今のところ無い**（狭めるのは 1 ms を超えてから）。
 
 ## 非対象
 

@@ -11,6 +11,7 @@
 | パネルを追加する | [add-panel.md](add-panel.md) |
 | 部品（ウィジェット）を追加する | [add-widget.md](add-widget.md) |
 | コマンド・ショートカット・メニュー項目を追加する | [add-command.md](add-command.md) |
+| 文書の編集操作（`EditOp`）を追加する | [add-edit-operation.md](add-edit-operation.md) |
 | ユーザーに見える文字列を追加する | [add-locale.md](add-locale.md) |
 | テーマを書く / テーマスキーマを変える | [write-a-theme.md](write-a-theme.md) |
 | 式を書く / 式言語に名前を足す | [write-expression.md](write-expression.md) |

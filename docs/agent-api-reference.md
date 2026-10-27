@@ -694,7 +694,7 @@ processor with `params.ramp(key)`. Properties renders it as a
 
 ### `edit` — Typed edit operations
 
-`ravel_core::edit` (`docs/implementation/edit-operations-plan.md`). A closed,
+`ravel_core::edit` (`docs/implementation/done/edit-operations-plan.md`). A closed,
 serde-serializable `EditOp` applied to a `Document` without a UI; the pure
 transforms it is built from (`NetworkPath`, `CompositionSettings`,
 `add_composition`, `add_layer_from_template`, …) live in `edit::document` and

@@ -61,7 +61,7 @@ f32 出力では約 24 回で仮数を使い切り、文書化された要件 1e
 **LOW-CORE-07 | debt | `Graph::set_params` が存在しないキーを黙って無視する**
 `crates/ravel-core/src/graph.rs:1431`（`find` が `None` なら `continue`）
 タイポしたキーが何もしない更新になる。編集操作の層は「未知のキーはエラー」
-（`UnknownParameter`、`edit-operations-plan.md`）なので、規則が 2 つになる。
+（`UnknownParameter`、`done/edit-operations-plan.md`）なので、規則が 2 つになる。
 → `AI-2c` で書き込みを `edit` に寄せるとき、`set_params` を使う他の箇所も
 未知のキーを `Err` にするか、意図して無視する箇所を名指しする。
 
@@ -277,7 +277,7 @@ Viewer の stale ジェスチャークリーンアップに `shape_drag` が漏�
 `crates/ravel-ui/src/document.rs:319`（`remove_layers` の `continue`）
 UI では選択からロック済みを除く意図で妥当だが、理由を返さないので、呼び出し側は
 「消えなかった」ことしか分からない。編集操作の層（`AI-2a`、
-`edit-operations-plan.md`）へ移すときに `LayerLocked` エラーにする予定。
+`done/edit-operations-plan.md`）へ移すときに `LayerLocked` エラーにする予定。
 → `AI-2a` で解消する。それまで MCP や自動化から使わない。
 
 ## ravel-app / ravel-ui（軽微な負債）

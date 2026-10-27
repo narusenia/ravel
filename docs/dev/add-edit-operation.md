@@ -5,7 +5,7 @@
 文書を変える操作は `ravel_core::edit` の `EditOp` として足す。UI もエージェントも
 同じ入口を通るので、**型付きのエラー、バッチ単位の all-or-nothing、1 バッチ =
 undo 1 段**が操作ごとに実装し直さずに手に入る（計画:
-[`edit-operations-plan.md`](../implementation/edit-operations-plan.md)）。
+[`edit-operations-plan.md`](../implementation/done/edit-operations-plan.md)）。
 
 ## チェックリスト
 

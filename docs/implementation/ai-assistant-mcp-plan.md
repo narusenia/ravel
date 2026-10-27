@@ -175,11 +175,11 @@ ID は確定（backlog 登録済み）。
 
 - 「パラメータを設定」「レイヤーを追加」「ノードをつなぐ」などを、引数を持つ
   型付きの操作として定義し、`Document` → `Document` の純粋関数で適用する
-- 置き場所は `ravel-core::edit`（`edit-operations-plan.md` で決定。`ravel-cli` が直接呼べる）。アプリの
+- 置き場所は `ravel-core::edit`（`done/edit-operations-plan.md` で決定。`ravel-cli` が直接呼べる）。アプリの
   `commit_document` も、将来の自動化スクリプトも、これを呼ぶ
 - 設計の範囲が複数クレートにまたがるので、着手前に `AGENTS.md` の Design gate に
   従って実装計画を別に書く
-- 詳細は `edit-operations-plan.md`（`AI-2a`〜`AI-2d` に割る）
+- 詳細は `done/edit-operations-plan.md`（`AI-2a`〜`AI-2d` に割る）
 
 **完了条件**
 

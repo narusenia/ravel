@@ -194,8 +194,8 @@ pub fn apply_batch(doc: &Document, ops: &[EditOp], cx: &EditContext) -> Result<A
 - **文書を変えずにエラー**は型で保証する: `apply` は `&Document` を取り新しい
   `Document` を返す。エラー時は呼び出し側の文書に何も起きない。成功時も
   `Document::validate()` を通ってから返す（`DuplicateNodeId` など、構造の破れを
-  その場で見つける）。**1 操作ごとの全文書走査のコストは未計測**。計測して
-  重ければ、触ったグラフだけを検査する形に狭める（`AI-2d` の完了条件）
+  その場で見つける）。1 操作ごとの全文書走査のコストは `AI-2d` で計測した
+  （「検証」の「`validate()` の計測」）。1 ms を大きく下回るので狭めていない
 - `EditError`（`thiserror`）は呼び出し側が分岐できる粒度で持つ:
   `CompositionNotFound` / `LayerNotFound` / `LayerLocked` / `NodeNotFound` /
   `EdgeNotFound` / `UnknownNodeType` / `UnknownParameter` /

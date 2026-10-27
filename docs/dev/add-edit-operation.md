@@ -39,8 +39,11 @@ undo 1 段**が操作ごとに実装し直さずに手に入る（計画:
       結果が `validate` を通ることはテストで改めて確認しなくてよいが、**何が変わった
       か**は確認する
 - [ ] UI から呼ぶなら `ProjectState::commit_edit_ops`（1 バッチ = `commit_document`
-      1 回 = undo 1 段。何も変えないバッチは段を作らない）。選択全体への書き込みの
-      ように一部の拒否で全体を止めたくないときだけ `edit_ops_skipping_refused`。
+      1 回 = undo 1 段。何も変えないバッチは段を作らない）。ただし `commit_edit_ops` は
+      `local_frame: None` で適用するので、**アニメ済みパラメータへの `SetParameter` は
+      `AnimatedParameter` で拒否される**。プレイヘッドのフレームにキーを打つ書き込みと、
+      選択全体への書き込み（一部の拒否で全体を止めない）は `edit_ops_skipping_refused`
+      （フレームを取り、`commit` で undo を積むかを選ぶ。all-or-nothing ではない）。
       `ravel-app` から `Graph::add_edge` などを直接呼んで文書を組み替えない
 - [ ] [`../agent-api-reference.md`](../agent-api-reference.md) の `edit` 節に、
       操作の JSON 例と注意（クランプ、置換、エラーになる条件）を足す
@@ -48,8 +51,9 @@ undo 1 段**が操作ごとに実装し直さずに手に入る（計画:
 
 ## 忘れやすいもの
 
-- **ドラッグ中の毎フレームの更新は `EditOp` にしない**（`apply_document` の仕事）。
-  確定時に 1 操作として `commit_edit_ops` へ渡す
+- **ジェスチャ中の更新は undo を積まない経路で流す**。パラメータの scrub は
+  `edit_ops_skipping_refused` に `commit = false`、終わりの 1 回だけ `commit = true`。
+  それ以外のドラッグ（ノードの移動など）は `apply_document` で、確定時に 1 段
   （[`ux.md`](../../.agents/rules/ux.md) の「1 操作 = undo 1 段」）
 - パスは id で層を指すので、**同じバッチ内で作った層のネットワークは `NetworkPath`
   で指せない**（エイリアスは `CompRef` / `LayerRef` / `NodeRef` にだけ効く）。

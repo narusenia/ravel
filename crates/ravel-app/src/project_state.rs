@@ -8234,6 +8234,70 @@ mod tests {
         });
     }
 
+    /// One batch is one undo step: a composition, a layer in
+    /// it through an alias, and the layer's own nodes arrive as one step that
+    /// one `undo` takes back whole.
+    #[gpui::test]
+    fn a_multi_op_edit_batch_is_one_undo_step(cx: &mut TestAppContext) {
+        use ravel_core::edit::{CompRef, CompositionSettings, EditOp};
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        project.update(cx, |project, cx| {
+            let original = project.document().clone();
+            assert!(!project.store.can_undo());
+            let ops = [
+                EditOp::AddComposition {
+                    settings: CompositionSettings::fallback("Batch"),
+                    alias: Some("c".into()),
+                },
+                EditOp::AddLayer {
+                    comp: CompRef::Alias("c".into()),
+                    template: "solid".into(),
+                    alias: None,
+                },
+            ];
+            project
+                .commit_edit_ops(&ops, cx)
+                .expect("the batch applies");
+            assert_ne!(*project.document(), original, "the batch changed nothing");
+            assert!(project.undo(cx), "the batch left no undo step");
+            assert_eq!(*project.document(), original);
+            assert!(
+                !project.store.can_undo(),
+                "the batch took more than one step"
+            );
+        });
+    }
+
+    /// A batch whose second operation fails is refused whole: the first one is
+    /// not committed and no undo step is left.
+    #[gpui::test]
+    fn a_failing_edit_batch_changes_nothing_and_records_no_undo_step(cx: &mut TestAppContext) {
+        use ravel_core::edit::{CompRef, CompositionSettings, EditOp};
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        project.update(cx, |project, cx| {
+            let original = project.document().clone();
+            let ops = [
+                EditOp::AddComposition {
+                    settings: CompositionSettings::fallback("Doomed"),
+                    alias: None,
+                },
+                EditOp::AddLayer {
+                    comp: CompRef::Alias("never-defined".into()),
+                    template: "solid".into(),
+                    alias: None,
+                },
+            ];
+            let err = project
+                .commit_edit_ops(&ops, cx)
+                .expect_err("the second operation must fail");
+            assert_eq!(err.index, 1);
+            assert_eq!(*project.document(), original);
+            assert!(!project.store.can_undo());
+        });
+    }
+
     /// The overlay snapshot is published with the frame it belongs to: an
     /// accepted update installs its targets, a stale one changes nothing, and
     /// an accepted update whose target did not return leaves no earlier value

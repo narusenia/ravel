@@ -212,6 +212,14 @@ mod tests {
                 cx,
             );
             assert!(!enabled_in_global_layer(cx));
+            // The control: the same predicate opens for the global layer, so
+            // the refusal above is not a predicate that always says no.
+            crate::app_settings::update(
+                SettingsScope::Global,
+                |layer| layer.agent.live_edit_enabled = Some(true),
+                cx,
+            );
+            assert!(enabled_in_global_layer(cx));
         });
     }
 

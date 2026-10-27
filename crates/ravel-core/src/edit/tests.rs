@@ -58,6 +58,7 @@ fn add_composition_then_layer_through_an_alias() {
     let cx = EditContext {
         registry: &reg,
         local_frame: None,
+        allow_driven_overwrite: false,
     };
     let ops = [
         add_comp("Shot", alias("shot")),
@@ -89,6 +90,7 @@ fn remove_composition_and_layer_produce_the_expected_document() {
     let cx = EditContext {
         registry: &reg,
         local_frame: None,
+        allow_driven_overwrite: false,
     };
     let (doc, comp, layer) = doc_with_layer(false);
 
@@ -131,6 +133,7 @@ fn refused_operations_leave_the_document_unchanged() {
     let cx = EditContext {
         registry: &reg,
         local_frame: None,
+        allow_driven_overwrite: false,
     };
     let (open, comp, layer) = doc_with_layer(false);
     let (locked, locked_comp, locked_layer) = doc_with_layer(true);
@@ -212,6 +215,7 @@ fn a_failing_batch_applies_nothing_and_names_the_failing_index() {
     let cx = EditContext {
         registry: &reg,
         local_frame: None,
+        allow_driven_overwrite: false,
     };
     let (doc, comp, _) = doc_with_layer(false);
     let before = doc.clone();
@@ -233,6 +237,7 @@ fn duplicate_and_unknown_aliases_fail_the_whole_batch() {
     let cx = EditContext {
         registry: &reg,
         local_frame: None,
+        allow_driven_overwrite: false,
     };
     let (doc, _, _) = doc_with_layer(false);
     let before = doc.clone();
@@ -268,6 +273,7 @@ fn aliases_do_not_outlive_their_batch() {
     let cx = EditContext {
         registry: &reg,
         local_frame: None,
+        allow_driven_overwrite: false,
     };
     let first = apply(&Document::default(), &add_comp("A", alias("a")), &cx).unwrap();
     let err = apply(
@@ -363,6 +369,7 @@ fn cx(reg: &NodeRegistry) -> EditContext<'_> {
     EditContext {
         registry: reg,
         local_frame: None,
+        allow_driven_overwrite: false,
     }
 }
 
@@ -1074,6 +1081,7 @@ fn an_animated_parameter_gets_a_key_at_the_local_frame() {
     let at_frame = EditContext {
         registry: &reg,
         local_frame: Some(5),
+        allow_driven_overwrite: false,
     };
     let op = set_param(&path, NodeRef::Id(node), "width", ParamInput::Float(9.0));
     let applied = apply(&animated, &op, &at_frame).unwrap();
@@ -1235,4 +1243,72 @@ fn measure_validate_and_apply_on_a_showcase_scale_document() {
             validate, apply_one
         );
     }
+}
+
+#[test]
+fn a_driven_parameter_refuses_a_write_unless_overwriting_is_allowed() {
+    use crate::animation::channel::ParameterExpression;
+    let reg = registry();
+    let (doc, path, node) = doc_with_node("style.stroke");
+    let driven = with_param_value(
+        &doc,
+        &path,
+        node,
+        "width",
+        ParameterValue::Channel(AnimationChannel::new(ChannelSource::Expression(
+            ParameterExpression::new("frame"),
+        ))),
+    );
+    let op = set_param(&path, NodeRef::Id(node), "width", ParamInput::Float(2.0));
+    let before = driven.clone();
+    let err = apply(&driven, &op, &cx(&reg)).unwrap_err();
+    assert_eq!(err.code(), "driven-parameter");
+    assert_eq!(driven, before);
+    // A blend holding an expression is driven too.
+    let blended = with_param_value(
+        &doc,
+        &path,
+        node,
+        "width",
+        ParameterValue::Channel(AnimationChannel::new(ChannelSource::Blend(
+            Box::new(ChannelSource::Constant(1.0)),
+            Box::new(ChannelSource::Expression(ParameterExpression::new("frame"))),
+            crate::animation::blend::BlendMode::Mix,
+            0.5,
+        ))),
+    );
+    assert_eq!(
+        apply(&blended, &op, &cx(&reg)).unwrap_err().code(),
+        "driven-parameter"
+    );
+    // The UI scrub's explicit opt-in keeps collapsing it to a constant.
+    let allowed = EditContext {
+        allow_driven_overwrite: true,
+        ..cx(&reg)
+    };
+    let applied = apply(&driven, &op, &allowed).unwrap();
+    assert_eq!(
+        param_of(&applied.document, &path, node, "width"),
+        ParameterValue::Float(2.0)
+    );
+}
+
+#[test]
+fn constant_and_keyframed_parameters_still_take_a_write() {
+    let reg = registry();
+    let (doc, path, node) = doc_with_node("style.stroke");
+    let op = set_param(&path, NodeRef::Id(node), "width", ParamInput::Float(3.0));
+    assert!(apply(&doc, &op, &cx(&reg)).is_ok());
+    let keyed = with_param_value(
+        &doc,
+        &path,
+        node,
+        "width",
+        ParameterValue::Channel(keyed_channel()),
+    );
+    let at_frame = EditContext {
+        local_frame: Some(5),
+        ..cx(&reg)
+    };
+    assert!(apply(&keyed, &op, &at_frame).is_ok());
 }

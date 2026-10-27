@@ -716,7 +716,9 @@ transforms it is built from (`NetworkPath`, `CompositionSettings`,
 // `ravel_ui::properties::PropertyValue`). The value is clamped by the registry range;
 // an animated parameter is keyed at `EditContext::local_frame` and is
 // `AnimatedParameter` without one; `attribute.set`'s `value` and `layer.ref`'s
-// output port follow in the same step.
+// output port follow in the same step. A parameter driven by an expression, a node
+// output or a blend is `DrivenParameter` ("driven-parameter") unless
+// `EditContext::allow_driven_overwrite` (only the Properties scrub sets it).
 edit::apply(&Document, &EditOp, &EditContext) -> Result<Applied, EditError>
 edit::apply_batch(&Document, &[EditOp], &EditContext) -> Result<Applied, BatchError>
 Applied { document, created: Vec<Created>, aliases: BTreeMap<String, Created> }
@@ -729,7 +731,7 @@ Committing the result (one `commit_document` = one undo step) is the caller's;
 the host entry is `ProjectState::commit_edit_ops(&[EditOp], cx) -> Result<Applied,
 BatchError>` (`apply_batch` + one commit, nothing recorded when the document is
 unchanged), and `edit_ops_skipping_refused` for a selection-wide write where one
-refusal must not stop the rest. How to add an operation: `docs/dev/add-edit-operation.md`.
+refusal must not stop the rest (this one allows overwriting a driven parameter, as the scrub does). How to add an operation: `docs/dev/add-edit-operation.md`.
 `edit::network` holds the graph-level wiring (`connect_edge_and_update_variadic_inputs`,
 `remove_edge_and_compact`, `remove_node_and_compact`) for a caller wiring a network
 it has not committed yet; `edit::apply` runs the same functions.

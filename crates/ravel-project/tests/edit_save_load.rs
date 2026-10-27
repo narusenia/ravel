@@ -31,6 +31,7 @@ fn a_document_built_from_edit_ops_saves_loads_and_validates() {
     let cx = EditContext {
         registry: &registry,
         local_frame: None,
+        allow_driven_overwrite: false,
     };
 
     // A path names a layer by id, so the layers must exist before a batch can

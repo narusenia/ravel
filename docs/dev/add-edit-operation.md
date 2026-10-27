@@ -44,6 +44,9 @@ undo 1 段**が操作ごとに実装し直さずに手に入る（計画:
       `AnimatedParameter` で拒否される**。プレイヘッドのフレームにキーを打つ書き込みと、
       選択全体への書き込み（一部の拒否で全体を止めない）は `edit_ops_skipping_refused`
       （フレームを取り、`commit` で undo を積むかを選ぶ。all-or-nothing ではない）。
+      `commit_edit_ops` は駆動されたチャンネルへの `SetParameter` を `driven-parameter` で
+      拒否し、`edit_ops_skipping_refused` だけが `EditContext::allow_driven_overwrite` を
+      立てて従来のスクラブ（定数に置き換える）を保つ。
       `ravel-app` から `Graph::add_edge` などを直接呼んで文書を組み替えない
 - [ ] [`../agent-api-reference.md`](../agent-api-reference.md) の `edit` 節に、
       操作の JSON 例と注意（クランプ、置換、エラーになる条件）を足す

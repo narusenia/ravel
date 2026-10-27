@@ -42,6 +42,11 @@ pub struct EditContext<'a> {
     /// The layer-local frame animated parameters are keyed at. `None` makes a
     /// write to an animated parameter an error.
     pub local_frame: Option<u64>,
+    /// Whether `SetParameter` may replace a channel driven by an expression,
+    /// a node output or a blend (the write collapses it to a constant). Off by
+    /// default: only the Properties scrub, which has always done that and
+    /// undoes it, turns it on. Everything else gets `driven-parameter`.
+    pub allow_driven_overwrite: bool,
 }
 
 /// Something an operation created and gave an id to.

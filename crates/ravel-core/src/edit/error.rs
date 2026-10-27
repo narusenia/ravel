@@ -45,6 +45,10 @@ pub enum EditError {
     ParameterTypeMismatch { node: NodeId, key: String },
     #[error("parameter {key:?} of node {node:?} is animated and no frame was given to key")]
     AnimatedParameter { node: NodeId, key: String },
+    #[error(
+        "parameter {key:?} of node {node:?} is driven by an expression, a node output or a blend"
+    )]
+    DrivenParameter { node: NodeId, key: String },
     #[error("node {node:?} has no such port {port:?} (input side: {input})")]
     PortNotFound {
         node: NodeId,
@@ -87,6 +91,7 @@ impl EditError {
             Self::UnknownParameter { .. } => "unknown-parameter",
             Self::ParameterTypeMismatch { .. } => "parameter-type-mismatch",
             Self::AnimatedParameter { .. } => "animated-parameter",
+            Self::DrivenParameter { .. } => "driven-parameter",
             Self::PortNotFound { .. } => "port-not-found",
             Self::PortTypeMismatch { .. } => "port-type-mismatch",
             Self::Graph(_) => "graph",

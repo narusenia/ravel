@@ -5386,6 +5386,7 @@ fn add_wired_node(
     let cx = EditContext {
         registry,
         local_frame: None,
+        allow_driven_overwrite: false,
     };
     let applied = ravel_core::edit::apply_batch(doc, &ops, &cx).ok()?;
     let node = applied.created.iter().find_map(|c| match c {
@@ -5430,6 +5431,7 @@ fn add_shape_layer(
     let cx = EditContext {
         registry,
         local_frame: None,
+        allow_driven_overwrite: false,
     };
     match ravel_core::edit::apply(doc, &op, &cx) {
         Ok(applied) => {

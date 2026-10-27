@@ -249,6 +249,24 @@ fn is_keyframed(value: &ParameterValue) -> bool {
     }
 }
 
+/// Whether any component is driven by something other than a constant or
+/// keys: an expression, a node output, an audio source or a blend.
+fn is_driven(value: &ParameterValue) -> bool {
+    let driven = |c: &AnimationChannel| {
+        !matches!(
+            c.source,
+            ChannelSource::Constant(_) | ChannelSource::Keyframes(_)
+        )
+    };
+    match value {
+        ParameterValue::Channel(c) | ParameterValue::IntChannel(c) => driven(c),
+        ParameterValue::Channel2(cs) => cs.iter().any(driven),
+        ParameterValue::Channel3(cs) => cs.iter().any(driven),
+        ParameterValue::Channel4(cs) => cs.iter().any(driven),
+        _ => false,
+    }
+}
+
 /// The kind of thing a parameter holds, ignoring whether it is animated. A
 /// write must stay inside the kind of the value it replaces.
 fn family(value: &ParameterValue) -> u8 {
@@ -272,7 +290,7 @@ fn family(value: &ParameterValue) -> u8 {
 /// follows the port it references, resolved against `comp`) in one graph
 /// snapshot.
 ///
-/// Refuses an unknown node or key, a value of another kind than the parameter
+/// Refuses a driven parameter (unless `cx.allow_driven_overwrite`), an unknown node or key, a value of another kind than the parameter
 /// holds, and an animated parameter when `cx.local_frame` is `None` (a key
 /// cannot be placed, and flattening would silently delete the animation).
 pub fn set_parameter(
@@ -298,6 +316,12 @@ pub fn set_parameter(
         node: node_id,
         key: key.to_string(),
     };
+    if !cx.allow_driven_overwrite && is_driven(&existing.value) {
+        return Err(EditError::DrivenParameter {
+            node: node_id,
+            key: key.to_string(),
+        });
+    }
     let animated = is_keyframed(&existing.value);
     let range = cx.registry.param_range(&node.type_key, key);
     // Without a frame an animated parameter is judged as if keyed at 0: the

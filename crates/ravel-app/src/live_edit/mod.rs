@@ -368,4 +368,85 @@ mod tests {
         assert!(reply["ok"]["created"].as_array().unwrap().is_empty());
         project.update(cx, |p, cx| assert!(!p.undo(cx)));
     }
+
+    /// The Properties scrub may collapse an expression row to a constant; a
+    /// request from outside may not.
+    #[gpui::test]
+    fn a_request_cannot_overwrite_a_driven_parameter(cx: &mut TestAppContext) {
+        use ravel_core::animation::channel::{
+            AnimationChannel, ChannelSource, ParameterExpression,
+        };
+        use ravel_core::edit::{Created, NetworkPath, NodeRef, ParamInput};
+        use ravel_core::graph::{Parameter, ParameterValue};
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let setup = [
+            EditOp::AddComposition {
+                settings: CompositionSettings::fallback("Live"),
+                alias: Some("c".into()),
+            },
+            EditOp::AddLayer {
+                comp: ravel_core::edit::CompRef::Alias("c".into()),
+                template: "solid".into(),
+                alias: Some("l".into()),
+            },
+        ];
+        let created = project
+            .update(cx, |p, cx| p.commit_edit_ops(&setup, cx))
+            .unwrap()
+            .created;
+        let (comp, layer) = match created[..] {
+            [Created::Composition(c), Created::Layer(l)] => (c, l),
+            _ => panic!("unexpected created {created:?}"),
+        };
+        let path = NetworkPath::layer(comp, layer);
+        let add = [EditOp::AddNode {
+            path: path.clone(),
+            type_key: "style.stroke".into(),
+            position: None,
+            params: Default::default(),
+            alias: None,
+        }];
+        let node = project
+            .update(cx, |p, cx| p.commit_edit_ops(&add, cx))
+            .unwrap()
+            .created
+            .iter()
+            .find_map(|c| match c {
+                Created::Node(id) => Some(*id),
+                _ => None,
+            })
+            .unwrap();
+        project.update(cx, |p, cx| {
+            let doc = p.document().clone();
+            let graph = ravel_core::edit::document::resolve_network(&doc, &path)
+                .unwrap()
+                .clone()
+                .set_params(
+                    node,
+                    &[Parameter {
+                        key: "width".into(),
+                        value: ParameterValue::Channel(AnimationChannel::new(
+                            ChannelSource::Expression(ParameterExpression::new("frame")),
+                        )),
+                    }],
+                )
+                .unwrap();
+            let doc = ravel_core::edit::document::replace_network(&doc, &path, graph).unwrap();
+            p.commit_document(doc, ravel_core::runtime::InvalidationHint::Structural, cx);
+        });
+        let before = project.read_with(cx, |p, _| p.document().clone());
+        let ops = [EditOp::SetParameter {
+            path,
+            node: NodeRef::Id(node),
+            key: "width".into(),
+            value: ParamInput::Float(4.0),
+        }];
+        let line = serde_json::json!({"id": 1, "ops": ops}).to_string();
+        let request = protocol::parse_request(&line).unwrap();
+        let reply = project.update(cx, |p, cx| apply(p, &request, cx));
+        let reply: Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["error"]["code"], "driven-parameter");
+        project.read_with(cx, |p, _| assert_eq!(*p.document(), before));
+    }
 }

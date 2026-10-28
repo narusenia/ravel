@@ -210,6 +210,21 @@ impl AudioSource {
 // Layer
 // ===========================================================================
 
+/// A channel-carrying property of the layer shell, as the Timeline and the
+/// edit layer name it. Components are listed in order (`X`, `Y` for the
+/// two-component ones).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellProperty {
+    AnchorPoint,
+    Position,
+    Scale,
+    Rotation,
+    Opacity,
+    AudioGain,
+    TimeRemap,
+}
+
 /// A single layer within a [`Composition`]: a shell plus one owned network.
 ///
 /// Layers are ordered bottom-to-top in the composition's `layers` vector
@@ -457,6 +472,49 @@ impl Layer {
     /// keyframes, which only ever sit on the frame grid.
     pub fn local_frame_continuous(&self, comp_frame: f64) -> f64 {
         (comp_frame - self.start_frame as f64 + self.in_frame as f64).max(0.0)
+    }
+
+    /// The composition frame a layer-local keyframe is displayed at
+    /// (`local - in + start`; negative when the key sits before `in`).
+    pub fn comp_frame_for_key(&self, local_frame: u64) -> i64 {
+        local_frame as i64 - self.in_frame as i64 + self.start_frame
+    }
+
+    /// The inverse of [`comp_frame_for_key`](Self::comp_frame_for_key): the
+    /// layer-local frame a key written at composition frame `comp_frame`
+    /// lands on. `None` before `start_frame`, where the layer has not begun.
+    ///
+    /// Not [`local_frame`](Self::local_frame): that clamps at zero, so a frame
+    /// before the layer would silently land on `in_frame`.
+    pub fn key_frame_for_comp(&self, comp_frame: u64) -> Option<u64> {
+        let comp_frame = i64::try_from(comp_frame).ok()?;
+        (comp_frame >= self.start_frame)
+            .then(|| (comp_frame - self.start_frame) as u64 + self.in_frame)
+    }
+
+    /// The channel `property`'s `component` names, `None` when the layer has
+    /// no such channel (no audio, no time remap) or the component is out of
+    /// range. The one place a shell property resolves to a channel, shared by
+    /// the Timeline's keyframe editing and the edit layer.
+    pub fn shell_channel_mut(
+        &mut self,
+        property: ShellProperty,
+        component: usize,
+    ) -> Option<&mut AnimationChannel> {
+        let first = component == 0;
+        match property {
+            ShellProperty::AnchorPoint => self.transform.anchor_point.get_mut(component),
+            ShellProperty::Position => self.transform.position.get_mut(component),
+            ShellProperty::Scale => self.transform.scale.get_mut(component),
+            ShellProperty::Rotation => first.then_some(&mut self.transform.rotation),
+            ShellProperty::Opacity => first.then_some(&mut self.opacity),
+            ShellProperty::AudioGain => self
+                .audio
+                .as_mut()
+                .filter(|_| first)
+                .map(|audio| &mut audio.gain),
+            ShellProperty::TimeRemap => self.time_remap.as_mut().filter(|_| first),
+        }
     }
 
     /// Duration of the visible portion in frames.
@@ -4420,6 +4478,54 @@ mod tests {
                 node: NodeId::new(7),
                 key: "radius".into(),
             })
+        );
+    }
+
+    /// A key written at a composition frame lands on the layer-local frame
+    /// the Timeline displays it at, and a frame before the layer is refused
+    /// rather than clamped onto `in_frame`.
+    #[test]
+    fn key_frame_for_comp_inverts_comp_frame_for_key() {
+        let mut layer = Layer::new(LayerId::new(1), "A", Graph::new());
+        layer.start_frame = 10;
+        layer.in_frame = 4;
+        assert_eq!(layer.key_frame_for_comp(10), Some(4));
+        assert_eq!(layer.key_frame_for_comp(25), Some(19));
+        assert_eq!(layer.key_frame_for_comp(9), None);
+        assert_eq!(layer.comp_frame_for_key(19), 25);
+        assert_eq!(layer.local_frame(9), 3, "the clamping form still answers");
+    }
+
+    #[test]
+    fn shell_channel_mut_resolves_present_channels_only() {
+        let mut layer = Layer::new(LayerId::new(1), "A", Graph::new());
+        assert!(
+            layer
+                .shell_channel_mut(ShellProperty::Position, 1)
+                .is_some()
+        );
+        assert!(
+            layer
+                .shell_channel_mut(ShellProperty::Position, 2)
+                .is_none()
+        );
+        assert!(layer.shell_channel_mut(ShellProperty::Opacity, 0).is_some());
+        assert!(layer.shell_channel_mut(ShellProperty::Opacity, 1).is_none());
+        assert!(
+            layer
+                .shell_channel_mut(ShellProperty::AudioGain, 0)
+                .is_none()
+        );
+        assert!(
+            layer
+                .shell_channel_mut(ShellProperty::TimeRemap, 0)
+                .is_none()
+        );
+        layer.time_remap = Some(AnimationChannel::constant(0.0));
+        assert!(
+            layer
+                .shell_channel_mut(ShellProperty::TimeRemap, 0)
+                .is_some()
         );
     }
 }

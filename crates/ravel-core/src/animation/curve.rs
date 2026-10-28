@@ -63,6 +63,50 @@ pub fn set_curve_value(curve: &mut KeyframeCurve, frame: u64, value: f32) {
     }
 }
 
+/// Set a keyframe's interpolation mode without changing its value or tangent
+/// values. The interpolation stored on a key controls the segment after it.
+pub fn set_curve_interpolation(
+    curve: &mut KeyframeCurve,
+    frame: u64,
+    interpolation: Interpolation,
+) -> bool {
+    let Some(index) = curve
+        .keyframes()
+        .iter()
+        .position(|keyframe| keyframe.frame == frame)
+    else {
+        return false;
+    };
+    let mut keyframe = curve.keyframes()[index];
+    let mut next = curve.keyframes().get(index + 1).copied();
+
+    // Fresh Linear/Step keys have zero-length tangents. When their outgoing
+    // segment becomes Bezier, seed one-third handles along the same straight
+    // line. The curve is visually unchanged, but both controls become
+    // immediately grabbable. Previously edited non-zero tangents survive mode
+    // switches verbatim.
+    if interpolation == Interpolation::Bezier
+        && keyframe.interpolation != Interpolation::Bezier
+        && let Some(next_keyframe) = &mut next
+    {
+        let third = 1.0 / 3.0;
+        let frame_delta = (next_keyframe.frame - keyframe.frame) as f32 * third;
+        let value_delta = (next_keyframe.value - keyframe.value) * third;
+        if keyframe.tangent_out == Vec2(0.0, 0.0) {
+            keyframe.tangent_out = Vec2(frame_delta, value_delta);
+        }
+        if next_keyframe.tangent_in == Vec2(0.0, 0.0) {
+            next_keyframe.tangent_in = Vec2(-frame_delta, -value_delta);
+        }
+    }
+    keyframe.interpolation = interpolation;
+    curve.insert_keyframe(keyframe);
+    if let Some(next) = next {
+        curve.insert_keyframe(next);
+    }
+    true
+}
+
 impl Default for KeyframeCurve {
     fn default() -> Self {
         Self::new()

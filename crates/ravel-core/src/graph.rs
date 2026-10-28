@@ -345,6 +345,22 @@ impl Identifier {
 }
 
 impl ParameterValue {
+    /// The channel of component `component` of an animatable value (`Int`
+    /// channels included), `None` for any other variant or an index past the
+    /// arity. The one place a component resolves, shared by the Timeline's key
+    /// editing and the edit layer.
+    pub fn channel_mut(&mut self, component: usize) -> Option<&mut AnimationChannel> {
+        match self {
+            ParameterValue::Channel(ch) | ParameterValue::IntChannel(ch) if component == 0 => {
+                Some(ch)
+            }
+            ParameterValue::Channel2(chs) => chs.get_mut(component),
+            ParameterValue::Channel3(chs) => chs.get_mut(component),
+            ParameterValue::Channel4(chs) => chs.get_mut(component),
+            _ => None,
+        }
+    }
+
     /// A constant 2-component vector value. Geometric vector parameters are
     /// `Channel2` / `Channel3` rather than a `_x` / `_y` pair of Floats, so
     /// every producer of one goes through these constructors.

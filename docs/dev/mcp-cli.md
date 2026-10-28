@@ -86,7 +86,7 @@ TCP では待ち受けない。Ravel は API キーもネットワークも持�
   のように型付きで書き、数値は範囲にクランプされる。未知のキーはエラー
 - 駆動されたパラメータ（式・ノード出力・ブレンド）への `set_parameter` / `set_keyframes` は `driven-parameter` で拒否
 - 動き（`AI-8`）: `set_keyframes` / `clear_animation` / `set_layer` も `edit`（と `live_edit`）の
-  操作で、確認は出ない（undo で戻る）。対象は 2 種類で、フィールドは操作の隣に書く
+  操作で、確認は出ない（`live_edit` ならアプリの undo で戻る。`edit` の下書きに undo は無い）。対象は 2 種類で、フィールドは操作の隣に書く
   - ノードのパラメータ: `path` + `node` + `key`
   - レイヤーの殻: `comp` + `layer` + `property`（`anchor_point` / `position` / `scale` /
     `rotation` / `opacity` / `audio_gain` / `time_remap`）

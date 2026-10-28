@@ -377,3 +377,38 @@ fn node_types_are_listed_and_described_from_the_registry() {
     let reply = call(&server, "describe_node", json!({"type_key": "no.such"}));
     assert_eq!(failure(&reply)["id"], "unknown-node-type");
 }
+
+#[test]
+fn keyframes_and_the_layer_shell_are_edited_over_the_wire() {
+    let server = server(&[]);
+    ok(&call(&server, "new_project", json!({})));
+    let target = json!({"comp": "c", "layer": "l"});
+    let mut ops = assemble().as_array().unwrap().clone();
+    ops.extend([
+        // frame is the composition's frame; the layer starts at 2 below.
+        json!({"op": "set_layer", "comp": "c", "layer": "l", "start_frame": 2, "name": "Keyed",
+               "opacity": 0.5}),
+        json!({"op": "set_keyframes", "path": target, "node": "r", "key": "width",
+               "keys": [{"frame": 2, "value": 10, "interpolation": "linear"},
+                        {"frame": 4, "value": 50, "interpolation": "bezier"}]}),
+        json!({"op": "set_keyframes", "comp": "c", "layer": "l", "property": "position",
+               "component": 1, "keys": [{"frame": 2, "value": 0, "interpolation": "step"}]}),
+        json!({"op": "clear_animation", "comp": "c", "layer": "l", "property": "position",
+               "component": 1, "value": 3}),
+    ]);
+    ok(&call(&server, "edit", json!({"ops": ops})));
+
+    // A key before the layer's start is refused with its code and index.
+    let doc = call(&server, "inspect_document", json!({"draft": true}));
+    let comp_id = ok(&doc)["compositions"][0]["id"].clone();
+    let layer_id = ok(&doc)["compositions"][0]["layers"][0]["id"].clone();
+    let reply = call(
+        &server,
+        "edit",
+        json!({"ops": [{"op": "set_keyframes", "comp": comp_id, "layer": layer_id,
+            "property": "opacity",
+            "keys": [{"frame": 0, "value": 1, "interpolation": "linear"}]}]}),
+    );
+    assert_eq!(failure(&reply)["id"], "key-before-layer-start");
+    assert_eq!(failure(&reply)["index"], 0);
+}

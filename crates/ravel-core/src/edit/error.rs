@@ -3,8 +3,8 @@
 
 use super::document::NetworkPath;
 use super::ops::PortRef;
-use crate::composition::DocumentValidationError;
 use crate::composition::templates::TemplateError;
+use crate::composition::{DocumentValidationError, ShellProperty};
 use crate::graph::GraphError;
 use crate::id::{CompId, EdgeId, LayerId, NodeId};
 use thiserror::Error;
@@ -49,6 +49,26 @@ pub enum EditError {
         "parameter {key:?} of node {node:?} is driven by an expression, a node output or a blend"
     )]
     DrivenParameter { node: NodeId, key: String },
+    #[error("{target} has no component {component}")]
+    UnknownChannel { target: String, component: u32 },
+    #[error("invalid keyframes: {0}")]
+    InvalidKeyframes(String),
+    #[error("frame {frame} is before the start of layer {layer:?}")]
+    KeyBeforeLayerStart { layer: LayerId, frame: u64 },
+    #[error("shell property {property:?} of layer {layer:?} is animated")]
+    AnimatedShellProperty {
+        layer: LayerId,
+        property: ShellProperty,
+    },
+    #[error(
+        "shell property {property:?} of layer {layer:?} is driven by an expression, a node output or a blend"
+    )]
+    DrivenShellProperty {
+        layer: LayerId,
+        property: ShellProperty,
+    },
+    #[error("invalid layer edit: {0}")]
+    InvalidLayerEdit(String),
     #[error("node {node:?} has no such port {port:?} (input side: {input})")]
     PortNotFound {
         node: NodeId,
@@ -90,8 +110,16 @@ impl EditError {
             Self::UnknownNodeType(_) => "unknown-node-type",
             Self::UnknownParameter { .. } => "unknown-parameter",
             Self::ParameterTypeMismatch { .. } => "parameter-type-mismatch",
-            Self::AnimatedParameter { .. } => "animated-parameter",
-            Self::DrivenParameter { .. } => "driven-parameter",
+            Self::AnimatedParameter { .. } | Self::AnimatedShellProperty { .. } => {
+                "animated-parameter"
+            }
+            Self::UnknownChannel { .. } => "unknown-channel",
+            Self::InvalidKeyframes(_) => "invalid-keyframes",
+            Self::KeyBeforeLayerStart { .. } => "key-before-layer-start",
+            Self::InvalidLayerEdit(_) => "invalid-layer-edit",
+            // A shell property reports the same codes as a node parameter:
+            // the caller's remedy is the same.
+            Self::DrivenParameter { .. } | Self::DrivenShellProperty { .. } => "driven-parameter",
             Self::PortNotFound { .. } => "port-not-found",
             Self::PortTypeMismatch { .. } => "port-type-mismatch",
             Self::Graph(_) => "graph",

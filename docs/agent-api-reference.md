@@ -722,6 +722,13 @@ transforms it is built from (`NetworkPath`, `CompositionSettings`,
 // output port follow in the same step. A parameter driven by an expression, a node
 // output or a blend is `DrivenParameter` ("driven-parameter") unless
 // `EditContext::allow_driven_overwrite` (only the Properties scrub sets it).
+// Animation: SetKeyframes / ClearAnimation take a `ChannelTarget` (`Parameter {path, node, key}`
+// or `Shell {comp, layer, property: ShellProperty}`, flattened into the op's JSON), a `component`
+// and, for SetKeyframes, `keys: [KeyInput {frame (COMPOSITION frame), value, interpolation}]`;
+// SetLayer sets only the fields it is given (`parent: null` clears). Refusals: driven-parameter,
+// animated-parameter (a constant on an animated shell channel), key-before-layer-start,
+// invalid-keyframes, unknown-channel, invalid-layer-edit.
+// {"op":"set_keyframes","comp":"c","layer":"l","property":"opacity","keys":[{"frame":0,"value":0,"interpolation":"linear"}]}
 edit::apply(&Document, &EditOp, &EditContext) -> Result<Applied, EditError>
 edit::apply_batch(&Document, &[EditOp], &EditContext) -> Result<Applied, BatchError>
 Applied { document, created: Vec<Created>, aliases: BTreeMap<String, Created> }
@@ -744,7 +751,9 @@ it has not committed yet; `edit::apply` runs the same functions.
 the Viewer gizmos call for a gesture write (they fall back to a constant when an
 animated parameter has no frame; the layer entry point refuses instead).
 `ravel_core::animation::curve::set_curve_value` (re-exported by `ravel_ui::keyframes`)
-writes a key keeping the interpolation of an existing one.
+writes a key keeping the interpolation of an existing one; `set_curve_interpolation` (same module, re-exported
+the same way) switches a key's mode and seeds default bezier handles. `Layer::shell_channel_mut(ShellProperty, n)`,
+`ParameterValue::channel_mut(n)` and `Layer::key_frame_for_comp` resolve a channel / a comp frame for the Timeline and the edit layer alike.
 
 ### `exposed` — Exposed parameter declarations (REQ-PROJ-006)
 

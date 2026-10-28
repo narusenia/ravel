@@ -53,6 +53,22 @@ undo 1 段**が操作ごとに実装し直さずに手に入る（計画:
       操作の JSON 例と注意（クランプ、置換、エラーになる条件）を足す
 - [ ] `mise run check`
 
+## 動きの操作（`set_keyframes` / `clear_animation` / `set_layer`）の足場
+
+- 対象は `ChannelTarget`（`Parameter {path, node, key}` / `Shell {comp, layer, property}`、
+  JSON は操作のフィールドの隣に平らに書く）。UI の `PropertyRowId` の `Network` / `Shell` と同じ区別
+- 書き込みは `edit/animation.rs`。チャンネルの解決は UI と同じ関数を通す
+  （`Layer::shell_channel_mut`、`ParameterValue::channel_mut`、`set_curve_interpolation`）。
+  ここに別の解決を作らない。ベジェのハンドルは `set_curve_interpolation` の種づけ（UI の既定）
+- キーの `frame` はコンポのフレーム。`Layer::key_frame_for_comp`（`comp_frame_for_key` の逆）で
+  ローカルへ直す。`local_frame` は 0 で頭打ちなので、ここでは使わない
+- 駆動されたチャンネルは `driven-parameter`、アニメ済みの殻への定数は `animated-parameter`。
+  殻用の variant（`DrivenShellProperty` / `AnimatedShellProperty`）は**同じ `code()`** を返す
+  （呼び出し側の対処が同じため）
+- `Document::validate` は親子の循環を見ない。`set_layer` の `parent` は `edit/mod.rs` で
+  自分自身・循環を `invalid-layer-edit` として拒否する
+- 確認は出ない（`is_destructive` は `false`、ライブ口の `first_removal` に入れない）
+
 ## 忘れやすいもの
 
 - **ジェスチャ中の更新は undo を積まない経路で流す**。パラメータの scrub は

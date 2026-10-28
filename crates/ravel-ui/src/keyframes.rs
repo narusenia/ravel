@@ -34,10 +34,10 @@ use std::sync::Arc;
 
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::animation::curve::KeyframeCurve;
-pub use ravel_core::animation::curve::set_curve_value;
+pub use ravel_core::animation::curve::{set_curve_interpolation, set_curve_value};
 use ravel_core::animation::interpolation::Interpolation;
 use ravel_core::animation::step::StepCurve;
-use ravel_core::composition::Layer;
+use ravel_core::composition::{Layer, ShellProperty};
 use ravel_core::graph::ParameterValue;
 use ravel_core::id::NodeId;
 use ravel_core::network as net;
@@ -136,7 +136,19 @@ pub fn layer_local_frame(layer: &Layer, comp_frame: u64) -> u64 {
 /// The comp-timeline frame a layer-local keyframe is displayed at
 /// (`local - in + start`; can be negative when the key sits before `in`).
 pub fn comp_frame_for_key(layer: &Layer, local_frame: u64) -> i64 {
-    local_frame as i64 - layer.in_frame as i64 + layer.start_frame
+    layer.comp_frame_for_key(local_frame)
+}
+
+/// The edit layer's name for a Timeline shell group.
+fn shell_property(group: PropertyGroup) -> ShellProperty {
+    match group {
+        PropertyGroup::AnchorPoint => ShellProperty::AnchorPoint,
+        PropertyGroup::Position => ShellProperty::Position,
+        PropertyGroup::Scale => ShellProperty::Scale,
+        PropertyGroup::Rotation => ShellProperty::Rotation,
+        PropertyGroup::Opacity => ShellProperty::Opacity,
+        PropertyGroup::AudioGain => ShellProperty::AudioGain,
+    }
 }
 
 /// The shell groups always shown in the tree, in display order.
@@ -739,50 +751,6 @@ pub fn set_curve_tangent(
     true
 }
 
-/// Set a keyframe's interpolation mode without changing its value or tangent
-/// values. The interpolation stored on a key controls the segment after it.
-pub fn set_curve_interpolation(
-    curve: &mut KeyframeCurve,
-    frame: u64,
-    interpolation: Interpolation,
-) -> bool {
-    let Some(index) = curve
-        .keyframes()
-        .iter()
-        .position(|keyframe| keyframe.frame == frame)
-    else {
-        return false;
-    };
-    let mut keyframe = curve.keyframes()[index];
-    let mut next = curve.keyframes().get(index + 1).copied();
-
-    // Fresh Linear/Step keys have zero-length tangents. When their outgoing
-    // segment becomes Bezier, seed one-third handles along the same straight
-    // line. The curve is visually unchanged, but both controls become
-    // immediately grabbable. Previously edited non-zero tangents survive mode
-    // switches verbatim.
-    if interpolation == Interpolation::Bezier
-        && keyframe.interpolation != Interpolation::Bezier
-        && let Some(next_keyframe) = &mut next
-    {
-        let third = 1.0 / 3.0;
-        let frame_delta = (next_keyframe.frame - keyframe.frame) as f32 * third;
-        let value_delta = (next_keyframe.value - keyframe.value) * third;
-        if keyframe.tangent_out == Vec2(0.0, 0.0) {
-            keyframe.tangent_out = Vec2(frame_delta, value_delta);
-        }
-        if next_keyframe.tangent_in == Vec2(0.0, 0.0) {
-            next_keyframe.tangent_in = Vec2(-frame_delta, -value_delta);
-        }
-    }
-    keyframe.interpolation = interpolation;
-    curve.insert_keyframe(keyframe);
-    if let Some(next) = next {
-        curve.insert_keyframe(next);
-    }
-    true
-}
-
 /// Set a tangent on one layer property channel. Network parameters are rebuilt
 /// through the immutable graph path used by the other keyframe operations.
 pub fn set_keyframe_tangent(
@@ -1174,18 +1142,7 @@ fn mutate_channel(
 ) -> bool {
     match id {
         PropertyRowId::Shell(group) => {
-            let channel = match group {
-                PropertyGroup::Position => layer.transform.position.get_mut(component),
-                PropertyGroup::Scale => layer.transform.scale.get_mut(component),
-                PropertyGroup::Rotation => {
-                    (component == 0).then_some(&mut layer.transform.rotation)
-                }
-                PropertyGroup::Opacity => (component == 0).then_some(&mut layer.opacity),
-                PropertyGroup::AudioGain => (component == 0)
-                    .then(|| layer.audio.as_mut().map(|audio| &mut audio.gain))
-                    .flatten(),
-                PropertyGroup::AnchorPoint => layer.transform.anchor_point.get_mut(component),
-            };
+            let channel = layer.shell_channel_mut(shell_property(*group), component);
             let Some(channel) = channel else {
                 return false;
             };
@@ -1199,15 +1156,7 @@ fn mutate_channel(
             let Some(param) = updated.parameters.iter_mut().find(|p| p.key == *key) else {
                 return false;
             };
-            let channel = match &mut param.value {
-                ParameterValue::Channel(ch) | ParameterValue::IntChannel(ch) if component == 0 => {
-                    Some(ch)
-                }
-                ParameterValue::Channel2(chs) => chs.get_mut(component),
-                ParameterValue::Channel3(chs) => chs.get_mut(component),
-                ParameterValue::Channel4(chs) => chs.get_mut(component),
-                _ => None,
-            };
+            let channel = param.value.channel_mut(component);
             let Some(channel) = channel else {
                 return false;
             };

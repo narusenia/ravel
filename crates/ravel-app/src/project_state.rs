@@ -8286,6 +8286,73 @@ mod tests {
         });
     }
 
+    /// Keyframes and shell edits ride the same path: a batch that adds a layer,
+    /// keys its opacity and renames it is one undo step.
+    #[gpui::test]
+    fn keyframe_and_layer_edits_in_one_batch_are_one_undo_step(cx: &mut TestAppContext) {
+        use ravel_core::composition::ShellProperty;
+        use ravel_core::edit::{
+            ChannelTarget, CompRef, CompositionSettings, EditOp, KeyInput, KeyInterpolation,
+            LayerRef,
+        };
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        project.update(cx, |project, cx| {
+            let original = project.document().clone();
+            let comp = || CompRef::Alias("c".into());
+            let layer = || LayerRef::Alias("l".into());
+            let ops = [
+                EditOp::AddComposition {
+                    settings: CompositionSettings::fallback("Batch"),
+                    alias: Some("c".into()),
+                },
+                EditOp::AddLayer {
+                    comp: comp(),
+                    template: "solid".into(),
+                    alias: Some("l".into()),
+                },
+                EditOp::SetKeyframes {
+                    target: ChannelTarget::Shell {
+                        comp: comp(),
+                        layer: layer(),
+                        property: ShellProperty::Opacity,
+                    },
+                    component: 0,
+                    keys: vec![KeyInput {
+                        frame: 0,
+                        value: 0.5,
+                        interpolation: KeyInterpolation::Linear,
+                    }],
+                },
+                EditOp::SetLayer {
+                    comp: comp(),
+                    layer: layer(),
+                    name: Some("Keyed".into()),
+                    start_frame: None,
+                    in_frame: None,
+                    out_frame: None,
+                    anchor_point: None,
+                    position: None,
+                    scale: None,
+                    rotation: None,
+                    opacity: None,
+                    blend_mode: None,
+                    parent: None,
+                    solo: None,
+                    muted: None,
+                    locked: None,
+                },
+            ];
+            project
+                .commit_edit_ops(&ops, cx)
+                .expect("the batch applies");
+            assert_ne!(*project.document(), original);
+            assert!(project.undo(cx), "the batch left no undo step");
+            assert_eq!(*project.document(), original);
+            assert!(!project.store.can_undo(), "more than one step");
+        });
+    }
+
     /// A batch whose second operation fails is refused whole: the first one is
     /// not committed and no undo step is left.
     #[gpui::test]

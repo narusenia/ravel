@@ -55,8 +55,9 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
 
 /// The index of the first operation that removes something, if any.
 ///
-/// Removal is refused until a confirmation dialog exists. `Disconnect` is
-/// let through: one undo brings the edge back.
+/// Removal waits for the user's confirmation. `Disconnect` is let through:
+/// one undo brings the edge back (`EditOp::is_destructive` is a
+/// classification, not this condition).
 pub fn first_removal(ops: &[EditOp]) -> Option<usize> {
     ops.iter().position(|op| {
         matches!(
@@ -68,13 +69,23 @@ pub fn first_removal(ops: &[EditOp]) -> Option<usize> {
     })
 }
 
-/// The response refusing a batch that removes something.
-pub fn confirmation_required(id: &Value, index: usize) -> String {
+/// The response when the user declined the removal (or did not answer).
+pub fn confirmation_denied(id: &Value, index: usize) -> String {
     error_line(
         id,
-        "confirmation-required",
+        "confirmation-denied",
         Some(index),
-        "operations that remove objects need user confirmation, which is not available yet",
+        "the user did not approve the removal; the document is unchanged",
+    )
+}
+
+/// The response when the document changed while the user was being asked.
+pub fn document_changed(id: &Value) -> String {
+    error_line(
+        id,
+        "document-changed",
+        None,
+        "the document changed while waiting for confirmation; nothing was applied",
     )
 }
 
@@ -106,8 +117,8 @@ pub fn batch_error_response(id: &Value, err: &BatchError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravel_core::edit::CompRef;
-    use ravel_core::id::CompId;
+    use ravel_core::edit::{CompRef, NetworkPath};
+    use ravel_core::id::{CompId, LayerId};
 
     fn parsed(line: &str) -> Value {
         serde_json::from_str(line).unwrap()
@@ -149,10 +160,20 @@ mod tests {
     }
 
     #[test]
-    fn the_refusal_names_its_code_and_index() {
-        let response = parsed(&confirmation_required(&json!("a"), 2));
+    fn a_denial_names_its_code_and_index() {
+        let response = parsed(&confirmation_denied(&json!("a"), 2));
         assert_eq!(response["id"], "a");
-        assert_eq!(response["error"]["code"], "confirmation-required");
+        assert_eq!(response["error"]["code"], "confirmation-denied");
         assert_eq!(response["error"]["index"], 2);
+    }
+
+    #[test]
+    fn disconnect_is_not_held_back() {
+        let op = EditOp::Disconnect {
+            path: NetworkPath::layer(CompId::new(1), LayerId::new(1)).into(),
+            edge: ravel_core::id::EdgeId::new(1),
+        };
+        assert!(op.is_destructive());
+        assert_eq!(first_removal(&[op]), None);
     }
 }

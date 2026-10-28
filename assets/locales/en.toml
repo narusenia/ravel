@@ -289,6 +289,13 @@ user = "Customized"
 panel = "Panel only"
 unassigned = "Not assigned"
 
+[live_edit.confirm]
+title = "Allow this edit?"
+message = "An agent connected to Ravel asks to remove the following. You can undo it afterwards."
+composition = "Composition: {name}"
+layer = "Layer: {name} (in composition {comp})"
+node = "Node: {type} (id {id})"
+
 [project.unsaved]
 title = "Save changes?"
 message = "Your unsaved changes will be lost if you continue without saving."

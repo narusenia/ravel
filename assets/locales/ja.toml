@@ -284,6 +284,13 @@ user = "ユーザー設定"
 panel = "パネル固有"
 unassigned = "割り当てなし"
 
+[live_edit.confirm]
+title = "この編集を許可しますか？"
+message = "Ravel に接続したエージェントが、次の削除を求めています。実行後に元に戻せます。"
+composition = "コンポジション: {name}"
+layer = "レイヤー: {name}（コンポジション {comp}）"
+node = "ノード: {type}（id {id}）"
+
 [project.unsaved]
 title = "変更を保存しますか？"
 message = "保存せずに続けると、未保存の変更は失われます。"

@@ -16,17 +16,24 @@
 //! request, one commit, one undo step — and answers on a per-request channel.
 //! Nothing here runs from `render()` and nothing is parked in a `Global`.
 //!
+//! A request that removes something waits for the user instead
+//! ([`confirm`]): [`LiveEdit`] emits [`LiveEditEvent::ConfirmRemoval`], the
+//! workspace (which owns the window) subscribes and opens the dialog, and the
+//! drain task awaits the verdict. Requests are handled one at a time, so a
+//! request from another connection simply queues behind the open question.
+//!
 //! The wire format is in [`protocol`]; `docs/dev/live-edit.md` is the guide.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
 
-use gpui::{App, AppContext as _, Context, Entity, Task};
+use gpui::{App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Task, WeakEntity};
 
 use crate::app_settings::{AppSettings, SettingsScope};
 use crate::project_state::ProjectState;
 
+pub mod confirm;
 pub mod protocol;
 #[cfg(unix)]
 mod unix;
@@ -38,6 +45,15 @@ pub struct Job {
     pub request: protocol::Request,
     pub reply: mpsc::SyncSender<String>,
 }
+
+/// What the door asks the window-owning side to do.
+pub enum LiveEditEvent {
+    /// Ask the user whether `request.items` may be removed. Not answering is
+    /// answering no.
+    ConfirmRemoval(confirm::RemovalRequest),
+}
+
+impl EventEmitter<LiveEditEvent> for LiveEdit {}
 
 type JobSender = futures::channel::mpsc::UnboundedSender<Job>;
 
@@ -77,25 +93,19 @@ pub fn start_at(
     if !enabled {
         return None;
     }
-    let (tx, mut rx) = futures::channel::mpsc::unbounded::<Job>();
+    let (tx, rx) = futures::channel::mpsc::unbounded::<Job>();
     #[cfg(unix)]
     let path = unix::open(endpoint, tx)?;
     #[cfg(windows)]
     windows::open(endpoint, tx)?;
-    let project = project.downgrade();
-    let entity = cx.new(|cx: &mut Context<LiveEdit>| LiveEdit {
-        #[cfg(unix)]
-        path: path.clone(),
-        _drain: cx.spawn(async move |_this, cx| {
-            use futures::StreamExt as _;
-            while let Some(job) = rx.next().await {
-                let Some(project) = project.upgrade() else {
-                    break;
-                };
-                let reply = cx.update(|cx| project.update(cx, |p, cx| apply(p, &job.request, cx)));
-                let _ = job.reply.send(reply);
-            }
-        }),
+    let entity = cx.new(|cx: &mut Context<LiveEdit>| {
+        LiveEdit::new(
+            project,
+            rx,
+            #[cfg(unix)]
+            path.clone(),
+            cx,
+        )
     });
     #[cfg(unix)]
     cx.on_app_quit(move |_| {
@@ -106,6 +116,70 @@ pub fn start_at(
     Some(entity)
 }
 
+impl LiveEdit {
+    fn new(
+        project: &Entity<ProjectState>,
+        mut rx: futures::channel::mpsc::UnboundedReceiver<Job>,
+        #[cfg(unix)] path: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let project = project.downgrade();
+        Self {
+            #[cfg(unix)]
+            path,
+            _drain: cx.spawn(async move |this, cx| {
+                use futures::StreamExt as _;
+                while let Some(job) = rx.next().await {
+                    let Some(project) = project.upgrade() else {
+                        break;
+                    };
+                    let Some(reply) = handle(&project, &this, &job.request, cx).await else {
+                        break;
+                    };
+                    let _ = job.reply.send(reply);
+                }
+            }),
+        }
+    }
+}
+
+/// One request, from the line to the response line. `None` when the door or
+/// the project is gone.
+async fn handle(
+    project: &Entity<ProjectState>,
+    door: &WeakEntity<LiveEdit>,
+    request: &protocol::Request,
+    cx: &mut AsyncApp,
+) -> Option<String> {
+    let Some(index) = protocol::first_removal(&request.ops) else {
+        return Some(cx.update(|cx| project.update(cx, |p, cx| apply(p, request, cx))));
+    };
+    // What the user is shown is this document; the batch is applied to this
+    // document or to nothing.
+    let (asked, verdict) = cx.update(|cx| {
+        let doc = project.read(cx).document().clone();
+        let (ask, verdict) =
+            confirm::RemovalRequest::new(confirm::describe_removals(&doc, &request.ops));
+        // With nobody subscribed the event is dropped with `ask`, which reads
+        // as a denial.
+        door.update(cx, |_, cx| cx.emit(LiveEditEvent::ConfirmRemoval(ask)))
+            .ok()?;
+        Some((doc, verdict))
+    })?;
+    if !verdict.await.unwrap_or(false) {
+        return Some(protocol::confirmation_denied(&request.id, index));
+    }
+    Some(cx.update(|cx| {
+        project.update(cx, |p, cx| {
+            if *p.document() == asked {
+                apply(p, request, cx)
+            } else {
+                protocol::document_changed(&request.id)
+            }
+        })
+    }))
+}
+
 #[cfg(unix)]
 impl Drop for LiveEdit {
     fn drop(&mut self) {
@@ -113,15 +187,14 @@ impl Drop for LiveEdit {
     }
 }
 
-/// Apply one request on the main thread; the response line.
-pub fn apply(
+/// Commit one request on the main thread; the response line. A request that
+/// removes something must have been confirmed before it gets here
+/// ([`handle`] is the only caller that lets one through).
+fn apply(
     project: &mut ProjectState,
     request: &protocol::Request,
     cx: &mut Context<ProjectState>,
 ) -> String {
-    if let Some(index) = protocol::first_removal(&request.ops) {
-        return protocol::confirmation_required(&request.id, index);
-    }
     match project.commit_edit_ops(&request.ops, cx) {
         Ok(applied) => protocol::ok_response(&request.id, &applied),
         Err(err) => protocol::batch_error_response(&request.id, &err),
@@ -331,31 +404,202 @@ mod tests {
         });
     }
 
+    /// A door with no socket: jobs are pushed by the test, and the
+    /// confirmation questions it emits are collected.
+    struct Harness {
+        project: Entity<ProjectState>,
+        tx: futures::channel::mpsc::UnboundedSender<Job>,
+        asked: std::rc::Rc<std::cell::RefCell<Vec<confirm::RemovalRequest>>>,
+        _door: Entity<LiveEdit>,
+        _sub: gpui::Subscription,
+    }
+
+    impl Harness {
+        fn new(cx: &mut TestAppContext) -> Self {
+            disable_background_eval_for_tests();
+            let project = cx.new(ProjectState::new);
+            let (tx, rx) = futures::channel::mpsc::unbounded::<Job>();
+            let door = cx.update(|cx| {
+                cx.new(|cx| LiveEdit::new(&project, rx, std::path::PathBuf::new(), cx))
+            });
+            let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let sink = asked.clone();
+            let _sub = cx.update(|cx| {
+                cx.subscribe(&door, move |_, event: &LiveEditEvent, _| {
+                    let LiveEditEvent::ConfirmRemoval(request) = event;
+                    sink.borrow_mut().push(request.clone());
+                })
+            });
+            Self {
+                project,
+                tx,
+                asked,
+                _door: door,
+                _sub,
+            }
+        }
+
+        fn send(&self, id: i64, ops: &[EditOp]) -> mpsc::Receiver<String> {
+            let line = serde_json::json!({"id": id, "ops": ops}).to_string();
+            let request = protocol::parse_request(&line).unwrap();
+            let (reply, answer) = mpsc::sync_channel(1);
+            self.tx.unbounded_send(Job { request, reply }).unwrap();
+            answer
+        }
+
+        fn document(&self, cx: &TestAppContext) -> ravel_core::composition::Document {
+            self.project.read_with(cx, |p, _| p.document().clone())
+        }
+
+        fn undo_steps(&self, cx: &mut TestAppContext) -> usize {
+            self.project.update(cx, |p, cx| {
+                let mut steps = 0;
+                while p.undo(cx) {
+                    steps += 1;
+                }
+                steps
+            })
+        }
+    }
+
+    fn remove_first_comp(doc: &ravel_core::composition::Document) -> [EditOp; 1] {
+        [EditOp::RemoveComposition {
+            comp: ravel_core::edit::CompRef::Id(doc.compositions.keys().next().copied().unwrap()),
+        }]
+    }
+
+    fn reply_of(answer: &mpsc::Receiver<String>) -> Value {
+        serde_json::from_str(&answer.try_recv().expect("no reply yet")).unwrap()
+    }
+
     #[gpui::test]
-    fn a_request_that_removes_is_refused_whole(cx: &mut TestAppContext) {
-        disable_background_eval_for_tests();
-        let project = cx.new(ProjectState::new);
-        let original = project.read_with(cx, |p, _| p.document().clone());
-        let comp = original.compositions.keys().next().copied().unwrap();
-        let ops = [
-            EditOp::AddComposition {
-                settings: CompositionSettings::fallback("Live"),
-                alias: None,
-            },
-            EditOp::RemoveComposition {
-                comp: ravel_core::edit::CompRef::Id(comp),
-            },
-        ];
-        let line = serde_json::json!({"id": 1, "ops": ops}).to_string();
-        let request = protocol::parse_request(&line).unwrap();
-        let reply = project.update(cx, |p, cx| apply(p, &request, cx));
-        let reply: Value = serde_json::from_str(&reply).unwrap();
-        assert_eq!(reply["error"]["code"], "confirmation-required");
-        assert_eq!(reply["error"]["index"], 1);
-        project.update(cx, |p, cx| {
-            assert_eq!(*p.document(), original);
-            assert!(!p.undo(cx), "a refusal left an undo step");
-        });
+    fn a_removal_waits_and_an_approval_applies_it_as_one_undo_step(cx: &mut TestAppContext) {
+        let h = Harness::new(cx);
+        // Two compositions, so a removal leaves a document that differs.
+        let add = [EditOp::AddComposition {
+            settings: CompositionSettings::fallback("Second"),
+            alias: None,
+        }];
+        h.project
+            .update(cx, |p, cx| p.commit_edit_ops(&add, cx))
+            .unwrap();
+        let before = h.document(cx);
+        let answer = h.send(1, &remove_first_comp(&before));
+        cx.run_until_parked();
+        assert_eq!(h.asked.borrow().len(), 1, "the user was not asked");
+        assert_eq!(
+            h.asked.borrow()[0].items,
+            [confirm::Removal::Composition {
+                name: before.compositions.values().next().unwrap().name.clone()
+            }]
+        );
+        assert!(answer.try_recv().is_err(), "answered before the user did");
+        assert_eq!(h.document(cx), before, "applied without approval");
+
+        h.asked.borrow()[0].approve();
+        cx.run_until_parked();
+        let reply = reply_of(&answer);
+        assert!(reply["ok"].is_object(), "{reply}");
+        assert_ne!(h.document(cx), before);
+        // The setup commit plus the approved removal: two steps, not three.
+        assert_eq!(h.undo_steps(cx), 2);
+    }
+
+    #[gpui::test]
+    fn a_denial_leaves_the_document_and_its_history_alone(cx: &mut TestAppContext) {
+        let h = Harness::new(cx);
+        let before = h.document(cx);
+        let answer = h.send(7, &remove_first_comp(&before));
+        cx.run_until_parked();
+        h.asked.borrow()[0].deny();
+        cx.run_until_parked();
+        let reply = reply_of(&answer);
+        assert_eq!(reply["id"], 7);
+        assert_eq!(reply["error"]["code"], "confirmation-denied");
+        assert_eq!(h.document(cx), before);
+        assert_eq!(h.undo_steps(cx), 0);
+    }
+
+    /// Escape and the close button never call a handler: they drop the dialog
+    /// and with it the request.
+    #[gpui::test]
+    fn a_dialog_closed_unanswered_is_a_denial(cx: &mut TestAppContext) {
+        let h = Harness::new(cx);
+        let before = h.document(cx);
+        let answer = h.send(1, &remove_first_comp(&before));
+        cx.run_until_parked();
+        h.asked.borrow_mut().clear();
+        cx.run_until_parked();
+        assert_eq!(reply_of(&answer)["error"]["code"], "confirmation-denied");
+        assert_eq!(h.document(cx), before);
+        assert_eq!(h.undo_steps(cx), 0);
+    }
+
+    #[gpui::test]
+    fn nobody_listening_is_a_denial(cx: &mut TestAppContext) {
+        let mut h = Harness::new(cx);
+        h._sub = cx.update(|cx| cx.subscribe(&h._door, |_, _: &LiveEditEvent, _| {}));
+        let before = h.document(cx);
+        let answer = h.send(1, &remove_first_comp(&before));
+        cx.run_until_parked();
+        assert_eq!(reply_of(&answer)["error"]["code"], "confirmation-denied");
+        assert_eq!(h.document(cx), before);
+    }
+
+    #[gpui::test]
+    fn an_approval_after_the_document_changed_applies_nothing(cx: &mut TestAppContext) {
+        let h = Harness::new(cx);
+        let before = h.document(cx);
+        let answer = h.send(1, &remove_first_comp(&before));
+        cx.run_until_parked();
+        let edit = [EditOp::AddComposition {
+            settings: CompositionSettings::fallback("Typed by the user"),
+            alias: None,
+        }];
+        h.project
+            .update(cx, |p, cx| p.commit_edit_ops(&edit, cx))
+            .unwrap();
+        let edited = h.document(cx);
+        h.asked.borrow()[0].approve();
+        cx.run_until_parked();
+        assert_eq!(reply_of(&answer)["error"]["code"], "document-changed");
+        assert_eq!(h.document(cx), edited);
+    }
+
+    #[gpui::test]
+    fn a_second_request_queues_behind_the_open_question(cx: &mut TestAppContext) {
+        let h = Harness::new(cx);
+        let before = h.document(cx);
+        let removal = h.send(1, &remove_first_comp(&before));
+        let add = [EditOp::AddComposition {
+            settings: CompositionSettings::fallback("Other"),
+            alias: None,
+        }];
+        let other = h.send(2, &add);
+        cx.run_until_parked();
+        assert!(other.try_recv().is_err(), "overtook the open question");
+        h.asked.borrow()[0].deny();
+        cx.run_until_parked();
+        assert_eq!(reply_of(&removal)["error"]["code"], "confirmation-denied");
+        assert!(reply_of(&other)["ok"].is_object());
+    }
+
+    #[gpui::test]
+    fn a_disconnect_is_applied_without_asking(cx: &mut TestAppContext) {
+        let h = Harness::new(cx);
+        let before = h.document(cx);
+        let comp = before.compositions.keys().next().copied().unwrap();
+        let layer = ravel_core::id::LayerId::new(1);
+        let op = [EditOp::Disconnect {
+            path: ravel_core::edit::NetworkPath::layer(comp, layer).into(),
+            edge: ravel_core::id::EdgeId::new(999),
+        }];
+        let answer = h.send(1, &op);
+        cx.run_until_parked();
+        assert!(h.asked.borrow().is_empty(), "a disconnect was asked about");
+        // The edge does not exist: the batch fails on its own terms, which is
+        // the proof it reached the commit rather than the dialog.
+        assert!(reply_of(&answer)["error"]["code"].is_string());
     }
 
     #[gpui::test]

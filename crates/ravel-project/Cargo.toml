@@ -18,6 +18,16 @@ zip = { workspace = true }
 dirs = { workspace = true }
 tracing = { workspace = true }
 
+# The current user's SID, which names the live-edit pipe (`paths::live_edit_endpoint`).
+# Already in the lock graph; only the features the SID lookup needs.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }

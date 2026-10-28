@@ -9,17 +9,10 @@ use std::path::{Path, PathBuf};
 
 use super::{JobSender, serve_connection};
 
-/// `<runtime dir>/ravel/live-edit.sock`, the runtime directory falling back to
-/// the cache directory.
-fn default_path() -> Option<PathBuf> {
-    let base = dirs::runtime_dir().or_else(dirs::cache_dir)?;
-    Some(base.join("ravel").join("live-edit.sock"))
-}
-
 /// Bind the socket and start accepting. The path it listens on, or `None`
 /// (logged) when it could not be opened or another instance owns it.
 pub fn open(endpoint: Option<PathBuf>, tx: JobSender) -> Option<PathBuf> {
-    let path = endpoint.or_else(default_path)?;
+    let path = endpoint.or_else(ravel_project::paths::live_edit_endpoint)?;
     match bind(&path) {
         Ok(Some(listener)) => {
             std::thread::Builder::new()

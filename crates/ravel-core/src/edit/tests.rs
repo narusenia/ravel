@@ -1381,3 +1381,615 @@ fn a_network_path_written_with_ids_still_reads() {
         serde_json::from_value(serde_json::json!({"comp": 7, "layer": 3})).unwrap();
     assert!(short.subnets.is_empty());
 }
+
+// ----- keyframes and the layer shell --------------------------------------------
+
+mod animation {
+    use super::*;
+    use crate::animation::channel::ParameterExpression;
+    use crate::composition::ShellProperty;
+    use crate::eval::EvalContext;
+
+    fn key(frame: u64, value: f32, interpolation: KeyInterpolation) -> KeyInput {
+        KeyInput {
+            frame,
+            value,
+            interpolation,
+        }
+    }
+
+    fn linear(frame: u64, value: f32) -> KeyInput {
+        key(frame, value, KeyInterpolation::Linear)
+    }
+
+    fn param_target(path: &NetworkPath, node: NodeId, key: &str) -> ChannelTarget {
+        ChannelTarget::Parameter {
+            path: path.clone().into(),
+            node: NodeRef::Id(node),
+            key: key.to_string(),
+        }
+    }
+
+    fn shell_target(comp: CompId, layer: LayerId, property: ShellProperty) -> ChannelTarget {
+        ChannelTarget::Shell {
+            comp: CompRef::Id(comp),
+            layer: LayerRef::Id(layer),
+            property,
+        }
+    }
+
+    fn set_keys(target: ChannelTarget, component: u32, keys: Vec<KeyInput>) -> EditOp {
+        EditOp::SetKeyframes {
+            target,
+            component,
+            keys,
+        }
+    }
+
+    fn clear(target: ChannelTarget, component: u32, value: f32) -> EditOp {
+        EditOp::ClearAnimation {
+            target,
+            component,
+            value,
+        }
+    }
+
+    /// A layer starting at composition frame 10 that holds one `style.stroke`.
+    fn started_layer() -> (Document, NetworkPath, NodeId, CompId, LayerId) {
+        let (doc, path, node) = doc_with_node("style.stroke");
+        let (comp, layer) = (path.comp, path.layer);
+        let doc = document::update_layer(&doc, comp, layer, |l| l.start_frame = 10).unwrap();
+        (doc, path, node, comp, layer)
+    }
+
+    fn layer_of(doc: &Document, comp: CompId, layer: LayerId) -> Layer {
+        doc.get_composition(comp)
+            .unwrap()
+            .get_layer(layer)
+            .unwrap()
+            .clone()
+    }
+
+    fn ctx() -> EvalContext {
+        EvalContext::new(0, FrameRate::new(30, 1), (16, 16))
+    }
+
+    /// The channel's value at composition frame `comp_frame`, read the way
+    /// evaluation reads it: at the layer-local frame.
+    fn at(channel: &AnimationChannel, layer: &Layer, comp_frame: u64) -> f32 {
+        channel.evaluate(layer.local_frame(comp_frame) as f64, &ctx())
+    }
+
+    #[test]
+    fn set_keyframes_on_a_node_parameter_evaluates_to_the_keys_at_comp_frames() {
+        let reg = registry();
+        let (doc, path, node, comp, layer) = started_layer();
+        let op = set_keys(
+            param_target(&path, node, "width"),
+            0,
+            vec![linear(10, 2.0), linear(20, 8.0), linear(30, 4.0)],
+        );
+        let applied = apply(&doc, &op, &cx(&reg)).unwrap();
+        let ParameterValue::Channel(channel) = param_of(&applied.document, &path, node, "width")
+        else {
+            panic!("a keyed Float becomes a channel");
+        };
+        let layer = layer_of(&applied.document, comp, layer);
+        assert_eq!(at(&channel, &layer, 10), 2.0);
+        assert_eq!(at(&channel, &layer, 20), 8.0);
+        assert_eq!(at(&channel, &layer, 30), 4.0);
+        assert_eq!(at(&channel, &layer, 15), 5.0, "linear between the keys");
+        let ChannelSource::Keyframes(curve) = &channel.source else {
+            panic!("keys");
+        };
+        let frames: Vec<u64> = curve.keyframes().iter().map(|k| k.frame).collect();
+        assert_eq!(frames, [0, 10, 20], "stored layer-local, not comp frames");
+    }
+
+    #[test]
+    fn set_keyframes_replaces_one_component_and_clamps_to_the_range() {
+        let reg = registry();
+        let (doc, path, node, comp, layer) = started_layer();
+        let hard_end = *reg.param_range("style.stroke", "width").unwrap().hard.end();
+        let ops = [
+            set_keys(
+                param_target(&path, node, "color"),
+                3,
+                vec![linear(10, 0.0), linear(20, 1.0)],
+            ),
+            set_keys(
+                param_target(&path, node, "width"),
+                0,
+                vec![linear(10, hard_end + 1000.0)],
+            ),
+        ];
+        let applied = apply_batch(&doc, &ops, &cx(&reg)).unwrap();
+        let layer = layer_of(&applied.document, comp, layer);
+        let ParameterValue::Channel4(chs) = param_of(&applied.document, &path, node, "color")
+        else {
+            panic!("colour");
+        };
+        assert_eq!(at(&chs[3], &layer, 10), 0.0);
+        assert_eq!(at(&chs[3], &layer, 20), 1.0);
+        assert!(
+            matches!(chs[0].source, ChannelSource::Constant(1.0)),
+            "r untouched"
+        );
+        let ParameterValue::Channel(width) = param_of(&applied.document, &path, node, "width")
+        else {
+            panic!("channel");
+        };
+        assert_eq!(at(&width, &layer, 10), hard_end);
+    }
+
+    #[test]
+    fn a_bezier_key_gets_the_editors_default_handles() {
+        let reg = registry();
+        let (doc, path, node, ..) = started_layer();
+        let op = set_keys(
+            param_target(&path, node, "width"),
+            0,
+            vec![
+                key(10, 0.0, KeyInterpolation::Bezier),
+                key(19, 9.0, KeyInterpolation::Step),
+            ],
+        );
+        let applied = apply(&doc, &op, &cx(&reg)).unwrap();
+        let ParameterValue::Channel(AnimationChannel {
+            source: ChannelSource::Keyframes(curve),
+        }) = param_of(&applied.document, &path, node, "width")
+        else {
+            panic!("keys");
+        };
+        let [first, second] = [curve.keyframes()[0], curve.keyframes()[1]];
+        assert_eq!(first.interpolation, Interpolation::Bezier);
+        assert_eq!(first.tangent_out, crate::types::Vec2(3.0, 3.0));
+        assert_eq!(second.tangent_in, crate::types::Vec2(-3.0, -3.0));
+        assert_eq!(second.interpolation, Interpolation::Step);
+    }
+
+    #[test]
+    fn set_keyframes_on_a_shell_property_evaluates_to_the_keys() {
+        let reg = registry();
+        let (doc, _, _, comp, layer) = started_layer();
+        let ops = [
+            set_keys(
+                shell_target(comp, layer, ShellProperty::Opacity),
+                0,
+                vec![linear(10, 0.0), linear(20, 3.0)],
+            ),
+            set_keys(
+                shell_target(comp, layer, ShellProperty::Position),
+                1,
+                vec![linear(10, 100.0), linear(30, -100.0)],
+            ),
+            set_keys(
+                shell_target(comp, layer, ShellProperty::TimeRemap),
+                0,
+                vec![linear(10, 0.0), linear(20, 50.0)],
+            ),
+        ];
+        let applied = apply_batch(&doc, &ops, &cx(&reg)).unwrap();
+        let l = layer_of(&applied.document, comp, layer);
+        assert_eq!(at(&l.opacity, &l, 10), 0.0);
+        assert_eq!(at(&l.opacity, &l, 20), 1.0, "opacity is clamped to 0..1");
+        assert_eq!(at(&l.transform.position[1], &l, 10), 100.0);
+        assert_eq!(at(&l.transform.position[1], &l, 30), -100.0);
+        assert_eq!(at(&l.transform.position[1], &l, 20), 0.0);
+        assert!(matches!(
+            l.transform.position[0].source,
+            ChannelSource::Constant(_)
+        ));
+        let remap = l.time_remap.as_ref().expect("the time remap is created");
+        assert_eq!(at(remap, &l, 20), 50.0);
+    }
+
+    #[test]
+    fn a_layer_alias_from_the_same_batch_addresses_the_shell() {
+        let reg = registry();
+        let (doc, comp, _) = doc_with_layer(false);
+        let ops = [
+            add_layer(comp_ref(comp), "solid", alias("l")),
+            set_keys(
+                ChannelTarget::Shell {
+                    comp: comp_ref(comp),
+                    layer: LayerRef::Alias("l".into()),
+                    property: ShellProperty::Opacity,
+                },
+                0,
+                vec![linear(0, 0.25)],
+            ),
+        ];
+        let applied = apply_batch(&doc, &ops, &cx(&reg)).unwrap();
+        let Some(Created::Layer(id)) = applied.aliases.get("l").copied() else {
+            panic!("alias");
+        };
+        let l = layer_of(&applied.document, comp, id);
+        assert!(matches!(l.opacity.source, ChannelSource::Keyframes(_)));
+    }
+
+    #[test]
+    fn clear_animation_leaves_a_constant() {
+        let reg = registry();
+        let (doc, path, node, comp, layer) = started_layer();
+        let keyed = [
+            set_keys(
+                param_target(&path, node, "width"),
+                0,
+                vec![linear(10, 2.0), linear(20, 8.0)],
+            ),
+            set_keys(
+                shell_target(comp, layer, ShellProperty::Opacity),
+                0,
+                vec![linear(10, 0.0), linear(20, 1.0)],
+            ),
+        ];
+        let keyed = apply_batch(&doc, &keyed, &cx(&reg)).unwrap().document;
+        let cleared = [
+            clear(param_target(&path, node, "width"), 0, 3.0),
+            clear(shell_target(comp, layer, ShellProperty::Opacity), 0, 0.5),
+        ];
+        let cleared = apply_batch(&keyed, &cleared, &cx(&reg)).unwrap().document;
+        assert!(matches!(
+            param_of(&cleared, &path, node, "width"),
+            ParameterValue::Channel(AnimationChannel {
+                source: ChannelSource::Constant(3.0)
+            })
+        ));
+        let l = layer_of(&cleared, comp, layer);
+        assert!(matches!(l.opacity.source, ChannelSource::Constant(0.5)));
+
+        // An expression can be dropped too; a plain Float stays a Float.
+        let expr = with_param_value(
+            &doc,
+            &path,
+            node,
+            "width",
+            ParameterValue::Channel(AnimationChannel::new(ChannelSource::Expression(
+                ParameterExpression::new("frame"),
+            ))),
+        );
+        let op = clear(param_target(&path, node, "width"), 0, 4.0);
+        let done = apply(&expr, &op, &cx(&reg)).unwrap().document;
+        assert!(matches!(
+            param_of(&done, &path, node, "width"),
+            ParameterValue::Channel(AnimationChannel {
+                source: ChannelSource::Constant(4.0)
+            })
+        ));
+        let plain = apply(&doc, &op, &cx(&reg)).unwrap().document;
+        assert_eq!(
+            param_of(&plain, &path, node, "width"),
+            ParameterValue::Float(4.0)
+        );
+    }
+
+    /// Every refusal names its code and leaves the document as it was.
+    #[test]
+    fn refused_animation_edits_leave_the_document_unchanged() {
+        let reg = registry();
+        let (doc, path, node, comp, layer) = started_layer();
+        let expr =
+            AnimationChannel::new(ChannelSource::Expression(ParameterExpression::new("frame")));
+        let driven_param = with_param_value(
+            &doc,
+            &path,
+            node,
+            "width",
+            ParameterValue::Channel(expr.clone()),
+        );
+        let driven_shell =
+            document::update_layer(&doc, comp, layer, |l| l.opacity = expr.clone()).unwrap();
+        let animated_shell = document::update_layer(&doc, comp, layer, |l| {
+            l.transform.position[0] = keyed_channel()
+        })
+        .unwrap();
+        let blended = with_param_value(
+            &doc,
+            &path,
+            node,
+            "width",
+            ParameterValue::Channel(AnimationChannel::new(ChannelSource::Blend(
+                Box::new(ChannelSource::Constant(1.0)),
+                Box::new(ChannelSource::Constant(2.0)),
+                crate::animation::blend::BlendMode::Mix,
+                0.5,
+            ))),
+        );
+        let missing_layer = LayerId::next();
+        let width = || param_target(&path, node, "width");
+        let ok_keys = || vec![linear(10, 1.0)];
+        let cases: Vec<(&Document, EditOp, &str)> = vec![
+            (
+                &driven_param,
+                set_keys(width(), 0, ok_keys()),
+                "driven-parameter",
+            ),
+            (
+                &blended,
+                set_keys(width(), 0, ok_keys()),
+                "driven-parameter",
+            ),
+            (&blended, clear(width(), 0, 1.0), "driven-parameter"),
+            (
+                &driven_shell,
+                set_keys(
+                    shell_target(comp, layer, ShellProperty::Opacity),
+                    0,
+                    ok_keys(),
+                ),
+                "driven-parameter",
+            ),
+            (
+                &driven_shell,
+                layer_op(comp, layer, |o| o.opacity = Some(0.5)),
+                "driven-parameter",
+            ),
+            (
+                &animated_shell,
+                layer_op(comp, layer, |o| o.position = Some([1.0, 2.0])),
+                "animated-parameter",
+            ),
+            (&doc, set_keys(width(), 0, vec![]), "invalid-keyframes"),
+            (
+                &doc,
+                set_keys(width(), 0, vec![linear(10, 1.0), linear(10, 2.0)]),
+                "invalid-keyframes",
+            ),
+            (
+                &doc,
+                set_keys(width(), 0, vec![linear(10, f32::NAN)]),
+                "invalid-keyframes",
+            ),
+            (
+                &doc,
+                set_keys(width(), 0, vec![linear(9, 1.0)]),
+                "key-before-layer-start",
+            ),
+            (&doc, set_keys(width(), 1, ok_keys()), "unknown-channel"),
+            (
+                &doc,
+                set_keys(
+                    shell_target(comp, layer, ShellProperty::Opacity),
+                    1,
+                    ok_keys(),
+                ),
+                "unknown-channel",
+            ),
+            (
+                &doc,
+                set_keys(
+                    shell_target(comp, layer, ShellProperty::AudioGain),
+                    0,
+                    ok_keys(),
+                ),
+                "unknown-channel",
+            ),
+            (
+                &doc,
+                set_keys(param_target(&path, node, "cap"), 0, ok_keys()),
+                "parameter-type-mismatch",
+            ),
+            (
+                &doc,
+                set_keys(param_target(&path, node, "nope"), 0, ok_keys()),
+                "unknown-parameter",
+            ),
+            (
+                &doc,
+                set_keys(
+                    shell_target(comp, missing_layer, ShellProperty::Opacity),
+                    0,
+                    ok_keys(),
+                ),
+                "layer-not-found",
+            ),
+            (
+                &doc,
+                layer_op(comp, layer, |o| {
+                    o.in_frame = Some(50);
+                    o.out_frame = Some(40);
+                }),
+                "invalid-layer-edit",
+            ),
+            (
+                &doc,
+                layer_op(comp, layer, |o| o.parent = Some(Some(LayerRef::Id(layer)))),
+                "invalid-layer-edit",
+            ),
+            (
+                &doc,
+                layer_op(comp, layer, |o| {
+                    o.parent = Some(Some(LayerRef::Id(missing_layer)))
+                }),
+                "layer-not-found",
+            ),
+            (
+                &doc,
+                layer_op(comp, layer, |o| {
+                    o.parent = Some(Some(LayerRef::Alias("x".into())))
+                }),
+                "unknown-alias",
+            ),
+        ];
+        assert!(!cases.is_empty());
+        for (doc, op, code) in cases {
+            let before = doc.clone();
+            let err = apply(doc, &op, &cx(&reg)).unwrap_err();
+            assert_eq!(err.code(), code, "{op:?}: {err}");
+            assert_eq!(*doc, before, "{op:?} changed the document");
+        }
+    }
+
+    /// A blank `SetLayer`, for a test to fill in.
+    #[derive(Default)]
+    struct LayerFields {
+        name: Option<String>,
+        start_frame: Option<i64>,
+        in_frame: Option<u64>,
+        out_frame: Option<u64>,
+        position: Option<[f32; 2]>,
+        rotation: Option<f32>,
+        opacity: Option<f32>,
+        blend_mode: Option<crate::composition::BlendMode>,
+        parent: Option<Option<LayerRef>>,
+        solo: Option<bool>,
+        locked: Option<bool>,
+    }
+
+    fn layer_op(comp: CompId, layer: LayerId, f: impl FnOnce(&mut LayerFields)) -> EditOp {
+        let mut o = LayerFields::default();
+        f(&mut o);
+        EditOp::SetLayer {
+            comp: comp_ref(comp),
+            layer: LayerRef::Id(layer),
+            name: o.name,
+            start_frame: o.start_frame,
+            in_frame: o.in_frame,
+            out_frame: o.out_frame,
+            anchor_point: None,
+            position: o.position,
+            scale: None,
+            rotation: o.rotation,
+            opacity: o.opacity,
+            blend_mode: o.blend_mode,
+            parent: o.parent,
+            solo: o.solo,
+            muted: None,
+            locked: o.locked,
+        }
+    }
+
+    #[test]
+    fn set_layer_writes_the_shell() {
+        let reg = registry();
+        let (doc, comp, layer) = doc_with_layer(false);
+        let other = LayerId::next();
+        let doc = document::add_layer(&doc, comp, Layer::new(other, "B", Graph::new())).unwrap();
+        let op = layer_op(comp, layer, |o| {
+            o.name = Some("Renamed".into());
+            o.start_frame = Some(-5);
+            o.in_frame = Some(2);
+            o.out_frame = Some(90);
+            o.position = Some([4.0, -6.0]);
+            o.rotation = Some(45.0);
+            o.opacity = Some(7.0);
+            o.blend_mode = Some(crate::composition::BlendMode::Screen);
+            o.parent = Some(Some(LayerRef::Id(other)));
+            o.solo = Some(true);
+            o.locked = Some(true);
+        });
+        let applied = apply(&doc, &op, &cx(&reg)).unwrap();
+        let l = layer_of(&applied.document, comp, layer);
+        assert_eq!(l.name, "Renamed");
+        assert_eq!((l.start_frame, l.in_frame, l.out_frame), (-5, 2, 90));
+        assert!(matches!(
+            l.transform.position[0].source,
+            ChannelSource::Constant(4.0)
+        ));
+        assert!(matches!(
+            l.transform.position[1].source,
+            ChannelSource::Constant(-6.0)
+        ));
+        assert!(matches!(
+            l.transform.rotation.source,
+            ChannelSource::Constant(45.0)
+        ));
+        assert!(
+            matches!(l.opacity.source, ChannelSource::Constant(1.0)),
+            "clamped"
+        );
+        assert_eq!(l.blend_mode, crate::composition::BlendMode::Screen);
+        assert_eq!(l.parent, Some(other));
+        assert!(l.solo && l.locked);
+
+        // `other` is now `layer`'s parent: the reverse link would be a cycle.
+        let cycle = layer_op(comp, other, |o| o.parent = Some(Some(LayerRef::Id(layer))));
+        assert_eq!(
+            apply(&applied.document, &cycle, &cx(&reg))
+                .unwrap_err()
+                .code(),
+            "invalid-layer-edit"
+        );
+
+        // `parent: null` clears it, an absent `parent` leaves it.
+        let clear_parent = layer_op(comp, layer, |o| o.parent = Some(None));
+        let cleared = apply(&applied.document, &clear_parent, &cx(&reg)).unwrap();
+        assert_eq!(layer_of(&cleared.document, comp, layer).parent, None);
+        let untouched = layer_op(comp, layer, |o| o.name = Some("Again".into()));
+        let kept = apply(&applied.document, &untouched, &cx(&reg)).unwrap();
+        assert_eq!(layer_of(&kept.document, comp, layer).parent, Some(other));
+    }
+
+    #[test]
+    fn a_batch_of_animation_edits_is_one_document() {
+        // One `apply_batch` result is the one value a caller commits, which is
+        // what makes the batch a single undo step; `commit_edit_ops` is
+        // tested at that level in ravel-app.
+        let reg = registry();
+        let (doc, path, node, comp, layer) = started_layer();
+        let ops = [
+            set_keys(param_target(&path, node, "width"), 0, vec![linear(10, 1.0)]),
+            set_keys(
+                shell_target(comp, layer, ShellProperty::Opacity),
+                0,
+                vec![linear(10, 1.0)],
+            ),
+            layer_op(comp, layer, |o| o.name = Some("X".into())),
+        ];
+        let applied = apply_batch(&doc, &ops, &cx(&reg)).unwrap();
+        assert_ne!(applied.document, doc);
+        assert!(applied.created.is_empty());
+    }
+
+    #[test]
+    fn animation_ops_round_trip_through_json() {
+        let path = NetworkPath::layer(CompId::new(7), LayerId::new(3));
+        let ops = vec![
+            set_keys(
+                param_target(&path, NodeId::new(5), "width"),
+                0,
+                vec![key(10, 1.5, KeyInterpolation::Bezier), linear(20, 2.0)],
+            ),
+            clear(
+                shell_target(CompId::new(7), LayerId::new(3), ShellProperty::TimeRemap),
+                0,
+                0.0,
+            ),
+            layer_op(CompId::new(7), LayerId::new(3), |o| o.parent = Some(None)),
+            layer_op(CompId::new(7), LayerId::new(3), |o| o.opacity = Some(0.5)),
+        ];
+        let json = serde_json::to_string(&ops).unwrap();
+        assert!(json.contains(r#""property":"time_remap""#), "{json}");
+        assert!(json.contains(r#""interpolation":"bezier""#), "{json}");
+        assert!(json.contains(r#""parent":null"#), "{json}");
+        let back: Vec<EditOp> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ops);
+        // The wire form an agent writes: the target's fields beside the op's.
+        let wire = r#"{"op":"set_keyframes","comp":7,"layer":"l","property":"position","component":1,"keys":[{"frame":0,"value":1,"interpolation":"step"}]}"#;
+        let EditOp::SetKeyframes {
+            target,
+            component,
+            keys,
+        } = serde_json::from_str(wire).unwrap()
+        else {
+            panic!("set_keyframes");
+        };
+        assert!(matches!(
+            target,
+            ChannelTarget::Shell {
+                property: ShellProperty::Position,
+                ..
+            }
+        ));
+        assert_eq!((component, keys.len()), (1, 1));
+    }
+
+    #[test]
+    fn animation_ops_are_not_destructive() {
+        let path = NetworkPath::layer(CompId::new(7), LayerId::new(3));
+        assert!(!set_keys(param_target(&path, NodeId::new(5), "w"), 0, vec![]).is_destructive());
+        assert!(!clear(param_target(&path, NodeId::new(5), "w"), 0, 0.0).is_destructive());
+        assert!(!layer_op(CompId::new(7), LayerId::new(3), |_| {}).is_destructive());
+    }
+}

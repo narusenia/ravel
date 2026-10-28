@@ -3,6 +3,7 @@
 
 use super::document::CompositionSettings;
 use super::document::NetworkPath;
+use crate::composition::{BlendMode, ShellProperty};
 use crate::id::{CompId, EdgeId, LayerId, NodeId};
 use crate::param_curve::CurveParam;
 use crate::param_ramp::RampParam;
@@ -105,6 +106,64 @@ pub enum ParamInput {
     Ramp(RampParam),
 }
 
+/// How a key's outgoing segment is interpolated. A bezier key gets the
+/// editor's default handles (one third of the way to the next key), not
+/// caller-chosen ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyInterpolation {
+    Bezier,
+    Linear,
+    Step,
+}
+
+impl From<KeyInterpolation> for crate::animation::interpolation::Interpolation {
+    fn from(value: KeyInterpolation) -> Self {
+        match value {
+            KeyInterpolation::Bezier => Self::Bezier,
+            KeyInterpolation::Linear => Self::Linear,
+            KeyInterpolation::Step => Self::Step,
+        }
+    }
+}
+
+/// One key of [`EditOp::SetKeyframes`]. `frame` is a **composition** frame;
+/// the edit stores the layer-local one.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct KeyInput {
+    pub frame: u64,
+    pub value: f32,
+    pub interpolation: KeyInterpolation,
+}
+
+/// What an animation operation addresses, in the two kinds of row the
+/// Timeline has (`PropertyRowId::Network` / `Shell`). In JSON the fields sit
+/// beside the operation's own: `path` + `node` + `key` name a node parameter,
+/// `comp` + `layer` + `property` a shell property.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ChannelTarget {
+    Parameter {
+        path: NetworkRef,
+        node: NodeRef,
+        key: String,
+    },
+    Shell {
+        comp: CompRef,
+        layer: LayerRef,
+        property: ShellProperty,
+    },
+}
+
+/// Distinguishes an absent field (leave alone) from `null` (clear).
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
 /// One end of a connection: a node and one of its ports.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Endpoint {
@@ -186,18 +245,82 @@ pub enum EditOp {
         key: String,
         value: ParamInput,
     },
+    /// Replace one channel of `target` by a curve through `keys` (frames in
+    /// the composition's timeline). `component` counts from 0: x/y of a
+    /// position, r/g/b/a of a colour (linear light). A channel driven by an
+    /// expression, a node output or a blend is refused (`driven-parameter`).
+    SetKeyframes {
+        #[serde(flatten)]
+        target: ChannelTarget,
+        #[serde(default)]
+        component: u32,
+        keys: Vec<KeyInput>,
+    },
+    /// Drop the animation (keys or expression) of one channel, leaving the
+    /// constant `value`.
+    ClearAnimation {
+        #[serde(flatten)]
+        target: ChannelTarget,
+        #[serde(default)]
+        component: u32,
+        value: f32,
+    },
+    /// Set shell properties of a layer; absent fields are left alone. A
+    /// transform or opacity constant is refused on an animated channel
+    /// (`animated-parameter`) or a driven one (`driven-parameter`);
+    /// `parent: null` clears the parent.
+    SetLayer {
+        comp: CompRef,
+        layer: LayerRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start_frame: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        in_frame: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        out_frame: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        anchor_point: Option<[f32; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        position: Option<[f32; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scale: Option<[f32; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rotation: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        opacity: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blend_mode: Option<BlendMode>,
+        #[serde(
+            default,
+            deserialize_with = "present",
+            skip_serializing_if = "Option::is_none"
+        )]
+        parent: Option<Option<LayerRef>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        solo: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        muted: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locked: Option<bool>,
+    },
 }
 
 impl EditOp {
     /// Whether the operation deletes something. Only a classification: asking
-    /// the user is the caller's job.
+    /// the user is the caller's job. `ClearAnimation` is not one: undo brings
+    /// the keys back.
     pub fn is_destructive(&self) -> bool {
         match self {
             Self::AddComposition { .. }
             | Self::AddLayer { .. }
             | Self::AddNode { .. }
             | Self::Connect { .. }
-            | Self::SetParameter { .. } => false,
+            | Self::SetParameter { .. }
+            | Self::SetKeyframes { .. }
+            | Self::ClearAnimation { .. }
+            | Self::SetLayer { .. } => false,
             Self::RemoveComposition { .. }
             | Self::RemoveLayer { .. }
             | Self::RemoveNode { .. }

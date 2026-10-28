@@ -9,6 +9,7 @@
 //! and evaluation, and one [`apply_batch`] result committed once is one undo
 //! step.
 
+mod animation;
 pub mod document;
 mod error;
 pub mod network;
@@ -17,22 +18,29 @@ pub mod param;
 #[cfg(test)]
 mod tests;
 
-use crate::composition::Document;
 use crate::composition::templates::builtin_layer_template;
+use crate::composition::{Document, Layer};
 use crate::graph::Graph;
 use crate::id::{CompId, EdgeId, LayerId, NodeId};
 use crate::registry::NodeRegistry;
+use animation::{
+    ChannelWrite, LayerEdit, apply_layer_edit, build_curve, param_clamp, shell_clamp,
+    write_param_channel, write_shell_channel,
+};
 pub use document::{CompositionSettings, NetworkPath};
 use document::{
     add_composition, add_layer_from_template, remove_composition, remove_layer, replace_network,
-    resolve_network,
+    resolve_network, update_layer,
 };
 pub use error::{BatchError, EditError};
 use network::{
     connect_edge_and_update_variadic_inputs, remove_edge_and_compact, remove_node_and_compact,
     resolve_port,
 };
-pub use ops::{CompRef, EditOp, Endpoint, LayerRef, NetworkRef, NodeRef, ParamInput, PortRef};
+pub use ops::{
+    ChannelTarget, CompRef, EditOp, Endpoint, KeyInput, KeyInterpolation, LayerRef, NetworkRef,
+    NodeRef, ParamInput, PortRef,
+};
 use param::set_parameter;
 use std::collections::BTreeMap;
 
@@ -183,6 +191,78 @@ fn edit_network<T>(
     Ok(out)
 }
 
+/// A copy of layer `layer` of `comp`, for an edit that needs it before it
+/// rewrites anything.
+fn layer_of(doc: &Document, comp: CompId, layer: LayerId) -> Result<Layer, EditError> {
+    doc.get_composition(comp)
+        .ok_or(EditError::CompositionNotFound(comp))?
+        .get_layer(layer)
+        .cloned()
+        .ok_or(EditError::LayerNotFound { comp, layer })
+}
+
+/// Rewrite one layer through `f`; the layer is left as it was on `Err`.
+fn edit_layer<T>(
+    doc: &mut Document,
+    comp: CompId,
+    layer: LayerId,
+    f: impl FnOnce(&mut Layer) -> Result<T, EditError>,
+) -> Result<T, EditError> {
+    let mut edited = layer_of(doc, comp, layer)?;
+    let out = f(&mut edited)?;
+    *doc = update_layer(doc, comp, layer, |l| *l = edited)
+        .ok_or(EditError::LayerNotFound { comp, layer })?;
+    Ok(out)
+}
+
+/// Write one channel of `target`: the keys of `SetKeyframes`, or the constant
+/// of `ClearAnimation`.
+fn write_channel(
+    doc: &mut Document,
+    target: &ChannelTarget,
+    component: u32,
+    write: Result<&[KeyInput], f32>,
+    cx: &EditContext,
+    aliases: &Aliases,
+) -> Result<(), EditError> {
+    match target {
+        ChannelTarget::Parameter { path, node, key } => {
+            let path = &resolve_path(aliases, path)?;
+            let node = resolve_node(aliases, node)?;
+            let layer = layer_of(doc, path.comp, path.layer)?;
+            edit_network(doc, path, |graph| {
+                let write = match write {
+                    Ok(keys) => ChannelWrite::Keys(build_curve(
+                        keys,
+                        &layer,
+                        param_clamp(&graph, node, key, cx)?,
+                    )?),
+                    Err(value) => {
+                        ChannelWrite::Constant(param_clamp(&graph, node, key, cx)?(value))
+                    }
+                };
+                Ok((write_param_channel(graph, node, key, component, write)?, ()))
+            })
+        }
+        ChannelTarget::Shell {
+            comp,
+            layer,
+            property,
+        } => {
+            let comp = resolve_comp(aliases, comp)?;
+            let layer = resolve_layer(aliases, layer)?;
+            edit_layer(doc, comp, layer, |layer| {
+                let clamp = shell_clamp(*property);
+                let write = match write {
+                    Ok(keys) => ChannelWrite::Keys(build_curve(keys, layer, clamp)?),
+                    Err(value) => ChannelWrite::Constant(clamp(value)),
+                };
+                write_shell_channel(layer, *property, component, write)
+            })
+        }
+    }
+}
+
 /// Run one operation against the working `doc`. May leave `doc` half-edited on
 /// `Err`; [`apply_batch`] discards it.
 fn step(
@@ -328,6 +408,89 @@ fn step(
                 let graph = set_parameter(graph, node, key, value, cx, comp.as_deref())?;
                 Ok((graph, ()))
             })?;
+            Ok(Vec::new())
+        }
+        EditOp::SetKeyframes {
+            target,
+            component,
+            keys,
+        } => {
+            write_channel(doc, target, *component, Ok(keys), cx, aliases)?;
+            Ok(Vec::new())
+        }
+        EditOp::ClearAnimation {
+            target,
+            component,
+            value,
+        } => {
+            if !value.is_finite() {
+                return Err(EditError::InvalidKeyframes(
+                    "the value is not a finite number".into(),
+                ));
+            }
+            write_channel(doc, target, *component, Err(*value), cx, aliases)?;
+            Ok(Vec::new())
+        }
+        EditOp::SetLayer {
+            comp,
+            layer,
+            name,
+            start_frame,
+            in_frame,
+            out_frame,
+            anchor_point,
+            position,
+            scale,
+            rotation,
+            opacity,
+            blend_mode,
+            parent,
+            solo,
+            muted,
+            locked,
+        } => {
+            let comp = resolve_comp(aliases, comp)?;
+            let layer = resolve_layer(aliases, layer)?;
+            let parent = parent
+                .as_ref()
+                .map(|p| p.as_ref().map(|p| resolve_layer(aliases, p)).transpose())
+                .transpose()?;
+            // `Document::validate` does not look at parenting, so the cycle
+            // rule is enforced here (the Properties picker does the same by
+            // not offering a cycle).
+            if let Some(Some(parent)) = parent {
+                let composition = doc
+                    .get_composition(comp)
+                    .ok_or(EditError::CompositionNotFound(comp))?;
+                let candidate = composition
+                    .get_layer(parent)
+                    .ok_or(EditError::LayerNotFound {
+                        comp,
+                        layer: parent,
+                    })?;
+                if parent == layer || composition.descends_from(candidate, layer) {
+                    return Err(EditError::InvalidLayerEdit(format!(
+                        "layer {parent:?} cannot be the parent of {layer:?}: it would be its own ancestor"
+                    )));
+                }
+            }
+            let edit = LayerEdit {
+                name: name.clone(),
+                start_frame: *start_frame,
+                in_frame: *in_frame,
+                out_frame: *out_frame,
+                anchor_point: *anchor_point,
+                position: *position,
+                scale: *scale,
+                rotation: *rotation,
+                opacity: *opacity,
+                blend_mode: *blend_mode,
+                parent,
+                solo: *solo,
+                muted: *muted,
+                locked: *locked,
+            };
+            edit_layer(doc, comp, layer, |l| apply_layer_edit(l, edit))?;
             Ok(Vec::new())
         }
         EditOp::Disconnect { path, edge } => {

@@ -258,15 +258,18 @@ fn is_keyframed(value: &ParameterValue) -> bool {
     }
 }
 
+/// Whether the channel is fed by something other than a constant or keys.
+pub(super) fn channel_is_driven(c: &AnimationChannel) -> bool {
+    !matches!(
+        c.source,
+        ChannelSource::Constant(_) | ChannelSource::Keyframes(_)
+    )
+}
+
 /// Whether any component is driven by something other than a constant or
 /// keys: an expression, a node output, an audio source or a blend.
 fn is_driven(value: &ParameterValue) -> bool {
-    let driven = |c: &AnimationChannel| {
-        !matches!(
-            c.source,
-            ChannelSource::Constant(_) | ChannelSource::Keyframes(_)
-        )
-    };
+    let driven = channel_is_driven;
     match value {
         ParameterValue::Channel(c) | ParameterValue::IntChannel(c) => driven(c),
         ParameterValue::Channel2(cs) => cs.iter().any(driven),

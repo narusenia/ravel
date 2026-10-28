@@ -207,6 +207,15 @@ pub fn edited_param_value(
                         edited_channel(&channels[2], *z, local_frame),
                     ]))
                 }
+                // A non-colour 4-vector; `describe_node` advertises it as one.
+                (ParameterValue::Channel4(channels), [x, y, z, w]) => {
+                    Some(ParameterValue::Channel4([
+                        edited_channel(&channels[0], *x, local_frame),
+                        edited_channel(&channels[1], *y, local_frame),
+                        edited_channel(&channels[2], *z, local_frame),
+                        edited_channel(&channels[3], *w, local_frame),
+                    ]))
+                }
                 _ => None,
             }
         }
@@ -397,6 +406,29 @@ mod tests {
             constant(),
             constant()
         ])));
+    }
+
+    #[test]
+    fn a_four_component_vector_writes_a_channel4() {
+        let existing =
+            ParameterValue::Channel4(std::array::from_fn(|_| AnimationChannel::constant(0.0)));
+        let written = edited_param_value(
+            &existing,
+            &ParamInput::Vector(vec![1.0, 2.0, 3.0, 4.0]),
+            None,
+            None,
+        );
+        let Some(ParameterValue::Channel4(chs)) = written else {
+            panic!("a 4-vector is accepted: {written:?}");
+        };
+        let values: Vec<f32> = chs
+            .iter()
+            .map(|c| match c.source {
+                ChannelSource::Constant(v) => v,
+                _ => f32::NAN,
+            })
+            .collect();
+        assert_eq!(values, [1.0, 2.0, 3.0, 4.0]);
     }
 
     /// An int edit on a keyed `IntChannel` keys it at the frame instead of

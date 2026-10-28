@@ -34,13 +34,26 @@ fn connect(endpoint: &Path) -> std::io::Result<impl Read + Write> {
     std::os::unix::net::UnixStream::connect(endpoint)
 }
 
-/// A named pipe opens like a file.
+/// A named pipe opens like a file. `ERROR_PIPE_BUSY` is the moment between the
+/// app taking one connection and opening the next instance, not an absent app,
+/// so it is retried for a short while.
 #[cfg(windows)]
 fn connect(endpoint: &Path) -> std::io::Result<impl Read + Write> {
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(endpoint)
+    const ERROR_PIPE_BUSY: i32 = 231;
+    let mut attempts = 0;
+    loop {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(endpoint)
+        {
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && attempts < 20 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            result => return result,
+        }
+    }
 }
 
 #[cfg(not(any(unix, windows)))]

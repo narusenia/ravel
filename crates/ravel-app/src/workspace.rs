@@ -904,6 +904,9 @@ pub struct RavelWorkspace {
     asset_watch: Entity<crate::media::watch::AssetWatch>,
     /// The local live-edit door; `None` unless the global settings open it.
     _live_edit: Option<Entity<crate::live_edit::LiveEdit>>,
+    /// The workspace is the side that owns the window, so it answers the door's
+    /// confirmation questions; dropping this stops it hearing them.
+    _live_edit_sub: Option<Subscription>,
     /// Strong owner of the render queue; dropping the workspace on window
     /// close cancels what it was still working on (see
     /// [`crate::export::RenderService`]'s note on a discarded queue).
@@ -1445,6 +1448,16 @@ impl RavelWorkspace {
         cx.set_global(crate::audio::AudioServiceHandle(audio.downgrade()));
         let asset_watch = cx.new(|cx| crate::media::watch::AssetWatch::new(&project, cx));
         let live_edit = crate::live_edit::start(&project, cx);
+        let live_edit_sub = live_edit.as_ref().map(|door| {
+            cx.subscribe_in(
+                door,
+                window,
+                |this, _door, event: &crate::live_edit::LiveEditEvent, window, cx| {
+                    let crate::live_edit::LiveEditEvent::ConfirmRemoval(request) = event;
+                    this.confirm_live_edit_removal(request.clone(), window, cx);
+                },
+            )
+        });
         let audio_event_sub = cx.subscribe_in(
             &audio,
             window,
@@ -1539,6 +1552,7 @@ impl RavelWorkspace {
             audio_event_sub,
             asset_watch,
             _live_edit: live_edit,
+            _live_edit_sub: live_edit_sub,
             render,
             render_event_sub,
             window_title,
@@ -2123,6 +2137,44 @@ impl RavelWorkspace {
                                 }),
                         ),
                 )
+        });
+    }
+
+    /// An agent asked, through the live-edit door, to remove something. Not
+    /// answering is answering no: a dialog that is closed any other way than
+    /// OK drops the request, which the door reads as a denial.
+    fn confirm_live_edit_removal(
+        &mut self,
+        request: crate::live_edit::confirm::RemovalRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if window.has_active_dialog(cx) {
+            request.deny();
+            return;
+        }
+        window.open_alert_dialog(cx, move |alert, _window, _cx| {
+            // Names are the document's own text and are shown as text only.
+            let mut message = t!("live_edit.confirm.message");
+            for item in &request.items {
+                message.push_str("\n- ");
+                message.push_str(&item.text());
+            }
+            let approve = request.clone();
+            let deny = request.clone();
+            alert
+                .confirm()
+                .title(SharedString::from(t!("live_edit.confirm.title")))
+                .description(SharedString::from(message))
+                .show_cancel(true)
+                .on_ok(move |_event, _window, _cx| {
+                    approve.approve();
+                    true
+                })
+                .on_cancel(move |_event, _window, _cx| {
+                    deny.deny();
+                    true
+                })
         });
     }
 

@@ -284,6 +284,13 @@ user = "ユーザー設定"
 panel = "パネル固有"
 unassigned = "割り当てなし"
 
+[live_edit.confirm]
+title = "この編集を許可しますか？"
+message = "Ravel に接続したエージェントが次の削除を求めています。あとで元に戻せます。"
+composition = "コンポジション: {name}"
+layer = "レイヤー: {name}（コンポジション {comp}）"
+node = "ノード: {type}（id {id}）"
+
 [project.unsaved]
 title = "変更を保存しますか？"
 message = "保存せずに続けると、未保存の変更は失われます。"
@@ -773,6 +780,9 @@ not_interactive = "対話モードには端末が必要です。オプション�
 output_not_allowed = "出力先 {path} は --allow-dir で許可されたディレクトリの下にありません"
 no_draft = "下書きのプロジェクトがありません。先に new_project を呼んでください"
 draft_exists = "保存していない下書きが開いています。置き換えるには discard を渡してください"
+app_not_running = "待ち受けている Ravel アプリがありません。グローバル設定で [agent] live_edit_enabled = true にして Ravel を起動してください"
+app_disconnected = "Ravel アプリが応答前に接続を閉じました。編集が適用された可能性があるので、文書を確かめてから繰り返してください"
+live_edit = "アプリが編集を拒否しました（{code}）: {message}"
 edit = "{index} 番目の操作が失敗したため、何も適用していません: {detail}"
 unknown_node_type = "ノード型 {key} はありません。list_node_types で一覧できます"
 project_exists = "{path} は既にあります。下書きは新しいパスに保存してください"

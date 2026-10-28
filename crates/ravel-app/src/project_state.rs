@@ -2480,6 +2480,21 @@ impl ProjectState {
     /// leaving with the request — which is what lets a panel test read back
     /// what its own gesture posted, rather than a stand-in written by the
     /// test itself.
+    /// Reopen the current document as if it had been loaded again: an equal
+    /// document under a new generation. Unix only, like the live-edit tests
+    /// that call it.
+    #[cfg(all(test, unix))]
+    pub(crate) fn reopen_same_document(&mut self, cx: &mut Context<Self>) {
+        let document = self.document().clone();
+        self.replace_document(
+            document,
+            None,
+            &UiState::default(),
+            SettingsLayer::default(),
+            cx,
+        );
+    }
+
     #[cfg(test)]
     pub(crate) fn take_pending_hint(&mut self) -> InvalidationHint {
         std::mem::replace(&mut self.pending_hint, InvalidationHint::None)

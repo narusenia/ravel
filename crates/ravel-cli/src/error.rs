@@ -158,6 +158,22 @@ pub enum CliError {
         source: ravel_core::edit::EditError,
     },
 
+    /// `ravel-cli mcp --attach`: nothing is listening on the live-edit door.
+    #[error("no running Ravel app is listening for live edits")]
+    AppNotRunning,
+
+    /// The connection ended after the request was sent and before the answer.
+    #[error("the Ravel app closed the connection before it answered")]
+    AppDisconnected,
+
+    /// The app answered with a failure; `code` is its own stable code.
+    #[error("the app refused the edit ({code}): {message}")]
+    LiveEdit {
+        code: String,
+        index: Option<usize>,
+        message: String,
+    },
+
     #[error("unknown node type {0:?}")]
     UnknownNodeType(String),
 
@@ -200,6 +216,9 @@ impl CliError {
             | Self::NoDraft
             | Self::DraftExists
             | Self::Edit { .. }
+            | Self::AppNotRunning
+            | Self::AppDisconnected
+            | Self::LiveEdit { .. }
             | Self::UnknownNodeType(_)
             | Self::BadProjectPath { .. } => EXIT_USAGE,
             Self::ProjectExists { .. } => EXIT_OUTPUT_EXISTS,
@@ -239,6 +258,9 @@ impl CliError {
             Self::NoDraft => "no-draft",
             Self::DraftExists => "draft-exists",
             Self::Edit { source, .. } => source.code(),
+            Self::AppNotRunning => "app-not-running",
+            Self::AppDisconnected => "app-disconnected",
+            Self::LiveEdit { .. } => "live-edit-refused",
             Self::UnknownNodeType(_) => "unknown-node-type",
             Self::ProjectExists { .. } => "project-exists",
             Self::BadProjectPath { .. } => "bad-project-path",
@@ -313,6 +335,12 @@ impl CliError {
             Self::Edit { index, source } => t!("cli.error.edit")
                 .replace("{index}", &index.to_string())
                 .replace("{detail}", &source.to_string()),
+            Self::AppNotRunning => t!("cli.error.app_not_running"),
+            Self::AppDisconnected => t!("cli.error.app_disconnected"),
+            // The app's sentence is the diagnostic, as with `Edit`.
+            Self::LiveEdit { code, message, .. } => t!("cli.error.live_edit")
+                .replace("{code}", code)
+                .replace("{message}", message),
             Self::UnknownNodeType(key) => t!("cli.error.unknown_node_type").replace("{key}", key),
             Self::ProjectExists { path } => {
                 t!("cli.error.project_exists").replace("{path}", &path.display().to_string())

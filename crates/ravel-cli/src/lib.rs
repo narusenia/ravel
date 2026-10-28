@@ -47,6 +47,7 @@ pub mod error;
 pub mod execute;
 pub mod interactive;
 pub mod listing;
+pub mod live;
 pub mod mcp;
 pub mod params;
 pub mod plan;
@@ -360,7 +361,7 @@ pub fn run(cli: Cli) -> u8 {
             }
         },
         Command::Interactive(arg) => run_interactive(&arg.project),
-        Command::Mcp(arg) => mcp::run(&arg.allow_dir),
+        Command::Mcp(arg) => mcp::run(&arg.allow_dir, arg.attach),
     }
 }
 

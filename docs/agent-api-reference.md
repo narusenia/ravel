@@ -4118,7 +4118,8 @@ ravel-cli list params <project.ravprj>     // ExposedListing's own JSON
 ravel-cli list codecs                      // every target, with route or reason
 ravel-cli interactive <project.ravprj>     // asks, then renders (needs a TTY
                                            // on **stdin**; refuses otherwise)
-ravel-cli mcp [--allow-dir DIR]…           // MCP server on stdio (AI-1)
+ravel-cli mcp [--allow-dir DIR]… [--attach]  // MCP server on stdio (AI-1);
+                                           // --attach adds live_edit (AI-5)
 ```
 
 ```rust
@@ -4194,8 +4195,24 @@ render_draft_with_hooks(..)   // the in-memory twins of plan_from_args / render 
 // AI-4: the app's local live-edit door (docs/dev/live-edit.md), ravel-app
 live_edit::start(&Entity<ProjectState>, &mut App) -> Option<Entity<LiveEdit>>
     // global `[agent] live_edit_enabled` only; protocol::{parse_request,
-    // first_removal, ok_response, batch_error_response} are pure; apply() is
-    // one commit_edit_ops per request
+    // first_removal, ok_response, batch_error_response, confirmation_denied,
+    // document_changed} are pure; apply() is one commit_edit_ops per request
+// AI-5: a request that removes waits for the user
+LiveEdit: EventEmitter<LiveEditEvent>   // ConfirmRemoval(confirm::RemovalRequest);
+    // RavelWorkspace subscribes and opens the dialog. Approve applies (one undo
+    // step) if the document is still the one asked about, else "document-changed";
+    // deny / dropped request / nobody subscribed = "confirmation-denied"
+confirm::{RemovalRequest::{approve, deny}, Removal, describe_removals(&Document, &[EditOp])}
+ravel_project::paths::live_edit_endpoint() -> Option<PathBuf>
+    // the one definition of the socket path / pipe name (app and cli);
+    // paths::current_user_sid() on Windows
+
+// AI-5: `ravel-cli mcp --attach` (ravel-cli)
+mcp::Server::with_attach(self, endpoint: PathBuf) -> Server   // offers live_edit
+live::live_edit(&Path, &[EditOp]) -> Result<Value, CliError>  // one connection per call
+    // CliError::{AppNotRunning, AppDisconnected, LiveEdit{code, index, message}}
+    // = "app-not-running", "app-disconnected", "live-edit-refused" (the tool
+    // result's `id` is the app's own `code`)
 
 // EXPORT-7: the interactive mode, a layer over `listing` + `plan_render`
 interactive::gate(stdin_is_terminal: bool) -> Result<(), CliError>

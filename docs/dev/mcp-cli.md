@@ -11,7 +11,7 @@
 ## 起動と登録
 
 ```text
-ravel-cli mcp [--allow-dir <DIR>]...
+ravel-cli mcp [--allow-dir <DIR>]... [--attach]
 ```
 
 stdin から改行区切りの JSON-RPC 2.0 を読み、stdout へ 1 行 1 メッセージで返す。
@@ -129,9 +129,46 @@ TCP では待ち受けない。Ravel は API キーもネットワークも持�
 
 読み取り系のツールは許可ディレクトリを要らない。
 
+## 動作中のアプリを編集する（`--attach`）
+
+計画の `AI-5`。`--attach` を付けたときだけ、`tools/list` に `live_edit` が出る。
+付けなければ存在しない（呼んでも `-32602`）。ほかのツールは付けても付けなくても同じ。
+
+| ツール | 引数 | 返すもの |
+|---|---|---|
+| `live_edit` | `ops` | 開いているアプリの文書に `EditOp` の列を 1 バッチで適用する。`created`（`{kind, id}`）。エイリアスは返さない |
+
+- **`edit` との違い**: `edit` はサーバ内の下書きを、`live_edit` は利用者が今開いている
+  文書を変える。利用者の画面で変わり、Cmd+Z で戻せる（1 呼び出し = undo 1 段）
+- 接続先は [ライブ編集ソケット](live-edit.md)。アプリが global 設定
+  `[agent] live_edit_enabled = true` で起動していること。呼び出しごとにつなぎ、
+  1 要求・1 応答で閉じる
+- 削除（コンプ・レイヤー・ノード）を含む呼び出しは、アプリのダイアログで利用者が
+  承認するまで返らない。拒否・閉じる・文書が変わった場合は失敗
+- 失敗は `isError: true` で、`structuredContent` は `{id, index, message}`。`id` は次のいずれか
+
+| `id` | 意味 |
+|---|---|
+| `app-not-running` | つなげない（アプリが無い・口が閉じている）。要求は送られていない |
+| `app-disconnected` | 要求を送ったあと、応答の前に切れた（アプリの終了など）。適用されたかは不明なので文書を確かめてから繰り返す。次の呼び出しはつなぎ直す |
+| `confirmation-denied` | 利用者が削除を承認しなかった。文書は変わっていない。再試行しない |
+| `document-changed` | 確認待ちの間に文書が変わったので適用しなかった |
+| ほか | アプリが返した `EditError::code()`（`driven-parameter` など）。`index` は失敗した操作 |
+
+MCP クライアントへの登録:
+
+```json
+{ "command": "ravel-cli", "args": ["mcp", "--attach", "--allow-dir", "/path/to/renders"] }
+```
+
+ネットワークには出ない（ローカルの Unix ソケット / 名前付きパイプだけ）。
+確認待ちの間、この MCP サーバは次のメッセージを処理しない（1 本の stdio を順に読む）。
+
 ## 検証
 
 GPU が無い機械でも、読み取り系・拒否・`no-gpu` は確かめられる。組み立て → 保存 →
+`--attach` の橋渡し（偽のアプリを一時ディレクトリの Unix ソケットで立てる）は `tests/mcp_attach.rs` と
+`src/live.rs` の単体テスト。組み立て → 保存 →
 読み戻し → 書き出しは `tests/mcp_assembly.rs`（GPU 無しのスタブ hooks。`Server::with_renderers`
 で下書き用のレンダラーも差し込む）と、子プロセスの `tests/mcp_stdio.rs` で通している。書き出しそのものは
 GPU が要るので `tests/mcp_stdio.rs` には入れていない（`src/mcp.rs` の単体テストが

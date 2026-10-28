@@ -16,12 +16,9 @@ use windows_sys::Win32::Foundation::{
     INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
-use windows_sys::Win32::Security::{
-    GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
-    TokenUser,
-};
+use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
 };
@@ -29,7 +26,6 @@ use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use super::{JobSender, serve_connection};
 
@@ -90,39 +86,6 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 
-/// The current user's SID in string form (`S-1-5-21-...`).
-fn user_sid() -> io::Result<String> {
-    // SAFETY: plain Win32 calls; every out-pointer refers to a live local, the
-    // token buffer is 8-aligned and sized by the first call, and the string
-    // `ConvertSidToStringSidW` allocates is freed with `LocalFree`.
-    unsafe {
-        let mut token: HANDLE = null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let mut len = 0u32;
-        GetTokenInformation(token, TokenUser, null_mut(), 0, &mut len);
-        let mut buf = vec![0u64; (len as usize).div_ceil(8)];
-        let got = GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &mut len);
-        CloseHandle(token);
-        if got == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let user = &*(buf.as_ptr() as *const TOKEN_USER);
-        let mut text: *mut u16 = null_mut();
-        if ConvertSidToStringSidW(user.User.Sid, &mut text) == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let mut n = 0;
-        while *text.add(n) != 0 {
-            n += 1;
-        }
-        let sid = String::from_utf16_lossy(std::slice::from_raw_parts(text, n));
-        LocalFree(text.cast());
-        Ok(sid)
-    }
-}
-
 /// Create one pipe instance reachable by the current user and SYSTEM only.
 fn create_instance(name: &[u16], sid: &str, first: bool) -> io::Result<Pipe> {
     let sddl = wide(&format!("D:P(A;;GA;;;{sid})(A;;GA;;;SY)"));
@@ -171,16 +134,15 @@ fn create_instance(name: &[u16], sid: &str, first: bool) -> io::Result<Pipe> {
 /// Create the pipe and start accepting. `None` (logged) when it could not be
 /// opened or another instance owns it. `endpoint` replaces the pipe name.
 pub fn open(endpoint: Option<PathBuf>, tx: JobSender) -> Option<()> {
-    let sid = match user_sid() {
+    let sid = match ravel_project::paths::current_user_sid() {
         Ok(sid) => sid,
         Err(error) => {
             tracing::warn!(%error, "could not read the user SID; the live-edit pipe stays closed");
             return None;
         }
     };
-    let name = endpoint
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| format!(r"\\.\pipe\ravel-live-edit-{sid}"));
+    let endpoint = endpoint.or_else(ravel_project::paths::live_edit_endpoint)?;
+    let name = endpoint.to_string_lossy().into_owned();
     let name = wide(&name);
     let first = match create_instance(&name, &sid, true) {
         Ok(pipe) => pipe,

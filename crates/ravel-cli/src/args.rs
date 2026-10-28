@@ -53,6 +53,11 @@ pub struct McpArgs {
     /// every writing tool is refused; reading tools need no permission.
     #[arg(long = "allow-dir", value_name = "DIR", value_parser = tilde_path())]
     pub allow_dir: Vec<PathBuf>,
+    /// Also offer `live_edit`, which edits the document open in a running
+    /// Ravel app through its local live-edit door (the app opens it only when
+    /// its global setting `[agent] live_edit_enabled` is on).
+    #[arg(long)]
+    pub attach: bool,
 }
 
 #[derive(Debug, Subcommand)]

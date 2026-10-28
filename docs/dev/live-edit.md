@@ -77,6 +77,8 @@ Ravel の画面で取る（クライアントの自動承認に左右されな�
   （条件は `protocol::first_removal`）
 - 「上書き」（既存ファイルへの上書き書き出し、保存先の変更）を確認する対象は、
   今の `EditOp` に**無い**。その操作ができたときに同じ経路へ足す
+- `set_keyframes` / `clear_animation` / `set_layer` も確認しない（undo で戻る）。駆動されたチャンネルへの
+  `set_keyframes` は `driven-parameter` で拒否する
 - 駆動されたパラメータへの書き込みは、従来どおり `driven-parameter` で拒否する
 
 ## 呼ぶ側

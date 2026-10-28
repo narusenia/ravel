@@ -84,7 +84,25 @@ TCP では待ち受けない。Ravel は API キーもネットワークも持�
   なら、返ってきた id を使う。`path`（`comp` / `layer` / `subnets`）も id でもエイリアスでもよい
 - ノードは `describe_node` が返すテンプレートから作る。パラメータは `{"type": "float", "value": 150}`
   のように型付きで書き、数値は範囲にクランプされる。未知のキーはエラー
-- 駆動されたパラメータ（式・ノード出力・ブレンド）への `set_parameter` は `driven-parameter` で拒否
+- 駆動されたパラメータ（式・ノード出力・ブレンド）への `set_parameter` / `set_keyframes` は `driven-parameter` で拒否
+- 動き（`AI-8`）: `set_keyframes` / `clear_animation` / `set_layer` も `edit`（と `live_edit`）の
+  操作で、確認は出ない（undo で戻る）。対象は 2 種類で、フィールドは操作の隣に書く
+  - ノードのパラメータ: `path` + `node` + `key`
+  - レイヤーの殻: `comp` + `layer` + `property`（`anchor_point` / `position` / `scale` /
+    `rotation` / `opacity` / `audio_gain` / `time_remap`）
+  - `set_keyframes {target, component?, keys: [{frame, value, interpolation}]}` は**1 チャンネル**の曲線を
+    置き換える。ベクトル・色は `component`（0 始まり。色は r/g/b/a）ごとに 1 操作
+  - **`frame` はコンポのフレーム**（タイムラインの見え方）。レイヤーのローカルフレームへ直して
+    保存するので、レイヤーを動かせばキーも動く。`start_frame` より前は `key-before-layer-start`
+  - `interpolation` は `bezier`（ハンドルは UI の既定）/ `linear` / `step`。値はパラメータの範囲
+    （不透明度は 0〜1）にクランプされる。素の `Float` / `Int` は初めてのキーでチャンネルになる
+  - `clear_animation {target, component?, value}` は曲線か式を捨てて定数 `value` にする。
+    ノード出力・ブレンドで駆動されたチャンネルは `driven-parameter`
+  - `set_layer` は渡したフィールドだけ変える（`name` / `start_frame` / `in_frame` / `out_frame` /
+    `anchor_point` / `position` / `scale` / `rotation` / `opacity` / `blend_mode` / `parent` /
+    `solo` / `muted` / `locked`）。`parent: null` で解除、循環は `invalid-layer-edit`。
+    アニメ済みの殻プロパティへの定数は `animated-parameter`、駆動済みは `driven-parameter`
+  - 殻の `time_remap` は予約欄（まだ評価されない）。書けるが見た目は変わらない
 - **色の値はリニア光**（`Color` の保存形式。`data-model.md` の色の節）。sRGB の値や
   `#RRGGBB` をそのまま渡すと白っぽく出る。sRGB の 0.2 はリニアで約 0.033
 
@@ -96,7 +114,10 @@ TCP では待ち受けない。Ravel は API キーもネットワークも持�
   {"op": "add_layer", "comp": "c", "template": "solid", "as": "l"},
   {"op": "add_node", "path": {"comp": "c", "layer": "l"}, "type_key": "shape.rect", "as": "r"},
   {"op": "set_parameter", "path": {"comp": "c", "layer": "l"}, "node": "r",
-   "key": "width", "value": {"type": "float", "value": 150}}
+   "key": "width", "value": {"type": "float", "value": 150}},
+  {"op": "set_keyframes", "comp": "c", "layer": "l", "property": "opacity",
+   "keys": [{"frame": 0, "value": 0, "interpolation": "linear"},
+            {"frame": 30, "value": 1, "interpolation": "bezier"}]}
 ]}
 ```
 

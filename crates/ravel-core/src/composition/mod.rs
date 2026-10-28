@@ -488,8 +488,8 @@ impl Layer {
     /// before the layer would silently land on `in_frame`.
     pub fn key_frame_for_comp(&self, comp_frame: u64) -> Option<u64> {
         let comp_frame = i64::try_from(comp_frame).ok()?;
-        (comp_frame >= self.start_frame)
-            .then(|| (comp_frame - self.start_frame) as u64 + self.in_frame)
+        let offset = u64::try_from(comp_frame.checked_sub(self.start_frame)?).ok()?;
+        offset.checked_add(self.in_frame)
     }
 
     /// The channel `property`'s `component` names, `None` when the layer has
@@ -4494,6 +4494,8 @@ mod tests {
         assert_eq!(layer.key_frame_for_comp(9), None);
         assert_eq!(layer.comp_frame_for_key(19), 25);
         assert_eq!(layer.local_frame(9), 3, "the clamping form still answers");
+        layer.start_frame = i64::MIN;
+        assert_eq!(layer.key_frame_for_comp(0), None, "overflow is refused");
     }
 
     #[test]

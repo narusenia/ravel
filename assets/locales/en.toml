@@ -882,13 +882,13 @@ port = "Output port of the referenced layer to read. This node's output takes th
 
 [node."layer.info"]
 label = "Layer Info"
-description = "Reads a layer's shell — placement, size, transform, opacity — without evaluating its network. The world_* ports read the composed matrix: world_scale is the length of each basis vector and world_rotation the angle of the first, so a non-uniform scale above a rotation shears and the two no longer compose back into the matrix (world_position stays exact). Rotations are in radians."
+description = "Reads a layer's time placement, size, transform and opacity. Rotations are in radians; under a non-uniform parent scale, world_scale and world_rotation do not rebuild the matrix exactly."
 [node."layer.info".params]
 layer = "The layer to read. Defaults to the layer this network belongs to."
 
 [node."comp.info"]
 label = "Comp Info"
-description = "Reads a composition's resolution, frame rate, duration, background and layer count without evaluating anything. comp_t and comp_f are the current time on that composition's clock, not the layer's local time; comp_f is comp_t times its frame rate."
+description = "Reads a composition's resolution, frame rate, duration, background and layer count. comp_t and comp_f are the current time on that composition's clock, not the layer's local time."
 [node."comp.info".params]
 comp = "The composition to read. Defaults to the composition this network belongs to; anything else is a CompId in decimal."
 
@@ -1032,7 +1032,7 @@ rotation = "Euler angles in degrees. A 2D rotation is about Z."
 scale = "Scale factor per axis."
 use_centroid = "Rotate and scale around the geometry's centroid instead of the pivot."
 pivot = "Transform origin when use_centroid is off."
-group = "Name of a bool attribute limiting the moved points (and, on its own, instances) (empty for all). The centroid then covers the flagged elements only."
+group = "Name of a bool attribute limiting the moved points or instances (empty for all). The centroid uses the flagged elements only."
 [node."geometry.transform".group]
 placement = "Placement"
 pivot = "Pivot"
@@ -1081,7 +1081,7 @@ invert = "Flag every element except the ones the range names."
 
 [node."geometry.repeat"]
 label = "Repeat"
-description = "Makes count copies of the input. Copy i is placed by the per-copy transform applied i times, so spirals and nested layouts build up. The output is instances, like the scatter nodes."
+description = "Makes count copies of the input, applying the per-copy transform once more to each copy, which builds spirals and nested layouts. Outputs instances."
 
 [node."geometry.repeat".params]
 count = "Number of copies. The first copy is the input where it is."
@@ -1091,7 +1091,7 @@ scale = "Scale multiplied in by each step. A scale of 0 collapses every copy aft
 
 [node."geometry.distribute"]
 label = "Distribute"
-description = "Aligns or spaces the elements by their size. Moves the paths when there are any, otherwise the instances (a stamped source counts at its size times the instance scale). Spacing keeps the first and last element, ordered by centre, where they are. A point shared by several paths moves with the first of them only, which can distort the others."
+description = "Aligns or spaces the paths, or the instances when there are no paths, by their size. A point shared by several paths moves with the first of them only, which can distort the others."
 
 [node."geometry.distribute".params]
 axis = "The axis the elements move along."
@@ -1099,7 +1099,7 @@ mode = "min, center and max align the left/top edges, the centres or the right/b
 
 [node."geometry.bend"]
 label = "Bend"
-description = "Bends the axis into an arc. Points before the range stay, points past it follow the end of the arc straight on. Bezier tangents are carried along, so curves stay smooth."
+description = "Bends the axis into an arc. Points before the range stay put; points past it continue straight from the end of the arc."
 
 [node."geometry.bend".params]
 axis = "The axis the bend runs along. The other axis is the direction it curls toward."
@@ -1110,7 +1110,7 @@ group = "Name of a boolean point attribute. Only flagged points move. Empty move
 
 [node."geometry.twist"]
 label = "Twist"
-description = "Rotates points around the axis in proportion to their position along it. In the plane this shows as the shape narrowing toward the axis and mirroring past a half turn. Bezier tangents are carried along."
+description = "Rotates points around the axis in proportion to their position along it. In 2D the shape narrows toward the axis and mirrors past a half turn."
 
 [node."geometry.twist".params]
 axis = "The axis the twist runs along."
@@ -1121,7 +1121,7 @@ group = "Name of a boolean point attribute. Only flagged points move. Empty move
 
 [node."geometry.taper"]
 label = "Taper"
-description = "Narrows the shape along the axis. The width at the end of the range is one minus the amount of the original. Bezier tangents are carried along."
+description = "Narrows the shape along the axis; at the end of the range the width is 1 - amount of the original."
 
 [node."geometry.taper".params]
 axis = "The axis the taper runs along."
@@ -1132,7 +1132,7 @@ group = "Name of a boolean point attribute. Only flagged points move. Empty move
 
 [node."geometry.blast"]
 label = "Blast"
-description = "Deletes the elements a boolean group attribute flags (or, inverted, the ones it does not). Deleting a point also deletes every primitive that used it. index is renumbered; id is kept. An empty or unresolvable group deletes nothing."
+description = "Deletes the elements a boolean group attribute flags (or, inverted, the rest). Deleting a point also deletes the primitives that use it."
 [node."geometry.blast".params]
 domain = "Which elements are deleted. Deleting primitives keeps their points."
 group = "Name of the boolean attribute on that domain that flags the elements to delete. Empty deletes nothing."
@@ -1140,7 +1140,7 @@ invert = "Delete the elements the group does not flag instead."
 
 [node."geometry.resample"]
 label = "Resample"
-description = "Re-places the points of every path at even arc-length spacing. Attributes are interpolated from the original points; in_tan and out_tan are dropped. Points no path uses are dropped."
+description = "Re-places the points of every path at even arc-length spacing. Attributes are interpolated; in_tan and out_tan are dropped."
 [node."geometry.resample".params]
 length = "Target spacing. The path is divided into the nearest whole number of equal segments. When 0, segments decides instead."
 segments = "Number of equal segments per path. Used when length is 0."
@@ -1165,7 +1165,7 @@ description = "Passes its input through unchanged. For tidying a graph and givin
 
 [node."geometry.iterate"]
 label = "Iterate"
-description = "Runs the network inside it once per piece and merges the results. The geometry is split by an integer primitive attribute, one piece per value in ascending order; the body gets the piece and its iteration index."
+description = "Runs the network inside it once per piece and merges the results. Pieces are split by an integer primitive attribute, one per value in ascending order."
 [node."geometry.iterate".params]
 attribute = "Name of the integer primitive attribute the geometry is split by."
 max_iterations = "Most pieces allowed. More is an error."
@@ -1227,7 +1227,7 @@ scale = "Uniform scale factor."
 
 [node."color_correct"]
 label = "Color Correct"
-description = "All-in-one grading: white balance, exposure, tone, saturation, curves, three-way wheels, fade and vignette. Each part does nothing at its default."
+description = "All-in-one grading: white balance, exposure, tone, saturation, curves, three-way wheels, fade and vignette."
 [node."color_correct".params]
 brightness = "Added before the contrast, so the contrast scales it (-1 to 1)."
 contrast = "Scales the distance from mid gray (1 is unchanged)."
@@ -1321,7 +1321,7 @@ blue = "Curve applied to the blue channel after the RGB curve."
 
 [node."comp.lift_gamma_gain"]
 label = "Lift / Gamma / Gain"
-description = "Three-way grade on the shadows, midtones and highlights, one RGB value each. Black becomes the lift and white the gain exactly, whatever the gamma. Alpha is kept."
+description = "Three-way grade on the shadows, midtones and highlights, one RGB value each. Alpha is kept."
 [node."comp.lift_gamma_gain".params]
 lift = "RGB that black becomes (0 leaves it unchanged; negative crushes the shadows, positive lifts them)."
 gamma = "Per-channel midtone exponent (1 is unchanged; above 1 brightens that channel, below 1 darkens it)."
@@ -1337,7 +1337,7 @@ hue_vs_lum = "Luminance gain by hue (0.5 is unchanged; the gain is twice the val
 
 [node."comp.directional_blur"]
 label = "Directional Blur"
-description = "Smears an image along one direction. Pixels past the border repeat the edge pixel, so the border never fades."
+description = "Smears an image along one direction; the edges do not fade."
 [node."comp.directional_blur".params]
 length = "Blur length in composition pixels."
 angle = "Direction in degrees. 0 smears horizontally only, 90 vertically."
@@ -1360,7 +1360,7 @@ radius = "Blur radius of the mask in composition pixels."
 
 [node."comp.warp"]
 label = "Warp"
-description = "Displaces pixels by a map image. The map's red moves pixels across and green down; mid-gray moves nothing. Without a map the image passes through."
+description = "Displaces pixels by a map image. The map's red moves pixels across and green down; mid-gray moves nothing."
 [node."comp.warp".params]
 amount = "Displacement at full map value, in composition pixels (x, y). A map of another size is stretched over the image."
 
@@ -1395,7 +1395,7 @@ rows = "Copies down (rounded to a whole number, 1 to 256)."
 
 [node."comp.mask"]
 label = "Mask"
-description = "Keeps the image where a geometry covers it and clears the alpha everywhere else. Without a geometry the image passes through."
+description = "Keeps the image where a geometry covers it and clears the alpha everywhere else."
 [node."comp.mask".params]
 invert = "Keep the image outside the geometry instead of inside."
 
@@ -1411,7 +1411,7 @@ invert = "Keep only the pixels near the key color and remove the rest."
 
 [node."comp.time_remap"]
 label = "Time Remap"
-description = "Shows the input at a different time. The curve maps the frame being rendered (horizontal) to the input frame to show (vertical); the default empty curve changes nothing. The curve holds its end values outside its first and last points."
+description = "Shows the input at a different time: a curve maps the rendered frame (horizontal) to the input frame shown (vertical). The empty default curve changes nothing."
 [node."comp.time_remap".params]
 curve = "Rendered frame in, input frame out. A straight rising line at slope 1 changes nothing; a falling line plays backwards."
 interpolation = "nearest picks the closest input frame; blend mixes the two input frames around a fractional position."
@@ -1735,7 +1735,7 @@ scope = "Scope"
 
 [node."style.fill"]
 label = "Style Fill"
-description = "Writes the fill attributes (fill flag and Cd) onto a geometry domain; rasterize resolves them per element."
+description = "Writes the fill attributes (fill flag and Cd) onto a geometry domain."
 [node."style.fill".params]
 enabled = "Whether the elements are filled."
 color = "Fill color, written to the Cd attribute."
@@ -1744,7 +1744,7 @@ group = "Bool attribute naming the elements to write; empty writes every element
 
 [node."style.stroke"]
 label = "Style Stroke"
-description = "Writes the stroke attributes (stroke_width and stroke_color) onto a geometry domain; rasterize resolves them per element."
+description = "Writes the stroke attributes (stroke_width and stroke_color) onto a geometry domain."
 [node."style.stroke".params]
 width = "Stroke width in composition pixels; 0 draws no stroke."
 color = "Stroke color, written to the stroke_color attribute."
@@ -1752,7 +1752,7 @@ domain = "Domain to write on (point, primitive, instance)."
 group = "Bool attribute naming the elements to write; empty writes every element."
 cap = "Shape of the stroke ends (butt, round, square); a Detail attribute, so one value for the geometry."
 join = "Shape of the stroke corners (miter, round, bevel); a Detail attribute, so one value for the geometry."
-stroke_align = "Where the stroke lies relative to a closed path (center, inside, outside); an open path always strokes at the center. Writes the Primitive stroke_align attribute, so it follows domain and group."
+stroke_align = "Where the stroke lies relative to a closed path (center, inside, outside); an open path always strokes at the center."
 [node."style.stroke".group]
 stroke = "Stroke"
 target = "Target"
@@ -1956,24 +1956,24 @@ scope = "Scope"
 
 [node."text.font"]
 label = "Font"
-description = "Resolves a font family, weight, and style into a font face for the text nodes. A family that is not installed falls back to the bundled face."
+description = "Picks a font for the text nodes by family, weight and style. A family that is not installed falls back to the bundled font."
 [node."text.font".params]
-family = "Font family name, matched case-insensitively against the installed and bundled faces."
-weight = "Face weight. The nearest weight the family actually carries is used."
+family = "Font family name, matched case-insensitively against installed and bundled fonts."
+weight = "Font weight; the nearest weight the family has is used."
 style = "Upright or slanted face."
 
 [node."text.layout"]
 label = "Text Layout"
-description = "Shapes a string in a font face and lays it out as one instance per character, with the glyph outlines as instance sources. Each character carries char_index, word_index, line_index, char_progress and advance for fields to read."
+description = "Lays out a string as one instance per character, using the glyph outlines. Each character carries char_index, word_index, line_index, char_progress and advance for fields to read."
 [node."text.layout".params]
 text = "The string to lay out. A newline starts a new line."
 size = "Em size in composition pixels."
 tracking = "Extra advance after every character, in composition pixels."
-leading = "Baseline-to-baseline distance in composition pixels. Zero uses the face's own line height."
-writing_mode = "Whether characters run along a horizontal line, or downwards along a column with the columns going right to left. A horizontal line still follows the script's own direction. Vertical shaping uses the face's vertical forms for the brackets and punctuation."
-align = "Where each line sits against the origin: starting at it, centred on it, ending at it, or stretched to the wrap width. Vertical text reads it down the column instead of across the line."
+leading = "Baseline-to-baseline distance in composition pixels. Zero uses the font's own line height."
+writing_mode = "Horizontal lines, or vertical columns running top to bottom with the columns going right to left."
+align = "Where each line sits against the origin: starting at it, centred on it, ending at it, or stretched to the wrap width. In vertical text it positions each column top to bottom."
 wrap_width = "Wrap lines longer than this many composition pixels — the length of a column in vertical text. Zero wraps only at the newlines in the string."
-anchor = "Which line of the block lands on the origin: the first baseline, or the top, middle or bottom of the block. Vertical text reads it across the columns, so it picks the first column's centreline or the block's right, middle or left edge."
+anchor = "Which line of the block lands on the origin: the first baseline, or the top, middle or bottom of the block. In vertical text: the first column's centreline, or the block's right, middle or left edge."
 position = "Where the layout's origin sits, in composition pixels. Anchor and align place the block against this point. Has no effect once the text is placed on a path."
 translate = "Moves the output after this node has built it."
 rotation = "Euler angles in degrees applied to the output; 2D rotation is about Z."
@@ -1989,11 +1989,11 @@ transform = "Transform"
 
 [node."text.to_path"]
 label = "Text To Path"
-description = "Flattens instances into one geometry of outline paths and moves the per-character attributes onto the points. A field on P then distorts the letter shapes instead of moving whole characters. Works on any instances, not only text; a geometry without instances passes through."
+description = "Flattens character instances into outline paths, keeping the per-character attributes on the points. A field on P then distorts the letter shapes instead of moving whole characters."
 
 [node."text.on_path"]
 label = "Text On Path"
-description = "Places a text layout's characters along a path, each turned to the path's tangent. Per-character attributes carry through. An unconnected path input passes the text through, and characters past the end of the path pile up on its last point."
+description = "Places a text layout's characters along a path, each turned to the path's tangent. Characters past the end of the path pile up on its last point."
 [node."text.on_path".params]
 offset = "How far along the path the run starts, in composition pixels."
 spacing = "Extra arc length after every character, in composition pixels — tracking measured along the path."

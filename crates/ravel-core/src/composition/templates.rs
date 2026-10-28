@@ -167,7 +167,7 @@ fn resolve_input(
     Ok((node.id, InputPortIndex(index as u32)))
 }
 
-/// The built-in Solid / Shape / Video / Audio / Null templates (REQ-LAYER-008),
+/// The built-in Solid / Shape / Video / Audio / Null / Adjustment templates (REQ-LAYER-008),
 /// parsed once from the embedded `assets/layer-templates/` definitions.
 pub fn builtin_layer_templates() -> &'static [LayerTemplate] {
     static TEMPLATES: OnceLock<Vec<LayerTemplate>> = OnceLock::new();
@@ -178,6 +178,7 @@ pub fn builtin_layer_templates() -> &'static [LayerTemplate] {
             include_str!("../../../../assets/layer-templates/media.ron"),
             include_str!("../../../../assets/layer-templates/audio.ron"),
             include_str!("../../../../assets/layer-templates/null.ron"),
+            include_str!("../../../../assets/layer-templates/adjustment.ron"),
         ]
         .iter()
         .map(|source| {
@@ -195,7 +196,7 @@ pub fn builtin_layer_templates() -> &'static [LayerTemplate] {
 }
 
 /// Look up a built-in template by key (`"solid"`, `"shape"`, `"media"`,
-/// `"audio"`, `"null"`).
+/// `"audio"`, `"null"`, `"adjustment"`).
 pub fn builtin_layer_template(key: &str) -> Option<&'static LayerTemplate> {
     builtin_layer_templates().iter().find(|t| t.key == key)
 }
@@ -221,7 +222,10 @@ mod tests {
             .iter()
             .map(|t| t.key.as_str())
             .collect();
-        assert_eq!(keys, ["solid", "shape", "media", "audio", "null"]);
+        assert_eq!(
+            keys,
+            ["solid", "shape", "media", "audio", "null", "adjustment"]
+        );
     }
 
     #[test]

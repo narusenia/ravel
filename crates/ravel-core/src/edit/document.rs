@@ -176,6 +176,9 @@ pub fn add_layer_from_template(
     if template.key == "audio" {
         layer.audio = Some(crate::composition::AudioSource::default());
     }
+    if template.key == "adjustment" {
+        layer.set_adjustment(true);
+    }
     Ok(add_layer(doc, comp, layer).map(|doc| (doc, id)))
 }
 

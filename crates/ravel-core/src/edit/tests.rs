@@ -285,6 +285,50 @@ fn aliases_do_not_outlive_their_batch() {
     assert_eq!(err.code(), "unknown-alias");
 }
 
+/// The Adjustment template makes an adjustment layer whose network passes
+/// the lower stack (`source`) straight to Out's `frame`.
+#[test]
+fn adjustment_template_adds_a_pass_through_adjustment_layer() {
+    use crate::network as net;
+    let reg = registry();
+    let cx = EditContext {
+        registry: &reg,
+        local_frame: None,
+        allow_driven_overwrite: false,
+    };
+    let ops = [
+        add_comp("Shot", alias("shot")),
+        add_layer(CompRef::Alias("shot".into()), "adjustment", alias("adj")),
+    ];
+    let applied = apply_batch(&Document::default(), &ops, &cx).unwrap();
+    applied.document.validate().unwrap();
+    let (Some(&Created::Composition(comp)), Some(&Created::Layer(layer))) =
+        (applied.aliases.get("shot"), applied.aliases.get("adj"))
+    else {
+        panic!("aliases must resolve");
+    };
+    let layer = applied
+        .document
+        .get_composition(comp)
+        .unwrap()
+        .get_layer(layer)
+        .unwrap();
+    assert!(layer.adjustment);
+    assert!(layer.has_frame_output());
+
+    let in_node = net::find_in_node(&layer.network).unwrap();
+    let out_node = net::find_out_node(&layer.network).unwrap();
+    let source = net::output_port_index(in_node, net::PORT_SOURCE).unwrap();
+    let frame = net::frame_port_index(out_node).unwrap() as u32;
+    let into_frame: Vec<_> = layer
+        .network
+        .edges()
+        .filter(|e| e.target == out_node.id && e.target_port.0 == frame)
+        .map(|e| (e.source, e.source_port))
+        .collect();
+    assert_eq!(into_frame, [(in_node.id, source)]);
+}
+
 #[test]
 fn edit_ops_round_trip_through_json() {
     let ops = vec![

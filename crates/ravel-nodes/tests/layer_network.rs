@@ -1101,6 +1101,44 @@ fn null_template_layer_stays_out_of_merge_chain() {
     );
 }
 
+#[test]
+fn adjustment_template_layer_passes_the_lower_stack_through() {
+    use ravel_core::composition::templates::builtin_layer_template;
+
+    let reg = builtin_registry();
+    let adjustment_network = builtin_layer_template("adjustment")
+        .unwrap()
+        .instantiate(&reg)
+        .unwrap();
+    let solid_network = fb_source_network(890, 891);
+    // What `add_layer_from_template` does for this template.
+    let mut adjustment =
+        Layer::new(LayerId::new(2), "Adj", adjustment_network.clone()).with_time(0, 0, 300);
+    adjustment.set_adjustment(true);
+    let comp = Composition::new(CompId::new(1), "Adj", (8, 8), FPS, 300)
+        .add_layer(Layer::new(LayerId::new(1), "Green", solid_network.clone()).with_time(0, 0, 300))
+        .add_layer(adjustment);
+    let doc = Document::default().with_composition(comp.clone());
+
+    let (mut evaluator, graph, output) = setup(&comp, &[&solid_network, &adjustment_network]);
+    evaluator.register(
+        NodeId::new(890),
+        Arc::new(FbSource(solid_fb(8, 8, [0.0, 0.5, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+        .unwrap();
+    let fb = frame(&out);
+    assert!(
+        fb.as_f32()
+            .chunks_exact(4)
+            .all(|p| (p[1] - 0.5).abs() < 1e-6 && p[3] > 0.9),
+        "the adjustment template keeps the lower stack visible"
+    );
+}
+
 // ===========================================================================
 // Subnets inside layer networks (REQ-LAYER-003)
 // ===========================================================================

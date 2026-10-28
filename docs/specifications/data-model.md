@@ -249,7 +249,7 @@ struct Layer {
   生成するだけ（REQ-LAYER-008）。データモデル上、全レイヤーは同一構造。
 - **テンプレートはデータ駆動**（`composition::templates`）。定義は
   `LayerTemplate`（ノード列 + シンボリックキーのエッジ列、RON
-  シリアライズ可能）で、ビルトインの Solid / Shape / Video / Audio / Null は
+  シリアライズ可能）で、ビルトインの Solid / Shape / Video / Audio / Null / Adjustment は
   `assets/layer-templates/*.ron` を埋め込み提供
   （`builtin_layer_templates()`）。インスタンス化は NodeRegistry の
   型定義（ポート・デフォルトパラメータ）をシードにテンプレート側が
@@ -266,8 +266,11 @@ struct Layer {
   スタックの合成結果を受け取り、その出力が次の background になる
   （`background' = network(background)`。opacity はエフェクト強度）。
   `source` は予約名で手では足せないため、`Layer::set_adjustment(true)` と
-  読み込み時の正規化（`normalize_net_in_ports`）が In に付ける。オフに
-  戻してもポートは残り、透明を返す。
+  読み込み時の正規化（`normalize_net_in_ports`）が In に付ける。オンに
+  したとき Out の `frame` に何もつながっていなければ `source` をつなぐ
+  （素通し。つながっていればユーザーのネットワークとして触らない）。オフに
+  戻してもポートと配線は残り、`source` は透明を返す。Adjustment テンプレート
+  は `source → frame` の素通しで作り、フラグを立てる。
 
 #### ネットワークインターフェース（In / Out ノード, REQ-LAYER-002）
 

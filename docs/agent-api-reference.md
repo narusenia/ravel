@@ -1147,7 +1147,7 @@ templates::LayerTemplate { key, display_name, nodes, edges }  // RON data
     // registry seeds ports/params; template extends/overrides; fresh
     // NodeId::next per instantiation
 templates::{builtin_layer_templates(), builtin_layer_template(key)}
-    // "solid" | "shape" | "media" | "audio" | "null" from assets/layer-templates/
+    // "solid" | "shape" | "media" | "audio" | "null" | "adjustment" from assets/layer-templates/
 ```
 
 ### `network` — In/Out interface conventions (REQ-LAYER-002)

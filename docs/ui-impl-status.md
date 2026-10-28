@@ -207,7 +207,7 @@ Composition を表示・編集し、レイヤー編集は Document 単位 undo �
 | レイヤー展開 (▶/▼) | ✅ | プロパティグループ・チャンネル行の開閉 |
 | プロパティ行の絞り込み | ✅ | AE の reveal 一式（`U` / `A` / `P` / `S` / `R` / `T` / `L`、`Alt+U` = 変更済み、`Alt+E` = 式を持つ行）。**修飾なしは置換、`Shift` 併用は追加**、同じキーの二度目で全表示に戻る。行の生成は変えずフィルタを 1 枚かぶせるだけで、描画・ヒットテスト・ラバーバンド・高さ計算のすべてが `TimelinePanel::visible_property_rows` を通る。絞り込みはパネル状態なのでレイヤーを選び直しても保たれ、`ui_state.json` には載らない（起動時は常に全表示）。展開状態は変えない |
 | Solo/Mute/Lock トグル | ✅ | Document 更新（solo/mute は Structural 再評価） |
-| レイヤー作成 | ✅ | Layer メニュー（Solid/Shape/Video/Null、テンプレートから生成）。**Solid は `shape.rect`（`sizing: "auto"`）→ Rasterize** で、`auto` の矩形はコンプのフレームそのものなので見た目は従来と同じ。`fixed` にすると幅・高さを持つ板になり、Viewer の bbox もその矩形になる。**旧 `.ravprj` の Solid は `net.in` の `base_geometry` のまま**（グラフ手術はしない）ので、サイズが要るならノードを差し替える |
+| レイヤー作成 | ✅ | Layer メニュー（Solid/Shape/Video/Audio/Null/Adjustment、テンプレートから生成）。**Adjustment は `source → frame` の素通し**で作り、間にエフェクトノードを挟むと下のスタックに効く。**Solid は `shape.rect`（`sizing: "auto"`）→ Rasterize** で、`auto` の矩形はコンプのフレームそのものなので見た目は従来と同じ。`fixed` にすると幅・高さを持つ板になり、Viewer の bbox もその矩形になる。**旧 `.ravprj` の Solid は `net.in` の `base_geometry` のまま**（グラフ手術はしない）ので、サイズが要るならノードを差し替える |
 | レイヤー削除 | ✅ | Delete/Backspace（locked は保護）、Document undo で復元 |
 | レイヤー複製 | ✅ | Cmd+D、または行の右クリック → Duplicate。複数選択なら選択全体を 1 undo で複製し、コピーは各元の直上に入る |
 | Document/undo 統合 | ✅ | 追加・削除・並べ替え・トリム・移動すべて Document 単位 undo |

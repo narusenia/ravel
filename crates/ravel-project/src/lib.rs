@@ -841,6 +841,8 @@ mod tests {
                     // load-time port normalization would append one and the
                     // roundtrip would no longer be exact.
                     .with_output(net::PORT_FRAME_INDEX, DataTypeId::SCALAR)
+                    // Likewise `source` on this adjustment layer.
+                    .with_output(net::PORT_SOURCE, DataTypeId::FRAME_BUFFER)
                     .with_param(
                         "intensity",
                         ParameterValue::Channel(keyframed_channel(&[(0, 0.0), (24, 1.0)])),

@@ -2481,8 +2481,9 @@ impl ProjectState {
     /// what its own gesture posted, rather than a stand-in written by the
     /// test itself.
     /// Reopen the current document as if it had been loaded again: an equal
-    /// document under a new generation.
-    #[cfg(test)]
+    /// document under a new generation. Unix only, like the live-edit tests
+    /// that call it.
+    #[cfg(all(test, unix))]
     pub(crate) fn reopen_same_document(&mut self, cx: &mut Context<Self>) {
         let document = self.document().clone();
         self.replace_document(

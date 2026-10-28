@@ -1300,7 +1300,11 @@ fn constant_and_keyframed_parameters_still_take_a_write() {
     let reg = registry();
     let (doc, path, node) = doc_with_node("style.stroke");
     let op = set_param(&path, NodeRef::Id(node), "width", ParamInput::Float(3.0));
-    assert!(apply(&doc, &op, &cx(&reg)).is_ok());
+    let applied = apply(&doc, &op, &cx(&reg)).unwrap();
+    assert_eq!(
+        param_of(&applied.document, &path, node, "width"),
+        ParameterValue::Float(3.0)
+    );
     let keyed = with_param_value(
         &doc,
         &path,
@@ -1312,7 +1316,8 @@ fn constant_and_keyframed_parameters_still_take_a_write() {
         local_frame: Some(5),
         ..cx(&reg)
     };
-    assert!(apply(&keyed, &op, &at_frame).is_ok());
+    let applied = apply(&keyed, &op, &at_frame).unwrap();
+    assert_ne!(applied.document, keyed, "the keyed write changed the curve");
 }
 
 #[test]

@@ -359,6 +359,46 @@ mod tests {
     use crate::animation::curve::KeyframeCurve;
     use crate::animation::interpolation::Interpolation;
 
+    /// Every channel shape counts as driven when any one of its components is
+    /// fed by something other than a constant or a curve.
+    #[test]
+    fn a_value_is_driven_when_any_component_is() {
+        use crate::animation::channel::ParameterExpression;
+        use crate::id::{NodeId, OutputPortIndex};
+        let constant = || AnimationChannel::constant(1.0);
+        let expression =
+            || AnimationChannel::new(ChannelSource::Expression(ParameterExpression::new("frame")));
+        let wired = AnimationChannel::new(ChannelSource::NodeOutput(
+            NodeId::new(7),
+            OutputPortIndex(0),
+        ));
+        let mut keyed = KeyframeCurve::new();
+        keyed.insert(0, 1.0, Interpolation::Linear);
+        let keyed = AnimationChannel::new(ChannelSource::Keyframes(keyed));
+
+        assert!(!is_driven(&ParameterValue::Channel(constant())));
+        assert!(!is_driven(&ParameterValue::Channel(keyed.clone())));
+        assert!(!is_driven(&ParameterValue::Float(1.0)));
+        assert!(is_driven(&ParameterValue::Channel(wired)));
+        assert!(is_driven(&ParameterValue::IntChannel(expression())));
+        assert!(!is_driven(&ParameterValue::Channel2([constant(), keyed])));
+        assert!(is_driven(&ParameterValue::Channel2([
+            constant(),
+            expression()
+        ])));
+        assert!(is_driven(&ParameterValue::Channel3([
+            constant(),
+            constant(),
+            expression()
+        ])));
+        assert!(is_driven(&ParameterValue::Channel4([
+            expression(),
+            constant(),
+            constant(),
+            constant()
+        ])));
+    }
+
     /// An int edit on a keyed `IntChannel` keys it at the frame instead of
     /// flattening it, and the parameter stays an int channel — the whole point
     /// of `from_channels` re-typing after the previous value.

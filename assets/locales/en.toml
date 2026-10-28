@@ -1132,7 +1132,7 @@ group = "Name of a boolean point attribute. Only flagged points move. Empty move
 
 [node."geometry.blast"]
 label = "Blast"
-description = "Deletes the elements a boolean group attribute flags (or, inverted, the rest). Deleting a point also deletes the primitives that use it."
+description = "Deletes the elements a boolean group attribute flags (or, inverted, the rest). Deleting a point also deletes the primitives that use it. An empty or unresolvable group deletes nothing."
 [node."geometry.blast".params]
 domain = "Which elements are deleted. Deleting primitives keeps their points."
 group = "Name of the boolean attribute on that domain that flags the elements to delete. Empty deletes nothing."
@@ -1360,7 +1360,7 @@ radius = "Blur radius of the mask in composition pixels."
 
 [node."comp.warp"]
 label = "Warp"
-description = "Displaces pixels by a map image. The map's red moves pixels across and green down; mid-gray moves nothing."
+description = "Displaces pixels by a map image. The map's red moves pixels across and green down; mid-gray moves nothing. Without a map the image passes through."
 [node."comp.warp".params]
 amount = "Displacement at full map value, in composition pixels (x, y). A map of another size is stretched over the image."
 
@@ -1395,7 +1395,7 @@ rows = "Copies down (rounded to a whole number, 1 to 256)."
 
 [node."comp.mask"]
 label = "Mask"
-description = "Keeps the image where a geometry covers it and clears the alpha everywhere else."
+description = "Keeps the image where a geometry covers it and clears the alpha everywhere else. Without a geometry the image passes through."
 [node."comp.mask".params]
 invert = "Keep the image outside the geometry instead of inside."
 
@@ -1993,7 +1993,7 @@ description = "Flattens character instances into outline paths, keeping the per-
 
 [node."text.on_path"]
 label = "Text On Path"
-description = "Places a text layout's characters along a path, each turned to the path's tangent. Characters past the end of the path pile up on its last point."
+description = "Places a text layout's characters along a path, each turned to the path's tangent. Characters past the end of the path pile up on its last point. Without a path the text passes through."
 [node."text.on_path".params]
 offset = "How far along the path the run starts, in composition pixels."
 spacing = "Extra arc length after every character, in composition pixels — tracking measured along the path."

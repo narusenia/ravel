@@ -167,6 +167,38 @@ mod tests {
         assert_eq!(response["error"]["index"], 2);
     }
 
+    /// Animation and shell edits are undoable, so they never wait for the user.
+    #[test]
+    fn keyframe_and_layer_edits_are_not_held_back() {
+        use ravel_core::composition::ShellProperty;
+        use ravel_core::edit::{ChannelTarget, LayerRef};
+        let comp = CompRef::Id(CompId::new(1));
+        let layer = LayerRef::Id(LayerId::new(1));
+        let ops = [
+            EditOp::SetKeyframes {
+                target: ChannelTarget::Shell {
+                    comp: comp.clone(),
+                    layer: layer.clone(),
+                    property: ShellProperty::Opacity,
+                },
+                component: 0,
+                keys: vec![],
+            },
+            EditOp::ClearAnimation {
+                target: ChannelTarget::Shell {
+                    comp: comp.clone(),
+                    layer: layer.clone(),
+                    property: ShellProperty::Opacity,
+                },
+                component: 0,
+                value: 1.0,
+            },
+            serde_json::from_value(json!({"op": "set_layer", "comp": 1, "layer": 1, "name": "x"}))
+                .unwrap(),
+        ];
+        assert_eq!(first_removal(&ops), None);
+    }
+
     #[test]
     fn disconnect_is_not_held_back() {
         let op = EditOp::Disconnect {

@@ -52,8 +52,34 @@ live_edit_enabled = true
 - 失敗は全体が適用されない。`code` は `EditError::code()`、`index` は失敗した操作
 - 壊れた JSON・形の違う要求は `{"id": null, "error": {"code": "bad-request", ...}}`
 
-## 拒否される操作
+## 削除は確認ダイアログで承認されるまで保留される
 
-`RemoveComposition` / `RemoveLayer` / `RemoveNode` を 1 つでも含む要求は、
-**全体を** `confirmation-required` で拒否し、文書を変えない。確認ダイアログ
-（`AI-5`）ができるまでの措置。`Disconnect` は undo で戻せるので通す。
+`RemoveComposition` / `RemoveLayer` / `RemoveNode` を 1 つでも含む要求は、拒否も
+適用もせず**確認待ち**にする（`AI-5`）。確認は MCP クライアントの画面ではなく
+Ravel の画面で取る（クライアントの自動承認に左右されないため）。
+
+- `LiveEdit` がウィンドウを持たないので、`LiveEditEvent::ConfirmRemoval` を
+  `EventEmitter` で出し、ウィンドウを持つ `RavelWorkspace` が購読してダイアログを開く。
+  Global にも `render()` にも載せない
+- ダイアログは消すものを列挙する（コンプ名・レイヤー名・ノードの種類と id）。名前は
+  文書の中身なので、文字として表示するだけ
+- **承認** → 1 回の `commit_edit_ops`（undo 1 段）で適用して `ok` を返す
+- **拒否** → 文書を変えず `confirmation-denied`（`index` は最初の削除の位置）。
+  Escape・閉じるボタン・ほかのダイアログが開いていた・購読者がいない、も同じ。
+  答えは 1 回きりの送信側で、落ちた（答えなかった）ことが「拒否」になるので、
+  拒否を忘れずに書く経路は無い
+- 待っている間、その接続のスレッドは応答を待つ。**ほかの接続の要求は順番に待つ**
+  （受け付けは 1 要求ずつ）。確認待ちに終わりは無い（閉じるまで）
+- 確認待ちの間に文書が変わった（利用者が編集した・別のプロジェクトを開いた）場合は、
+  承認されても適用せず `document-changed` を返す。質問したときの文書と一致するときだけ適用する
+- `Disconnect` は確認しない。`EditOp::is_destructive()` は分類で、確認の条件ではない
+  （条件は `protocol::first_removal`）
+- 「上書き」（既存ファイルへの上書き書き出し、保存先の変更）を確認する対象は、
+  今の `EditOp` に**無い**。その操作ができたときに同じ経路へ足す
+- 駆動されたパラメータへの書き込みは、従来どおり `driven-parameter` で拒否する
+
+## 呼ぶ側
+
+`ravel-cli mcp --attach` の `live_edit` ツールが、この口へつなぐ（
+[`mcp-cli.md`](mcp-cli.md)）。口の場所は `ravel_project::paths::live_edit_endpoint()`
+の 1 か所で決まり、アプリと CLI の両方がこれを呼ぶ。

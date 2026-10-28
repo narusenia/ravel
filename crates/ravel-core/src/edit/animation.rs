@@ -330,5 +330,17 @@ pub(super) fn param_clamp<'a>(
         .node(node_id)
         .ok_or(EditError::NodeNotFound(node_id))?;
     let range = cx.registry.param_range(&node.type_key, key);
-    Ok(move |v: f32| range.map_or(v, |r| r.clamp(v)))
+    // An int channel rounds on read, so a fractional key would never evaluate
+    // to the value written.
+    let int = node.parameters.iter().any(|p| {
+        p.key == key
+            && matches!(
+                p.value,
+                ParameterValue::Int(_) | ParameterValue::IntChannel(_)
+            )
+    });
+    Ok(move |v: f32| {
+        let v = if int { v.round() } else { v };
+        range.map_or(v, |r| r.clamp(v))
+    })
 }

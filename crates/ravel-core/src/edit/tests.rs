@@ -1522,6 +1522,23 @@ mod animation {
         assert_eq!(at(&width, &layer, 10), hard_end);
     }
 
+    /// An int channel rounds on read, so the key is stored already rounded and
+    /// evaluates to the value it holds.
+    #[test]
+    fn set_keyframes_on_an_int_parameter_stores_whole_values() {
+        let reg = registry();
+        let (doc, path, node) = doc_with_node("shape.polygon");
+        let op = set_keys(param_target(&path, node, "sides"), 0, vec![linear(0, 7.4)]);
+        let applied = apply(&doc, &op, &cx(&reg)).unwrap();
+        let ParameterValue::IntChannel(AnimationChannel {
+            source: ChannelSource::Keyframes(curve),
+        }) = param_of(&applied.document, &path, node, "sides")
+        else {
+            panic!("a keyed Int becomes an int channel");
+        };
+        assert_eq!(curve.keyframes()[0].value, 7.0);
+    }
+
     #[test]
     fn a_bezier_key_gets_the_editors_default_handles() {
         let reg = registry();

@@ -286,7 +286,7 @@ unassigned = "割り当てなし"
 
 [live_edit.confirm]
 title = "この編集を許可しますか？"
-message = "Ravel に接続したエージェントが、次の削除を求めています。実行後に元に戻せます。"
+message = "Ravel に接続したエージェントが次の削除を求めています。あとで元に戻せます。"
 composition = "コンポジション: {name}"
 layer = "レイヤー: {name}（コンポジション {comp}）"
 node = "ノード: {type}（id {id}）"

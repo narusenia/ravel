@@ -265,6 +265,9 @@ struct Layer {
 - **調整レイヤー**（`adjustment = true`）は、In の `source` ポートに下位
   スタックの合成結果を受け取り、その出力が次の background になる
   （`background' = network(background)`。opacity はエフェクト強度）。
+  `source` は予約名で手では足せないため、`Layer::set_adjustment(true)` と
+  読み込み時の正規化（`normalize_net_in_ports`）が In に付ける。オフに
+  戻してもポートは残り、透明を返す。
 
 #### ネットワークインターフェース（In / Out ノード, REQ-LAYER-002）
 

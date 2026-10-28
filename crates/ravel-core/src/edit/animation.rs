@@ -101,6 +101,15 @@ pub(super) fn write_param_channel(
         })?
         .value
         .clone();
+    // A keyed identifier (a precomp's `comp_id`, a `layer.ref`'s `layer`)
+    // stops resolving its target; the Properties keyframe toggle refuses it too.
+    if matches!(write, ChannelWrite::Keys(_))
+        && crate::composition::validate::is_identifier_parameter(&node.type_key, key)
+    {
+        return Err(EditError::InvalidKeyframes(format!(
+            "parameter {key:?} is an identifier and cannot be animated"
+        )));
+    }
     // A plain Float or Int is a constant that has not been keyed yet. Keying
     // it gives it the channel spelling the Timeline edits, as the Properties
     // keyframe toggle does; clearing one leaves it as it is.
@@ -279,6 +288,17 @@ pub(super) fn apply_layer_edit(layer: &mut Layer, edit: LayerEdit) -> Result<(),
     }
     if let Some(v) = edit.out_frame {
         layer.out_frame = v;
+    }
+    // The layer helpers do plain i64 frame arithmetic (`local_frame`,
+    // `end_frame`); a frame near the integer limits would overflow them.
+    let limit = i64::from(i32::MAX);
+    if !(-limit..=limit).contains(&layer.start_frame)
+        || layer.in_frame > limit as u64
+        || layer.out_frame > limit as u64
+    {
+        return Err(EditError::InvalidLayerEdit(format!(
+            "frames must lie within ±{limit}"
+        )));
     }
     if layer.out_frame < layer.in_frame {
         return Err(EditError::InvalidLayerEdit(format!(

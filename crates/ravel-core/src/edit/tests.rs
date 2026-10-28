@@ -1682,6 +1682,17 @@ mod animation {
     }
 
     /// Every refusal names its code and leaves the document as it was.
+    /// A keyed identifier would stop resolving its target, so it is refused
+    /// as the Properties keyframe toggle refuses it.
+    #[test]
+    fn keying_an_identifier_parameter_is_refused() {
+        let reg = registry();
+        let (doc, path, node) = doc_with_node("layer.ref");
+        let op = set_keys(param_target(&path, node, "layer"), 0, vec![linear(0, 1.0)]);
+        let err = apply(&doc, &op, &cx(&reg)).unwrap_err();
+        assert_eq!(err.code(), "invalid-keyframes");
+    }
+
     #[test]
     fn refused_animation_edits_leave_the_document_unchanged() {
         let reg = registry();
@@ -1757,6 +1768,16 @@ mod animation {
                 &doc,
                 set_keys(width(), 0, vec![linear(10, f32::NAN)]),
                 "invalid-keyframes",
+            ),
+            (
+                &doc,
+                layer_op(comp, layer, |o| o.start_frame = Some(i64::MIN)),
+                "invalid-layer-edit",
+            ),
+            (
+                &doc,
+                layer_op(comp, layer, |o| o.out_frame = Some(u64::MAX)),
+                "invalid-layer-edit",
             ),
             (
                 &doc,

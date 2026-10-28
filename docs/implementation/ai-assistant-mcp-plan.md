@@ -266,6 +266,49 @@ ID は確定（backlog 登録済み）。
   になるテスト（`AI-5` と同じ分類）
 - `docs/dev/live-edit.md` と `docs/dev/mcp-cli.md` の更新
 
+#### `AI-8` キーフレームとレイヤーの殻の操作
+
+`EditOp` が触れるのはノードのパラメータの定数だけ。エージェントは動きを付けられず、
+レイヤーの位置・不透明度・時間配置も変えられない。アニメ済みのパラメータへの
+`set_parameter` は、MCP からは `local_frame` を渡せないので `AnimatedParameter` で
+拒否される。編集層の計画（`done/edit-operations-plan.md` の「非対象」）が
+「必要になった時点で後続の単位として足す」とした範囲で、ここで単位にする。
+
+- **キーフレームの操作**を `EditOp` に足す。対象はノードのパラメータ
+  （`path` + `node` + `key`）と殻のプロパティ（変換・不透明度・タイムリマップ）の両方。
+  UI の `PropertyRowId`（`Shell` / `Network`）と同じ区別にする
+  - `set_keyframes`: 1 チャンネルの曲線を、与えたキーの列で置き換える
+    （`frame`・`value`・`interpolation`）。ベクトルや色は成分ごとに指定する
+  - `clear_animation`: 曲線を捨てて定数に戻す（値を指定）。undo で戻せるので
+    確認は出さない（決定事項 6）
+- **殻のプロパティ**の操作 `set_layer`: 名前、時間配置（`start_frame` / `in_frame` /
+  `out_frame`）、変換・不透明度の定数、ブレンドモード、親、表示フラグ。
+  アニメ済みの殻プロパティへの定数書き込みは `set_parameter` と同じく拒否する
+- 今キーフレームを編集する純粋関数（`insert_keyframe` / `remove_keyframe` /
+  `move_keyframe` など）は `ravel-ui/src/keyframes.rs` にあり、`ravel-core` の編集層からは
+  呼べない。`set_curve_value` を `AI-2c` で移したのと同じ形で `ravel-core` へ移し、
+  UI と編集層が同じ関数を通るようにする（書き込みの経路を 2 つにしない）
+- 駆動されたチャンネル（式・ノード出力・ブレンド）への `set_keyframes` は
+  `driven-parameter` で拒否する（決定事項 10 と同じ）
+
+**未決事項**（着手前に決める）
+
+1. キーの `frame` をコンポのフレームで受けるか、レイヤーのローカルフレームで受けるか。
+   UI は内部でローカルに直している（`comp_frame_for_key`）。エージェントには
+   コンポのフレームの方が分かりやすいが、レイヤーを動かすとキーがずれて見える
+2. ベジェのハンドル（`tangent_in` / `tangent_out`）を出すか。出さないなら
+   `interpolation` だけを受け、ハンドルは UI の既定で作る
+3. 式（`ParameterExpression`）の設定を同じ単位に含めるか、別の単位にするか
+
+**完了条件**
+
+- `set_keyframes` の後、指定したフレームで評価した値がキーの値と一致するテスト
+  （ノードのパラメータと殻のプロパティのそれぞれで）
+- 1 回のバッチで undo の段が 1 つだけ増えるテスト
+- 駆動されたチャンネルとアニメ済みの殻プロパティへの書き込みが拒否されるテスト
+- 移した純粋関数を UI が使い、既存の UI のテストが無改変で通ること
+- `docs/dev/add-edit-operation.md` と `docs/dev/mcp-cli.md` の更新
+
 ### 段階 3（保留）
 
 `AI-6` アプリ内パネル。段階 2 の後に要望があれば別の企画書で扱う。

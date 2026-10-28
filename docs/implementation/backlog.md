@@ -1071,6 +1071,7 @@ CM-1〜5（自前の固定変換で骨格を作る単位）は #363 でマージ
 | AI-5 | 🟡 | `ravel-cli mcp --attach` と削除・上書きの確認ダイアログ | AI-1, AI-4 |
 | AI-6 | ❓ | アプリ内アシスタントパネル（段階 2 の後に再判断） | AI-5 |
 | AI-7 | ⬜ | ライブ文書の読み取りとプレビュー（`inspect_document` / `render_preview` に `live: true`） | AI-5 |
+| AI-8 | ❓ | キーフレームとレイヤーの殻の操作（`set_keyframes` / `clear_animation` / `set_layer`。未決事項 3 件の判断待ち） | AI-2d |
 
 ### GPU バックエンド内製化（REQ-INFRA-009）
 

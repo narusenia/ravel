@@ -2674,7 +2674,7 @@ Unknown type keys are skipped silently (plugin space).
   re-export, so there is one definition.
 - `CommandId` (command.rs): every user command; string ids like
   `panel.reattach`, menu label keys via `menu_label_key()`.
-  `LayerAdd{Solid,Shape,Video,Audio,Null}` map to builtin layer templates via
+  `LayerAdd{Solid,Shape,Video,Audio,Null,Adjustment}` map to builtin layer templates via
   `layer_template_key()` (REQ-LAYER-008; a test ties the two sets together).
 - Keybindings (keybindings/): `KeyChord { modifiers, key }` (`FromStr` /
   `Display` round-trip `"Cmd+Shift+Z"`) and `KeyBindings { bind ->

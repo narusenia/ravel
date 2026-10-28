@@ -460,6 +460,7 @@ coalesce された `Params` が求めたプロセッサ再構築が失われる�
 | 出力段フレームキャッシュへの insert（ワーカー） | insert epoch（`InsertTicket`。要求の取り出し時に取る） | `SharedFrameCache::clear` / `invalidate_comp` が epoch を進める（空でも） |
 | Timeline のキャッシュ帯（`publish_cache_band`） | 帯の鍵（frame cache version、コンプ、`viewer_eval_context`） | 何もしない。入力が変われば鍵が変わる |
 | 共有デコードキャッシュのヒット（`ravel-media` `FrameKey`）とリーダー | 素材の版（`MediaAssetEntry::content_revision`、セッション限り） | 素材の監視（`media/watch.rs`）が変更を検知したら `rederive` で版を進める。パスをキーにした音声デコードキャッシュとサムネイルも同時に捨てる |
+| ライブ編集の削除の承認（`live_edit::handle`） | 確認を出した時点のプロジェクトの世代（`ProjectState::generation`）と文書 | 何もしない。新規・読み込みで世代が進み、編集で文書が変わる。不一致なら `document-changed` を返す |
 
 照合はすべて「一致しなければ捨てる」に倒す。有効な結果を捨てた損失は
 再評価 1 回、古い結果を受け入れた損失は次の無効化まで誤った絵が残ることだから。

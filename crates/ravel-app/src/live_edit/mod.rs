@@ -157,9 +157,12 @@ async fn handle(
     // What the user is shown is this document; the batch is applied to this
     // document or to nothing.
     let (asked, verdict) = cx.update(|cx| {
-        let doc = project.read(cx).document().clone();
+        let p = project.read(cx);
+        // The generation tells a reopened project apart from this one even
+        // when the two documents are equal.
+        let doc = (p.generation(), p.document().clone());
         let (ask, verdict) =
-            confirm::RemovalRequest::new(confirm::describe_removals(&doc, &request.ops));
+            confirm::RemovalRequest::new(confirm::describe_removals(&doc.1, &request.ops));
         // With nobody subscribed the event is dropped with `ask`, which reads
         // as a denial.
         door.update(cx, |_, cx| cx.emit(LiveEditEvent::ConfirmRemoval(ask)))
@@ -171,7 +174,7 @@ async fn handle(
     }
     Some(cx.update(|cx| {
         project.update(cx, |p, cx| {
-            if *p.document() == asked {
+            if (p.generation(), p.document()) == (asked.0, &asked.1) {
                 apply(p, request, cx)
             } else {
                 protocol::document_changed(&request.id)
@@ -564,6 +567,25 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(reply_of(&answer)["error"]["code"], "document-changed");
         assert_eq!(h.document(cx), edited);
+    }
+
+    #[gpui::test]
+    fn an_approval_after_the_project_was_replaced_applies_nothing(cx: &mut TestAppContext) {
+        let h = Harness::new(cx);
+        h.project.update(cx, |p, cx| p.new_document(cx));
+        let before = h.document(cx);
+        let answer = h.send(1, &remove_first_comp(&before));
+        cx.run_until_parked();
+        h.project.update(cx, |p, cx| p.reopen_same_document(cx));
+        let replaced = h.document(cx);
+        assert_eq!(
+            replaced, before,
+            "precondition: an equal document, a new project"
+        );
+        h.asked.borrow()[0].approve();
+        cx.run_until_parked();
+        assert_eq!(reply_of(&answer)["error"]["code"], "document-changed");
+        assert_eq!(h.document(cx), replaced);
     }
 
     #[gpui::test]

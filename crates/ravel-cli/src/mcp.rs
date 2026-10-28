@@ -976,8 +976,8 @@ fn describe_node(template: &NodeTemplate) -> Value {
 /// `EditOp` JSON the live-edit socket reads), so this text is the schema.
 const EDIT_DESCRIPTION: &str = r#"Apply a batch of edit operations to the draft, all or nothing. Returns `created` ([{kind, id}]) and `aliases`. On failure the draft is unchanged and the error is {id, index, message}: `id` is a stable code (e.g. unknown-alias, port-type-mismatch, unknown-parameter, driven-parameter) and `index` the failing operation.
 Operations ("op" tag): add_composition {settings, as?}; remove_composition {comp}; add_layer {comp, template, as?} (template e.g. "solid"); remove_layer {comp, layers: []}; add_node {path, type_key, position?: [x, y], params?: {key: value}, as?}; remove_node {path, node}; connect {path, from: {node, port}, to: {node, port}}; disconnect {path, edge}; set_parameter {path, node, key, value}.
-`as` names what the operation creates; later operations of the same batch (not later calls) refer to it by that string. A number is an id: comp, layer and node take an id or an alias. `path` is {comp, layer, subnets?: []} (each part an id or alias) and names the layer's node network. A port is its name or zero-based number. A parameter value is {"type": "float"|"int"|"bool"|"string"|"color"|"vector"|"curve"|"ramp", "value": ...}: float 0.5; color {r,g,b,a}; vector [x, y, ...]. Numbers are clamped to the node type's range (describe_node); an unknown key is an error.
-`settings` of add_composition (every field required): {"name":"Main","resolution":[1920,1080],"frame_rate":{"num":30,"den":1},"duration_frames":300,"background_color":{"r":0,"g":0,"b":0,"a":1}}.
+`as` names what the operation creates; later operations of the same batch (not later calls) refer to it by that string. A number is an id: comp, layer and node take an id or an alias. `path` is {comp, layer, subnets?: []} (each part an id or alias) and names the layer's node network. A port is its name or zero-based number. A parameter value is {"type": "float"|"int"|"bool"|"string"|"color"|"vector"|"curve"|"ramp", "value": ...}: float 0.5; color {r,g,b,a} in linear light, not sRGB (convert a hex or sRGB colour first); vector [x, y, ...]. Numbers are clamped to the node type's range (describe_node); an unknown key is an error.
+`settings` of add_composition (every field required): {"name":"Main","resolution":[1920,1080],"frame_rate":{"num":30,"den":1},"duration_frames":300,"background_color":{"r":0,"g":0,"b":0,"a":1}} (a colour in linear light, as above).
 Example: [{"op":"add_composition","settings":{...},"as":"c"},{"op":"add_layer","comp":"c","template":"solid","as":"l"},{"op":"add_node","path":{"comp":"c","layer":"l"},"type_key":"shape.rect","as":"r"},{"op":"set_parameter","path":{"comp":"c","layer":"l"},"node":"r","key":"width","value":{"type":"float","value":200}}]."#;
 
 fn tool_definitions() -> Value {
@@ -1042,7 +1042,7 @@ fn tool_definitions() -> Value {
                     "no_audio": { "type": "boolean", "description": "Leave out the companion WAV." },
                     "param": {
                         "type": "object",
-                        "description": "Exposed parameter values by name (see list_params). Vectors and colors are arrays of numbers.",
+                        "description": "Exposed parameter values by name (see list_params). Vectors and colors are arrays of numbers; colors are in linear light, not sRGB.",
                         "additionalProperties": true,
                     },
                 },

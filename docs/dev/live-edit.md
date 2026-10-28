@@ -45,6 +45,8 @@ live_edit_enabled = true
 ```
 
 - `ops` は [`add-edit-operation.md`](add-edit-operation.md) の `EditOp`（`"op"` タグ）
+- 参照は id でもエイリアスでもよい。`as` で付けたエイリアスは同じ要求の後続の操作から、
+  ネットワークの指定（`path: {"comp": "c", "layer": "l"}`）を含めて使える
 - 1 要求は 1 回の `ProjectState::commit_edit_ops`。成功すれば undo が 1 段増え、
   Cmd+Z で戻る。何も変えない要求（空の `ops` を含む）は undo を積まない
 - 失敗は全体が適用されない。`code` は `EditError::code()`、`index` は失敗した操作

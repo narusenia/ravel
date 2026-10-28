@@ -1795,6 +1795,7 @@ impl ProjectState {
         let ctx = EditContext {
             registry: &self.registry,
             local_frame: None,
+            allow_driven_overwrite: false,
         };
         let applied = ravel_core::edit::apply_batch(self.store.document(), ops, &ctx)?;
         // A batch that changes nothing must not leave an empty undo step.
@@ -1823,6 +1824,7 @@ impl ProjectState {
         let ctx = EditContext {
             registry: &self.registry,
             local_frame,
+            allow_driven_overwrite: true,
         };
         let mut refused = Vec::new();
         // The whole batch first: a scrub calls this per pointer move, and one
@@ -1855,6 +1857,7 @@ impl ProjectState {
         let cx = EditContext {
             registry: &self.registry,
             local_frame: None,
+            allow_driven_overwrite: false,
         };
         ravel_core::edit::apply(self.store.document(), op, &cx)
     }

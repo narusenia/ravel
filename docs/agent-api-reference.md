@@ -702,11 +702,14 @@ transforms it is built from (`NetworkPath`, `CompositionSettings`,
 
 ```rust
 // Operations so far: AddComposition / RemoveComposition / AddLayer / RemoveLayer,
-// and in a network (`path: NetworkPath`, subnets included): AddNode / RemoveNode /
+// and in a network (`path: NetworkRef` = `NetworkPath` whose parts may be aliases;
+// `NetworkPath::into()`; subnets included): AddNode / RemoveNode /
 // Connect / Disconnect / SetParameter. AddNode takes `params` (written with
 // SetParameter's rules, after creation).
 // JSON: {"op":"add_layer","comp":"shot","template":"solid","as":"bg"}
 // (a number is an id, a string an alias defined earlier in the same batch).
+// {"op":"add_node","path":{"comp":"shot","layer":"bg"},"type_key":"shape.rect"}
+// (`path` parts take aliases too, so one batch can create a layer and fill it).
 // {"op":"connect","path":{..},"from":{"node":"n","port":0},"to":{"node":5,"port":"geometry"}}
 // (a port is a number or a name; Connect checks port numbers and types, replaces
 // an edge on the input and keeps one free variadic slot).
@@ -716,7 +719,9 @@ transforms it is built from (`NetworkPath`, `CompositionSettings`,
 // `ravel_ui::properties::PropertyValue`). The value is clamped by the registry range;
 // an animated parameter is keyed at `EditContext::local_frame` and is
 // `AnimatedParameter` without one; `attribute.set`'s `value` and `layer.ref`'s
-// output port follow in the same step.
+// output port follow in the same step. A parameter driven by an expression, a node
+// output or a blend is `DrivenParameter` ("driven-parameter") unless
+// `EditContext::allow_driven_overwrite` (only the Properties scrub sets it).
 edit::apply(&Document, &EditOp, &EditContext) -> Result<Applied, EditError>
 edit::apply_batch(&Document, &[EditOp], &EditContext) -> Result<Applied, BatchError>
 Applied { document, created: Vec<Created>, aliases: BTreeMap<String, Created> }
@@ -729,7 +734,7 @@ Committing the result (one `commit_document` = one undo step) is the caller's;
 the host entry is `ProjectState::commit_edit_ops(&[EditOp], cx) -> Result<Applied,
 BatchError>` (`apply_batch` + one commit, nothing recorded when the document is
 unchanged), and `edit_ops_skipping_refused` for a selection-wide write where one
-refusal must not stop the rest. How to add an operation: `docs/dev/add-edit-operation.md`.
+refusal must not stop the rest (this one allows overwriting a driven parameter, as the scrub does). How to add an operation: `docs/dev/add-edit-operation.md`.
 `edit::network` holds the graph-level wiring (`connect_edge_and_update_variadic_inputs`,
 `remove_edge_and_compact`, `remove_node_and_compact`) for a caller wiring a network
 it has not committed yet; `edit::apply` runs the same functions.
@@ -4174,6 +4179,17 @@ mcp::serve(&Server, impl BufRead, impl Write) / mcp::run(&[PathBuf]) -> u8
 mcp::ensure_allowed(&Path, &[PathBuf]) -> Result<(), CliError>
     // canonical-prefix check; CliError::OutputNotAllowed = "output-not-allowed"
     // (EXIT_USAGE). Listings reuse listing::*_json — no second enumeration.
+// AI-3: assembling a new file (the draft; docs/dev/mcp-cli.md, "組み立て")
+mcp::Server::with_renderers(&[PathBuf], Box<Renderer>, Box<DraftRenderer>)
+    // tools new_project / edit (ravel_core::edit::apply_batch) / list_node_types /
+    // describe_node / save_project; inspect_document / check_warnings /
+    // render_preview take `draft: true`. Errors: CliError::{NoDraft, DraftExists,
+    // Edit{index, source}, UnknownNodeType, ProjectExists, BadProjectPath,
+    // SaveFailed} = "no-draft", "draft-exists", <EditError::code()>,
+    // "unknown-node-type", "project-exists", "bad-project-path", "save-failed"
+plan_from_draft(&RenderArgs, &ProjectFile) / render_draft(..) /
+render_draft_with_hooks(..)   // the in-memory twins of plan_from_args / render /
+                              // render_with_hooks; one plan, one writer
 
 // AI-4: the app's local live-edit door (docs/dev/live-edit.md), ravel-app
 live_edit::start(&Entity<ProjectState>, &mut App) -> Option<Entity<LiveEdit>>

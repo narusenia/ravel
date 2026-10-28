@@ -207,6 +207,15 @@ pub fn edited_param_value(
                         edited_channel(&channels[2], *z, local_frame),
                     ]))
                 }
+                // A non-colour 4-vector; `describe_node` advertises it as one.
+                (ParameterValue::Channel4(channels), [x, y, z, w]) => {
+                    Some(ParameterValue::Channel4([
+                        edited_channel(&channels[0], *x, local_frame),
+                        edited_channel(&channels[1], *y, local_frame),
+                        edited_channel(&channels[2], *z, local_frame),
+                        edited_channel(&channels[3], *w, local_frame),
+                    ]))
+                }
                 _ => None,
             }
         }
@@ -249,6 +258,24 @@ fn is_keyframed(value: &ParameterValue) -> bool {
     }
 }
 
+/// Whether any component is driven by something other than a constant or
+/// keys: an expression, a node output, an audio source or a blend.
+fn is_driven(value: &ParameterValue) -> bool {
+    let driven = |c: &AnimationChannel| {
+        !matches!(
+            c.source,
+            ChannelSource::Constant(_) | ChannelSource::Keyframes(_)
+        )
+    };
+    match value {
+        ParameterValue::Channel(c) | ParameterValue::IntChannel(c) => driven(c),
+        ParameterValue::Channel2(cs) => cs.iter().any(driven),
+        ParameterValue::Channel3(cs) => cs.iter().any(driven),
+        ParameterValue::Channel4(cs) => cs.iter().any(driven),
+        _ => false,
+    }
+}
+
 /// The kind of thing a parameter holds, ignoring whether it is animated. A
 /// write must stay inside the kind of the value it replaces.
 fn family(value: &ParameterValue) -> u8 {
@@ -272,7 +299,7 @@ fn family(value: &ParameterValue) -> u8 {
 /// follows the port it references, resolved against `comp`) in one graph
 /// snapshot.
 ///
-/// Refuses an unknown node or key, a value of another kind than the parameter
+/// Refuses a driven parameter (unless `cx.allow_driven_overwrite`), an unknown node or key, a value of another kind than the parameter
 /// holds, and an animated parameter when `cx.local_frame` is `None` (a key
 /// cannot be placed, and flattening would silently delete the animation).
 pub fn set_parameter(
@@ -298,6 +325,12 @@ pub fn set_parameter(
         node: node_id,
         key: key.to_string(),
     };
+    if !cx.allow_driven_overwrite && is_driven(&existing.value) {
+        return Err(EditError::DrivenParameter {
+            node: node_id,
+            key: key.to_string(),
+        });
+    }
     let animated = is_keyframed(&existing.value);
     let range = cx.registry.param_range(&node.type_key, key);
     // Without a frame an animated parameter is judged as if keyed at 0: the
@@ -334,6 +367,69 @@ mod tests {
     use super::*;
     use crate::animation::curve::KeyframeCurve;
     use crate::animation::interpolation::Interpolation;
+
+    /// Every channel shape counts as driven when any one of its components is
+    /// fed by something other than a constant or a curve.
+    #[test]
+    fn a_value_is_driven_when_any_component_is() {
+        use crate::animation::channel::ParameterExpression;
+        use crate::id::{NodeId, OutputPortIndex};
+        let constant = || AnimationChannel::constant(1.0);
+        let expression =
+            || AnimationChannel::new(ChannelSource::Expression(ParameterExpression::new("frame")));
+        let wired = AnimationChannel::new(ChannelSource::NodeOutput(
+            NodeId::new(7),
+            OutputPortIndex(0),
+        ));
+        let mut keyed = KeyframeCurve::new();
+        keyed.insert(0, 1.0, Interpolation::Linear);
+        let keyed = AnimationChannel::new(ChannelSource::Keyframes(keyed));
+
+        assert!(!is_driven(&ParameterValue::Channel(constant())));
+        assert!(!is_driven(&ParameterValue::Channel(keyed.clone())));
+        assert!(!is_driven(&ParameterValue::Float(1.0)));
+        assert!(is_driven(&ParameterValue::Channel(wired)));
+        assert!(is_driven(&ParameterValue::IntChannel(expression())));
+        assert!(!is_driven(&ParameterValue::Channel2([constant(), keyed])));
+        assert!(is_driven(&ParameterValue::Channel2([
+            constant(),
+            expression()
+        ])));
+        assert!(is_driven(&ParameterValue::Channel3([
+            constant(),
+            constant(),
+            expression()
+        ])));
+        assert!(is_driven(&ParameterValue::Channel4([
+            expression(),
+            constant(),
+            constant(),
+            constant()
+        ])));
+    }
+
+    #[test]
+    fn a_four_component_vector_writes_a_channel4() {
+        let existing =
+            ParameterValue::Channel4(std::array::from_fn(|_| AnimationChannel::constant(0.0)));
+        let written = edited_param_value(
+            &existing,
+            &ParamInput::Vector(vec![1.0, 2.0, 3.0, 4.0]),
+            None,
+            None,
+        );
+        let Some(ParameterValue::Channel4(chs)) = written else {
+            panic!("a 4-vector is accepted: {written:?}");
+        };
+        let values: Vec<f32> = chs
+            .iter()
+            .map(|c| match c.source {
+                ChannelSource::Constant(v) => v,
+                _ => f32::NAN,
+            })
+            .collect();
+        assert_eq!(values, [1.0, 2.0, 3.0, 4.0]);
+    }
 
     /// An int edit on a keyed `IntChannel` keys it at the frame instead of
     /// flattening it, and the parameter stays an int channel — the whole point

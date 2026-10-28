@@ -34,6 +34,34 @@ pub enum NodeRef {
     Alias(String),
 }
 
+/// The network an operation edits, as a caller writes it: the
+/// [`NetworkPath`] fields, each of which may be an alias an earlier operation
+/// of the batch defined. A path written with numbers reads as before.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkRef {
+    pub comp: CompRef,
+    pub layer: LayerRef,
+    /// Subnet nodes entered from the layer network, outermost first.
+    #[serde(default)]
+    pub subnets: Vec<NodeRef>,
+}
+
+impl From<NetworkPath> for NetworkRef {
+    fn from(path: NetworkPath) -> Self {
+        Self {
+            comp: CompRef::Id(path.comp),
+            layer: LayerRef::Id(path.layer),
+            subnets: path.subnets.into_iter().map(NodeRef::Id).collect(),
+        }
+    }
+}
+
+impl From<&NetworkPath> for NetworkRef {
+    fn from(path: &NetworkPath) -> Self {
+        path.clone().into()
+    }
+}
+
 /// A port named by its zero-based number or by its name. In JSON a number is
 /// an index and a string a name.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,7 +146,7 @@ pub enum EditOp {
     /// Create a node of the registered type `type_key` in the network `path`
     /// addresses, above everything already there.
     AddNode {
-        path: NetworkPath,
+        path: NetworkRef,
         type_key: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         position: Option<(f32, f32)>,
@@ -133,19 +161,19 @@ pub enum EditOp {
     /// Remove a node and the edges touching it. A network's own `net.in` /
     /// `net.out` cannot be removed.
     RemoveNode {
-        path: NetworkPath,
+        path: NetworkRef,
         node: NodeRef,
     },
     /// Connect an output port to an input port. An edge already on that input
     /// is replaced, and a variadic group keeps exactly one free slot.
     Connect {
-        path: NetworkPath,
+        path: NetworkRef,
         from: Endpoint,
         to: Endpoint,
     },
     /// Remove one edge; its target's variadic group is compacted.
     Disconnect {
-        path: NetworkPath,
+        path: NetworkRef,
         edge: EdgeId,
     },
     /// Write one parameter. A number is clamped to the registry range, an
@@ -153,7 +181,7 @@ pub enum EditOp {
     /// error without one), and the values the write decides — `attribute.set`'s
     /// `value`, `layer.ref`'s output port — follow in the same step.
     SetParameter {
-        path: NetworkPath,
+        path: NetworkRef,
         node: NodeRef,
         key: String,
         value: ParamInput,

@@ -146,13 +146,24 @@ pub fn plan_from_args(args: &RenderArgs) -> Result<RenderPlan, CliError> {
 
 fn load_plan(args: &RenderArgs) -> Result<(ProjectFile, RenderPlan), CliError> {
     let project = load_project(&args.project)?;
-    let plan = plan::plan_render(
-        args,
-        &project.document,
-        project_root(&args.project).as_deref(),
-        &available_encoders(),
-    )?;
+    let plan = plan_loaded(args, &project, project_root(&args.project).as_deref())?;
     Ok((project, plan))
+}
+
+/// Plan against a project that is already in memory. The one planning call
+/// both a file on disk and an MCP draft go through.
+fn plan_loaded(
+    args: &RenderArgs,
+    project: &ProjectFile,
+    root: Option<&Path>,
+) -> Result<RenderPlan, CliError> {
+    plan::plan_render(args, &project.document, root, &available_encoders())
+}
+
+/// Plan a render of an in-memory draft (`args.project` is not read). A draft
+/// has no project root, so a relative asset path does not resolve.
+pub fn plan_from_draft(args: &RenderArgs, draft: &ProjectFile) -> Result<RenderPlan, CliError> {
+    plan_loaded(args, draft, None)
 }
 
 fn cache_budget_for_layers(project: &ProjectFile, global: &SettingsLayer) -> CacheBudgetConfig {
@@ -224,6 +235,39 @@ where
     F: FnOnce(&SharedCacheBudget) -> Result<H, CliError>,
 {
     let (project, plan) = load_plan(args)?;
+    render_planned(&project, plan, global_settings, hooks, cancel, reporter)
+}
+
+/// [`render_with_hooks`] for a project that is already in memory (an MCP
+/// draft); `args.project` is not read. The same plan, worker and writer.
+pub fn render_draft_with_hooks<H, F>(
+    args: &RenderArgs,
+    draft: &ProjectFile,
+    global_settings: Option<&Path>,
+    hooks: F,
+    cancel: &CancelFlag,
+    reporter: &mut dyn Reporter,
+) -> Result<Summary, CliError>
+where
+    H: EvalWorkerHooks,
+    F: FnOnce(&SharedCacheBudget) -> Result<H, CliError>,
+{
+    let plan = plan_from_draft(args, draft)?;
+    render_planned(draft, plan, global_settings, hooks, cancel, reporter)
+}
+
+fn render_planned<H, F>(
+    project: &ProjectFile,
+    plan: RenderPlan,
+    global_settings: Option<&Path>,
+    hooks: F,
+    cancel: &CancelFlag,
+    reporter: &mut dyn Reporter,
+) -> Result<Summary, CliError>
+where
+    H: EvalWorkerHooks,
+    F: FnOnce(&SharedCacheBudget) -> Result<H, CliError>,
+{
     refuse_existing_output(&plan)?;
     for warning in &plan.warnings {
         let (id, message) = warning_text(warning);
@@ -238,7 +282,7 @@ where
     // pass them through the shared cache validation before the budget is
     // handed to both the hooks and the evaluation worker.
     let global = settings::read_global_settings_at(global_settings);
-    let budget = SharedCacheBudget::new(cache_budget_for_layers(&project, &global));
+    let budget = SharedCacheBudget::new(cache_budget_for_layers(project, &global));
     let hooks = hooks(&budget)?;
 
     // Sound first: its warnings are worth having before an hour of frames,
@@ -273,14 +317,32 @@ pub fn render(
     render_with_hooks(
         args,
         ravel_project::paths::global_settings_path().as_deref(),
-        |budget| {
-            let gpu =
-                GpuContext::new_blocking().map_err(|error| CliError::Gpu(error.to_string()))?;
-            Ok(GpuEvalHooks::with_budget(gpu, budget.clone()))
-        },
+        gpu_hooks,
         cancel,
         reporter,
     )
+}
+
+/// [`render`] for an in-memory draft.
+pub fn render_draft(
+    args: &RenderArgs,
+    draft: &ProjectFile,
+    cancel: &CancelFlag,
+    reporter: &mut dyn Reporter,
+) -> Result<Summary, CliError> {
+    render_draft_with_hooks(
+        args,
+        draft,
+        ravel_project::paths::global_settings_path().as_deref(),
+        gpu_hooks,
+        cancel,
+        reporter,
+    )
+}
+
+fn gpu_hooks(budget: &SharedCacheBudget) -> Result<GpuEvalHooks, CliError> {
+    let gpu = GpuContext::new_blocking().map_err(|error| CliError::Gpu(error.to_string()))?;
+    Ok(GpuEvalHooks::with_budget(gpu, budget.clone()))
 }
 
 /// Run one command line and return the process exit code.

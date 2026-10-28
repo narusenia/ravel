@@ -58,6 +58,7 @@ fn add_composition_then_layer_through_an_alias() {
     let cx = EditContext {
         registry: &reg,
         local_frame: None,
+        allow_driven_overwrite: false,
     };
     let ops = [
         add_comp("Shot", alias("shot")),
@@ -89,6 +90,7 @@ fn remove_composition_and_layer_produce_the_expected_document() {
     let cx = EditContext {
         registry: &reg,
         local_frame: None,
+        allow_driven_overwrite: false,
     };
     let (doc, comp, layer) = doc_with_layer(false);
 
@@ -131,6 +133,7 @@ fn refused_operations_leave_the_document_unchanged() {
     let cx = EditContext {
         registry: &reg,
         local_frame: None,
+        allow_driven_overwrite: false,
     };
     let (open, comp, layer) = doc_with_layer(false);
     let (locked, locked_comp, locked_layer) = doc_with_layer(true);
@@ -212,6 +215,7 @@ fn a_failing_batch_applies_nothing_and_names_the_failing_index() {
     let cx = EditContext {
         registry: &reg,
         local_frame: None,
+        allow_driven_overwrite: false,
     };
     let (doc, comp, _) = doc_with_layer(false);
     let before = doc.clone();
@@ -233,6 +237,7 @@ fn duplicate_and_unknown_aliases_fail_the_whole_batch() {
     let cx = EditContext {
         registry: &reg,
         local_frame: None,
+        allow_driven_overwrite: false,
     };
     let (doc, _, _) = doc_with_layer(false);
     let before = doc.clone();
@@ -268,6 +273,7 @@ fn aliases_do_not_outlive_their_batch() {
     let cx = EditContext {
         registry: &reg,
         local_frame: None,
+        allow_driven_overwrite: false,
     };
     let first = apply(&Document::default(), &add_comp("A", alias("a")), &cx).unwrap();
     let err = apply(
@@ -294,21 +300,23 @@ fn edit_ops_round_trip_through_json() {
             comp: CompRef::Alias("shot".into()),
         },
         EditOp::AddNode {
-            path: NetworkPath::layer(CompId::new(7), LayerId::new(3)).entered(NodeId::new(11)),
+            path: NetworkPath::layer(CompId::new(7), LayerId::new(3))
+                .entered(NodeId::new(11))
+                .into(),
             type_key: "geometry.transform".into(),
             position: Some((10.0, -4.5)),
             params: Default::default(),
             alias: alias("xf"),
         },
         EditOp::AddNode {
-            path: NetworkPath::layer(CompId::new(7), LayerId::new(3)),
+            path: NetworkPath::layer(CompId::new(7), LayerId::new(3)).into(),
             type_key: "constant".into(),
             position: None,
             params: Default::default(),
             alias: None,
         },
         EditOp::Connect {
-            path: NetworkPath::layer(CompId::new(7), LayerId::new(3)),
+            path: NetworkPath::layer(CompId::new(7), LayerId::new(3)).into(),
             from: Endpoint {
                 node: NodeRef::Alias("xf".into()),
                 port: PortRef::Index(0),
@@ -319,11 +327,11 @@ fn edit_ops_round_trip_through_json() {
             },
         },
         EditOp::Disconnect {
-            path: NetworkPath::layer(CompId::new(7), LayerId::new(3)),
+            path: NetworkPath::layer(CompId::new(7), LayerId::new(3)).into(),
             edge: EdgeId::new(5),
         },
         EditOp::RemoveNode {
-            path: NetworkPath::layer(CompId::new(7), LayerId::new(3)),
+            path: NetworkPath::layer(CompId::new(7), LayerId::new(3)).into(),
             node: NodeRef::Alias("xf".into()),
         },
     ];
@@ -363,12 +371,13 @@ fn cx(reg: &NodeRegistry) -> EditContext<'_> {
     EditContext {
         registry: reg,
         local_frame: None,
+        allow_driven_overwrite: false,
     }
 }
 
 fn add_node(path: &NetworkPath, type_key: &str, as_: &str) -> EditOp {
     EditOp::AddNode {
-        path: path.clone(),
+        path: path.clone().into(),
         type_key: type_key.to_string(),
         position: None,
         params: Default::default(),
@@ -389,7 +398,7 @@ fn endpoint(name: &str, port: PortRef) -> Endpoint {
 
 fn connect(path: &NetworkPath, from: (&str, PortRef), to: (&str, PortRef)) -> EditOp {
     EditOp::Connect {
-        path: path.clone(),
+        path: path.clone().into(),
         from: endpoint(from.0, from.1),
         to: endpoint(to.0, to.1),
     }
@@ -447,7 +456,7 @@ fn bad_connections_are_refused_and_leave_the_document_alone() {
         port,
     };
     let wire = |from: Endpoint, to: Endpoint| EditOp::Connect {
-        path: path.clone(),
+        path: path.clone().into(),
         from,
         to,
     };
@@ -582,7 +591,7 @@ fn variadic_inputs_keep_one_free_slot_and_compact_on_disconnect() {
     let cut = apply(
         &applied.document,
         &EditOp::Disconnect {
-            path: path.clone(),
+            path: path.clone().into(),
             edge: first,
         },
         &cx(&reg),
@@ -595,7 +604,7 @@ fn variadic_inputs_keep_one_free_slot_and_compact_on_disconnect() {
     let gone = apply(
         &cut.document,
         &EditOp::RemoveNode {
-            path: path.clone(),
+            path: path.clone().into(),
             node: NodeRef::Id(created_node(&applied, "b")),
         },
         &cx(&reg),
@@ -607,7 +616,7 @@ fn variadic_inputs_keep_one_free_slot_and_compact_on_disconnect() {
         apply(
             &gone.document,
             &EditOp::Disconnect {
-                path: path.clone(),
+                path: path.clone().into(),
                 edge: first,
             },
             &cx(&reg),
@@ -657,7 +666,7 @@ fn remove_node_refuses_the_boundary_and_missing_nodes() {
     let err = apply(
         &applied.document,
         &EditOp::RemoveNode {
-            path: path.clone(),
+            path: path.clone().into(),
             node: NodeRef::Id(out),
         },
         &cx(&reg),
@@ -667,7 +676,7 @@ fn remove_node_refuses_the_boundary_and_missing_nodes() {
     let err = apply(
         &applied.document,
         &EditOp::RemoveNode {
-            path,
+            path: path.into(),
             node: NodeRef::Id(NodeId::new(u64::MAX - 1)),
         },
         &cx(&reg),
@@ -784,18 +793,18 @@ fn fill_body_is_add_node_disconnect_connect() {
 
     let ops = [
         EditOp::Disconnect {
-            path: body.clone(),
+            path: body.clone().into(),
             edge: straight,
         },
         EditOp::AddNode {
-            path: body.clone(),
+            path: body.clone().into(),
             type_key: "geometry.transform".into(),
             position: Some((180.0, 0.0)),
             params: Default::default(),
             alias: alias("xf"),
         },
         EditOp::Connect {
-            path: body.clone(),
+            path: body.clone().into(),
             from: Endpoint {
                 node: NodeRef::Id(in_id),
                 port: PortRef::Index(0),
@@ -803,7 +812,7 @@ fn fill_body_is_add_node_disconnect_connect() {
             to: endpoint("xf", PortRef::Index(0)),
         },
         EditOp::Connect {
-            path: body.clone(),
+            path: body.clone().into(),
             from: endpoint("xf", PortRef::Index(0)),
             to: Endpoint {
                 node: NodeRef::Id(out_id),
@@ -833,7 +842,7 @@ use crate::graph::{Parameter, ParameterValue};
 
 fn set_param(path: &NetworkPath, node: NodeRef, key: &str, value: ParamInput) -> EditOp {
     EditOp::SetParameter {
-        path: path.clone(),
+        path: path.clone().into(),
         node,
         key: key.to_string(),
         value,
@@ -1074,6 +1083,7 @@ fn an_animated_parameter_gets_a_key_at_the_local_frame() {
     let at_frame = EditContext {
         registry: &reg,
         local_frame: Some(5),
+        allow_driven_overwrite: false,
     };
     let op = set_param(&path, NodeRef::Id(node), "width", ParamInput::Float(9.0));
     let applied = apply(&animated, &op, &at_frame).unwrap();
@@ -1235,4 +1245,139 @@ fn measure_validate_and_apply_on_a_showcase_scale_document() {
             validate, apply_one
         );
     }
+}
+
+#[test]
+fn a_driven_parameter_refuses_a_write_unless_overwriting_is_allowed() {
+    use crate::animation::channel::ParameterExpression;
+    let reg = registry();
+    let (doc, path, node) = doc_with_node("style.stroke");
+    let driven = with_param_value(
+        &doc,
+        &path,
+        node,
+        "width",
+        ParameterValue::Channel(AnimationChannel::new(ChannelSource::Expression(
+            ParameterExpression::new("frame"),
+        ))),
+    );
+    let op = set_param(&path, NodeRef::Id(node), "width", ParamInput::Float(2.0));
+    let before = driven.clone();
+    let err = apply(&driven, &op, &cx(&reg)).unwrap_err();
+    assert_eq!(err.code(), "driven-parameter");
+    assert_eq!(driven, before);
+    // A blend holding an expression is driven too.
+    let blended = with_param_value(
+        &doc,
+        &path,
+        node,
+        "width",
+        ParameterValue::Channel(AnimationChannel::new(ChannelSource::Blend(
+            Box::new(ChannelSource::Constant(1.0)),
+            Box::new(ChannelSource::Expression(ParameterExpression::new("frame"))),
+            crate::animation::blend::BlendMode::Mix,
+            0.5,
+        ))),
+    );
+    assert_eq!(
+        apply(&blended, &op, &cx(&reg)).unwrap_err().code(),
+        "driven-parameter"
+    );
+    // The UI scrub's explicit opt-in keeps collapsing it to a constant.
+    let allowed = EditContext {
+        allow_driven_overwrite: true,
+        ..cx(&reg)
+    };
+    let applied = apply(&driven, &op, &allowed).unwrap();
+    assert_eq!(
+        param_of(&applied.document, &path, node, "width"),
+        ParameterValue::Float(2.0)
+    );
+}
+
+#[test]
+fn constant_and_keyframed_parameters_still_take_a_write() {
+    let reg = registry();
+    let (doc, path, node) = doc_with_node("style.stroke");
+    let op = set_param(&path, NodeRef::Id(node), "width", ParamInput::Float(3.0));
+    let applied = apply(&doc, &op, &cx(&reg)).unwrap();
+    assert_eq!(
+        param_of(&applied.document, &path, node, "width"),
+        ParameterValue::Float(3.0)
+    );
+    let keyed = with_param_value(
+        &doc,
+        &path,
+        node,
+        "width",
+        ParameterValue::Channel(keyed_channel()),
+    );
+    let at_frame = EditContext {
+        local_frame: Some(5),
+        ..cx(&reg)
+    };
+    let applied = apply(&keyed, &op, &at_frame).unwrap();
+    assert_ne!(applied.document, keyed, "the keyed write changed the curve");
+}
+
+#[test]
+fn one_batch_builds_a_document_addressing_networks_by_alias() {
+    let reg = registry();
+    // As an agent writes it: every reference by alias, in JSON.
+    let ops: Vec<EditOp> = serde_json::from_value(serde_json::json!([
+        {"op": "add_composition", "settings": CompositionSettings::fallback("Shot"), "as": "c"},
+        {"op": "add_layer", "comp": "c", "template": "solid", "as": "l"},
+        {"op": "add_node", "path": {"comp": "c", "layer": "l"}, "type_key": "shape.rect", "as": "a"},
+        {"op": "add_node", "path": {"comp": "c", "layer": "l", "subnets": []},
+         "type_key": "geometry.transform", "as": "xf"},
+        {"op": "connect", "path": {"comp": "c", "layer": "l"},
+         "from": {"node": "a", "port": 0}, "to": {"node": "xf", "port": 0}},
+        {"op": "set_parameter", "path": {"comp": "c", "layer": "l"}, "node": "a",
+         "key": "width", "value": {"type": "float", "value": 7.0}},
+    ]))
+    .unwrap();
+    let applied = apply_batch(&Document::default(), &ops, &cx(&reg)).unwrap();
+    let (Created::Composition(comp), Created::Layer(layer)) =
+        (applied.aliases["c"], applied.aliases["l"])
+    else {
+        panic!("aliases name a composition and a layer");
+    };
+    let path = NetworkPath::layer(comp, layer);
+    let rect = created_node(&applied, "a");
+    let xf = created_node(&applied, "xf");
+    assert!(
+        network_of(&applied.document, &path)
+            .edges()
+            .any(|e| e.source == rect && e.target == xf),
+        "the alias-addressed connection exists"
+    );
+    assert_eq!(
+        param_of(&applied.document, &path, rect, "width"),
+        ParameterValue::Float(7.0)
+    );
+}
+
+#[test]
+fn an_unknown_alias_in_a_network_path_is_refused() {
+    let reg = registry();
+    let ops: Vec<EditOp> = serde_json::from_value(serde_json::json!([
+        {"op": "add_node", "path": {"comp": "ghost", "layer": 1}, "type_key": "shape.rect"},
+    ]))
+    .unwrap();
+    let err = apply_batch(&Document::default(), &ops, &cx(&reg)).unwrap_err();
+    assert_eq!((err.index, err.error.code()), (0, "unknown-alias"));
+}
+
+#[test]
+fn a_network_path_written_with_ids_still_reads() {
+    let path = NetworkPath::layer(CompId::new(7), LayerId::new(3)).entered(NodeId::new(11));
+    // The resolved type's own JSON is what older callers wrote.
+    let json = serde_json::to_value(&path).unwrap();
+    let read: NetworkRef = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(read, NetworkRef::from(&path));
+    assert_eq!(read.comp, CompRef::Id(CompId::new(7)));
+    // And `subnets` may be left out.
+    let short: NetworkRef =
+        serde_json::from_value(serde_json::json!({"comp": 7, "layer": 3})).unwrap();
+    assert!(short.subnets.is_empty());
 }

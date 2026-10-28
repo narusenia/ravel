@@ -32,7 +32,7 @@ use network::{
     connect_edge_and_update_variadic_inputs, remove_edge_and_compact, remove_node_and_compact,
     resolve_port,
 };
-pub use ops::{CompRef, EditOp, Endpoint, LayerRef, NodeRef, ParamInput, PortRef};
+pub use ops::{CompRef, EditOp, Endpoint, LayerRef, NetworkRef, NodeRef, ParamInput, PortRef};
 use param::set_parameter;
 use std::collections::BTreeMap;
 
@@ -42,6 +42,11 @@ pub struct EditContext<'a> {
     /// The layer-local frame animated parameters are keyed at. `None` makes a
     /// write to an animated parameter an error.
     pub local_frame: Option<u64>,
+    /// Whether `SetParameter` may replace a channel driven by an expression,
+    /// a node output or a blend (the write collapses it to a constant). Off by
+    /// default: only the Properties scrub, which has always done that and
+    /// undoes it, turns it on. Everything else gets `driven-parameter`.
+    pub allow_driven_overwrite: bool,
 }
 
 /// Something an operation created and gave an id to.
@@ -142,6 +147,18 @@ fn resolve_node(aliases: &Aliases, r: &NodeRef) -> Result<NodeId, EditError> {
     }
 }
 
+fn resolve_path(aliases: &Aliases, r: &NetworkRef) -> Result<NetworkPath, EditError> {
+    Ok(NetworkPath {
+        comp: resolve_comp(aliases, &r.comp)?,
+        layer: resolve_layer(aliases, &r.layer)?,
+        subnets: r
+            .subnets
+            .iter()
+            .map(|n| resolve_node(aliases, n))
+            .collect::<Result<_, _>>()?,
+    })
+}
+
 /// Rebuild `doc` with the network `path` addresses replaced by `f(network)`.
 fn edit_network<T>(
     doc: &mut Document,
@@ -233,6 +250,7 @@ fn step(
             alias,
         } => {
             check_alias(aliases, alias)?;
+            let path = &resolve_path(aliases, path)?;
             let comp = doc.get_composition(path.comp).cloned();
             let id = edit_network(doc, path, |graph| {
                 let mut node = cx
@@ -260,6 +278,7 @@ fn step(
             Ok(vec![made])
         }
         EditOp::RemoveNode { path, node } => {
+            let path = &resolve_path(aliases, path)?;
             let node = resolve_node(aliases, node)?;
             edit_network(doc, path, |graph| {
                 let found = graph.node(node).ok_or(EditError::NodeNotFound(node))?;
@@ -271,6 +290,7 @@ fn step(
             Ok(Vec::new())
         }
         EditOp::Connect { path, from, to } => {
+            let path = &resolve_path(aliases, path)?;
             let from_node = resolve_node(aliases, &from.node)?;
             let to_node = resolve_node(aliases, &to.node)?;
             let edge = EdgeId::next();
@@ -301,6 +321,7 @@ fn step(
             key,
             value,
         } => {
+            let path = &resolve_path(aliases, path)?;
             let node = resolve_node(aliases, node)?;
             let comp = doc.get_composition(path.comp).cloned();
             edit_network(doc, path, |graph| {
@@ -310,6 +331,7 @@ fn step(
             Ok(Vec::new())
         }
         EditOp::Disconnect { path, edge } => {
+            let path = &resolve_path(aliases, path)?;
             edit_network(doc, path, |graph| {
                 Ok((remove_edge_and_compact(graph, *edge)?, ()))
             })?;

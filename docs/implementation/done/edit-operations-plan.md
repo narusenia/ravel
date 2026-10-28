@@ -399,9 +399,12 @@ AI-2a ──▶ AI-2b ──▶ AI-2c ──▶ AI-2d
 - `ParamInput` が JSON で往復する
 - `param_edit.rs` の書き込み関数が残っていない
 
-**残した制約（#615）**: 式・ブレンド・ノード出力で駆動されたチャンネルへの書き込みを
-`set_parameter` は拒否しない（UI の規則をそのまま移したため。スカラーは定数で潰れ、
-ベクトルは変わらないまま `Ok`）。MCP に `SetParameter` を出す `AI-3` の前に、拒否するかを決める
+**残した制約（#615）— 閉じた**: 式・ブレンド・ノード出力で駆動されたチャンネルへの
+`SetParameter` は、編集層が既定で拒否する（`EditError::DrivenParameter`、安定コード
+`driven-parameter`）。UI のスクラブだけが `EditContext::allow_driven_overwrite` を立てて
+明示的に許可する（`edit_ops_skipping_refused`）。理由: 式の行をスクラブすると定数に
+置き換え、undo で戻る、という今の UI の挙動を保つため。ライブ口
+（`commit_edit_ops`）と MCP は拒否する
 
 ### `AI-2d` ✅ バッチ、ホスト側の入口、実機相当の検証、文書
 

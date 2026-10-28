@@ -1,0 +1,379 @@
+// Copyright 2026 Ravel Contributors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! Assembling a project through `ravel-cli mcp`, in process, with stub
+//! evaluation hooks so no GPU is needed: build in the draft, save to a new
+//! file, read it back, and render it through the same planning and writer the
+//! `render` command uses.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use ravel_cli::args::{OutputFormat, PngBits, ProgressMode, RenderArgs};
+use ravel_cli::execute::CancelFlag;
+use ravel_cli::mcp::Server;
+use ravel_cli::report::Reporter;
+use ravel_cli::{render_draft_with_hooks, render_with_hooks};
+use ravel_core::composition::Document;
+use ravel_core::eval::{
+    EvalContext, EvalScope, NodeProcessor, ProcessorRegistry as _, ResolvedParams,
+};
+use ravel_core::graph::{Graph, Node};
+use ravel_core::id::NodeId;
+use ravel_core::runtime::eval_service::{EvalWorkerHooks, InvalidationHint, ProcessorSync};
+use ravel_core::types::{FrameBuffer, NodeData};
+use ravel_project::ProjectFile;
+use serde_json::{Value, json};
+use tempfile::TempDir;
+
+/// A flat frame for every node: what the render path is asked, not what a
+/// node draws, is under test.
+struct Flat;
+
+impl NodeProcessor for Flat {
+    fn process(
+        &self,
+        _node: &Node,
+        ctx: &EvalContext,
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        _params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let (width, height) = ctx.resolution;
+        let pixels = std::iter::repeat_n([0.5, 0.5, 0.5, 1.0], (width * height) as usize)
+            .flatten()
+            .collect();
+        Ok(Arc::new(FrameBuffer::from_f32(width, height, pixels)))
+    }
+}
+
+struct StubHooks;
+
+impl EvalWorkerHooks for StubHooks {
+    fn sync(
+        &mut self,
+        evaluator: &mut ProcessorSync<'_>,
+        graph: &Graph,
+        document: Option<&Document>,
+        hint: &InvalidationHint,
+    ) {
+        if !matches!(hint, InvalidationHint::Structural) {
+            return;
+        }
+        let mut ids: Vec<NodeId> = graph.nodes().map(|node| node.id).collect();
+        if let Some(document) = document {
+            for comp in document.compositions.values() {
+                for layer in &comp.layers {
+                    ids.extend(layer.network.nodes().map(|node| node.id));
+                }
+            }
+        }
+        for id in ids {
+            evaluator.register(id, Arc::new(Flat));
+        }
+    }
+}
+
+fn server(allow: &[PathBuf]) -> Server {
+    Server::with_renderers(
+        allow,
+        Box::new(|args, cancel, rep| render_with_hooks(args, None, |_| Ok(StubHooks), cancel, rep)),
+        Box::new(|args, draft, cancel, rep| {
+            render_draft_with_hooks(args, draft, None, |_| Ok(StubHooks), cancel, rep)
+        }),
+    )
+}
+
+fn call(server: &Server, tool: &str, args: Value) -> Value {
+    let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":tool,"arguments":args}});
+    server.handle_line(&request.to_string()).expect("answered")
+}
+
+fn ok(reply: &Value) -> &Value {
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    &reply["result"]["structuredContent"]
+}
+
+fn failure(reply: &Value) -> &Value {
+    assert_eq!(reply["result"]["isError"], true, "{reply}");
+    &reply["result"]["structuredContent"]
+}
+
+/// One composition, one solid layer, a rectangle wired into a transform.
+fn assemble() -> Value {
+    json!([
+        {"op": "add_composition", "as": "c", "settings": {
+            "name": "Main", "resolution": [8, 4], "frame_rate": {"num": 24, "den": 1},
+            "duration_frames": 4, "background_color": {"r": 0, "g": 0, "b": 0, "a": 1}}},
+        {"op": "add_layer", "comp": "c", "template": "solid", "as": "l"},
+        {"op": "add_node", "path": {"comp": "c", "layer": "l"}, "type_key": "shape.rect",
+         "params": {"width": {"type": "float", "value": 150.0}}, "as": "r"},
+        {"op": "add_node", "path": {"comp": "c", "layer": "l"},
+         "type_key": "geometry.transform", "as": "t"},
+        {"op": "connect", "path": {"comp": "c", "layer": "l"},
+         "from": {"node": "r", "port": 0}, "to": {"node": "t", "port": 0}},
+    ])
+}
+
+fn render_args(project: &Path, output: &Path) -> RenderArgs {
+    RenderArgs {
+        project: project.to_path_buf(),
+        comp: None,
+        range: Some("0-1".parse().expect("range")),
+        format: OutputFormat::Png,
+        png_depth: PngBits::Eight,
+        output: output.to_path_buf(),
+        prefix: "frame_".into(),
+        suffix: String::new(),
+        padding: 4,
+        params: Vec::new(),
+        overwrite: false,
+        no_audio: true,
+        progress: ProgressMode::Quiet,
+    }
+}
+
+struct Quiet;
+impl Reporter for Quiet {}
+
+fn pngs(dir: &Path) -> usize {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "png"))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+#[test]
+fn an_assembled_project_saves_loads_and_renders() {
+    let dir = TempDir::new().expect("tempdir");
+    let allowed = dir.path().to_path_buf();
+    let server = server(std::slice::from_ref(&allowed));
+
+    ok(&call(&server, "new_project", json!({"name": "Built"})));
+    let edited = call(&server, "edit", json!({"ops": assemble()}));
+    assert_eq!(ok(&edited)["created"].as_array().expect("created").len(), 5);
+    assert_eq!(ok(&edited)["aliases"]["c"]["kind"], "composition");
+
+    // The draft reads back through the existing tools.
+    let inspected = call(&server, "inspect_document", json!({"draft": true}));
+    let layer = &ok(&inspected)["compositions"][0]["layers"][0];
+    let types: Vec<&str> = layer["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .map(|n| n["type_key"].as_str().expect("type"))
+        .collect();
+    assert!(types.contains(&"shape.rect") && types.contains(&"geometry.transform"));
+    // The solid template brings a rectangle of its own: pick ours by its alias.
+    let rect_id = &ok(&edited)["aliases"]["r"]["id"];
+    let rect = layer["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| &n["id"] == rect_id)
+        .expect("the aliased node");
+    assert_eq!(rect["parameters"]["width"], 150.0);
+    ok(&call(&server, "check_warnings", json!({"draft": true})));
+
+    // A preview of the unsaved draft goes through the draft render path.
+    let previews = allowed.join("previews");
+    let preview = call(
+        &server,
+        "render_preview",
+        json!({"draft": true, "frame": 0, "output": previews}),
+    );
+    assert_eq!(ok(&preview)["frames"], 1, "{preview}");
+    assert_eq!(pngs(&previews), 1);
+
+    let path = allowed.join("built.ravprj");
+    ok(&call(&server, "save_project", json!({"path": path})));
+    let loaded = ProjectFile::load(&path).expect("the saved file loads");
+    assert_eq!(loaded.document.compositions.len(), 1);
+
+    // And the file renders, through the same planning and writer.
+    let out = allowed.join("frames");
+    let summary = render_with_hooks(
+        &render_args(&path, &out),
+        None,
+        |_| Ok(StubHooks),
+        &CancelFlag::new(),
+        &mut Quiet,
+    )
+    .expect("the saved project renders");
+    assert_eq!(summary.frames, 2);
+    assert_eq!(pngs(&out), 2);
+}
+
+#[test]
+fn a_path_that_exists_is_never_written() {
+    let dir = TempDir::new().expect("tempdir");
+    let server = server(&[dir.path().to_path_buf()]);
+    ok(&call(&server, "new_project", json!({})));
+    ok(&call(&server, "edit", json!({"ops": assemble()})));
+
+    let taken = dir.path().join("taken.ravprj");
+    std::fs::write(&taken, b"precious").expect("write");
+    let reply = call(&server, "save_project", json!({"path": taken}));
+    assert_eq!(failure(&reply)["id"], "project-exists");
+    assert_eq!(std::fs::read(&taken).expect("read"), b"precious");
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("dir")
+        .flatten()
+        .collect();
+    assert_eq!(leftovers.len(), 1, "no temporary or backup file appeared");
+
+    // A dangling symlink is refused as well (the allow-dir check cannot resolve
+    // it), and nothing is created behind it.
+    #[cfg(unix)]
+    {
+        let link = dir.path().join("link.ravprj");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &link).expect("symlink");
+        let reply = call(&server, "save_project", json!({"path": link}));
+        failure(&reply);
+        assert!(!dir.path().join("nowhere").exists());
+    }
+}
+
+#[test]
+fn a_save_outside_the_allowed_directories_or_without_the_extension_writes_nothing() {
+    let dir = TempDir::new().expect("tempdir");
+    let allowed = dir.path().join("allowed");
+    std::fs::create_dir(&allowed).expect("dir");
+    let server = server(std::slice::from_ref(&allowed));
+    ok(&call(&server, "new_project", json!({})));
+
+    for path in [
+        dir.path().join("outside.ravprj"),
+        allowed.join("../outside.ravprj"),
+    ] {
+        let reply = call(&server, "save_project", json!({"path": path}));
+        assert_eq!(failure(&reply)["id"], "output-not-allowed", "{path:?}");
+    }
+    let reply = call(
+        &server,
+        "save_project",
+        json!({"path": allowed.join("a.txt")}),
+    );
+    assert_eq!(failure(&reply)["id"], "bad-project-path");
+    assert!(!dir.path().join("outside.ravprj").exists());
+    assert_eq!(std::fs::read_dir(&allowed).expect("dir").count(), 0);
+    // Control: the same draft saves where it is allowed.
+    ok(&call(
+        &server,
+        "save_project",
+        json!({"path": allowed.join("ok.ravprj")}),
+    ));
+}
+
+#[test]
+fn a_failed_edit_leaves_the_draft_and_names_the_operation() {
+    let dir = TempDir::new().expect("tempdir");
+    let server = server(&[dir.path().to_path_buf()]);
+    let reply = call(&server, "edit", json!({"ops": []}));
+    assert_eq!(failure(&reply)["id"], "no-draft");
+    ok(&call(&server, "new_project", json!({})));
+    ok(&call(&server, "edit", json!({"ops": assemble()})));
+    let before = call(&server, "inspect_document", json!({"draft": true}));
+
+    let bad = json!([
+        {"op": "add_composition", "as": "d", "settings": {
+            "name": "B", "resolution": [8, 4], "frame_rate": {"num": 24, "den": 1},
+            "duration_frames": 4, "background_color": {"r": 0, "g": 0, "b": 0, "a": 1}}},
+        {"op": "add_layer", "comp": "ghost", "template": "solid"},
+    ]);
+    let reply = call(&server, "edit", json!({"ops": bad}));
+    assert_eq!(failure(&reply)["id"], "unknown-alias");
+    assert_eq!(failure(&reply)["index"], 1);
+    let after = call(&server, "inspect_document", json!({"draft": true}));
+    assert_eq!(ok(&before), ok(&after), "the first operation was not kept");
+
+    // An unknown parameter key is an error, not a silent no-op.
+    let comp_id = ok(&before)["compositions"][0]["id"].clone();
+    let layer_id = ok(&before)["compositions"][0]["layers"][0]["id"].clone();
+    let node_id = ok(&before)["compositions"][0]["layers"][0]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["type_key"] == "shape.rect")
+        .unwrap()["id"]
+        .clone();
+    let reply = call(
+        &server,
+        "edit",
+        json!({"ops": [{"op": "set_parameter", "path": {"comp": comp_id, "layer": layer_id},
+            "node": node_id, "key": "nope", "value": {"type": "float", "value": 1.0}}]}),
+    );
+    assert_eq!(failure(&reply)["id"], "unknown-parameter");
+}
+
+#[test]
+fn the_draft_is_one_and_a_saved_one_can_be_replaced() {
+    let dir = TempDir::new().expect("tempdir");
+    let server = server(&[dir.path().to_path_buf()]);
+    ok(&call(&server, "new_project", json!({})));
+    assert_eq!(
+        failure(&call(&server, "new_project", json!({})))["id"],
+        "draft-exists"
+    );
+    ok(&call(&server, "new_project", json!({"discard": true})));
+
+    // Saved, then edited again: the edit is unsaved work.
+    ok(&call(
+        &server,
+        "save_project",
+        json!({"path": dir.path().join("a.ravprj")}),
+    ));
+    ok(&call(&server, "new_project", json!({})));
+    ok(&call(&server, "edit", json!({"ops": assemble()})));
+    assert_eq!(
+        failure(&call(&server, "new_project", json!({})))["id"],
+        "draft-exists"
+    );
+    // The draft survives a save and goes on to another new path.
+    ok(&call(
+        &server,
+        "save_project",
+        json!({"path": dir.path().join("b.ravprj")}),
+    ));
+    assert!(dir.path().join("b.ravprj").exists());
+    ok(&call(&server, "new_project", json!({})));
+}
+
+#[test]
+fn read_tools_take_a_project_or_the_draft_not_both_or_neither() {
+    let server = server(&[]);
+    for args in [json!({}), json!({"draft": true, "project": "/x.ravprj"})] {
+        let reply = call(&server, "inspect_document", args);
+        assert_eq!(reply["error"]["code"], -32602, "{reply}");
+    }
+    let reply = call(&server, "inspect_document", json!({"draft": true}));
+    assert_eq!(failure(&reply)["id"], "no-draft");
+}
+
+#[test]
+fn node_types_are_listed_and_described_from_the_registry() {
+    let server = server(&[]);
+    let listed = call(&server, "list_node_types", json!({}));
+    let types = ok(&listed)["node_types"].as_array().expect("types");
+    assert!(types.iter().any(|t| t["type_key"] == "shape.rect"));
+
+    let described = call(&server, "describe_node", json!({"type_key": "shape.rect"}));
+    let node = ok(&described);
+    assert_eq!(node["type_key"], "shape.rect");
+    let width = node["parameters"]
+        .as_array()
+        .expect("parameters")
+        .iter()
+        .find(|p| p["key"] == "width")
+        .expect("a width parameter");
+    assert_eq!(width["type"], "float");
+    assert!(width["default"].is_number(), "{width}");
+    assert!(!node["outputs"].as_array().expect("outputs").is_empty());
+
+    let reply = call(&server, "describe_node", json!({"type_key": "no.such"}));
+    assert_eq!(failure(&reply)["id"], "unknown-node-type");
+}

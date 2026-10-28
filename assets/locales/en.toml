@@ -233,9 +233,9 @@ project = "Project"
 [settings.general]
 group = "Playback and startup"
 stop_returns_to_play_start = "Return to the play start on stop"
-stop_returns_to_play_start_description = "Stop puts the playhead back where playback began. With nothing played yet, the playhead stays where it is."
+stop_returns_to_play_start_description = "Stop puts the playhead back where playback began."
 startup_create_composition = "Create a composition at startup"
-startup_create_composition_description = "A new document opens with one empty composition. Turn this off to start with none and choose the format yourself in Composition ▸ New Composition…"
+startup_create_composition_description = "A new document opens with one empty composition."
 
 # Preferences ▸ Appearance. Theme names themselves come from the theme assets
 # and are not translated.
@@ -255,32 +255,32 @@ dark_theme_description = "Worn while the interface is dark."
 [settings.language]
 group = "Language"
 ui = "Interface language"
-ui_description = "Applies immediately. Each language is named in itself."
+ui_description = "Applies immediately."
 
 # Preferences ▸ Cache. The disk tier is not here: nothing writes it yet, so a
 # row for it would configure nothing (CACHE-11).
 [settings.cache]
 group = "Memory and location"
 vram_limit = "Video memory limit (MiB)"
-vram_limit_description = "Total video memory cached frames and pooled textures may occupy together. Applies immediately; entries over the limit are dropped in order."
+vram_limit_description = "Video memory that cached frames and pooled textures may use together. Applies immediately."
 ram_limit = "Memory limit (MiB)"
-ram_limit_description = "Total system memory the caches may occupy. Applies immediately; entries over the limit are dropped in order."
+ram_limit_description = "System memory the caches may use. Applies immediately."
 sim_reserve = "Simulation reserve"
-sim_reserve_description = "Share of each limit held back for simulation state, between 0 and 1, so a long scrub cannot evict it."
+sim_reserve_description = "Share of each limit reserved for simulation state (0 to 1), so scrubbing does not evict it."
 root = "Cache location"
-root_description = "Absolute path cached files are written under. Leave it empty for the default location beside the settings file. A change applies the next time Ravel starts; files already written are left where they are."
+root_description = "Absolute path for cached files. Leave it empty to use the default location beside the settings file. Takes effect the next time Ravel starts."
 
 # Project Settings ▸ Project. Frame rate values are numerals and are not
 # translated.
 [settings.project]
 group = "Defaults"
 frame_rate = "Default frame rate"
-frame_rate_description = "Used for new compositions created with nothing open. A new composition made while another is open copies that one's frame rate instead."
+frame_rate_description = "Frame rate of a composition created with nothing open. Otherwise the open composition's frame rate is used."
 
 # The read-only key assignment list on the Keybindings page.
 [settings.keybindings]
 group = "Key assignments"
-description = "Read-only. To change a shortcut, write keybindings.toml in the Ravel configuration folder; it applies on the next launch. Panel-only shortcuts cannot be reassigned."
+description = "Read-only. To change a shortcut, edit keybindings.toml in the Ravel configuration folder and restart. Panel-only shortcuts cannot be changed."
 
 # Where a command's current chord came from.
 [settings.keybindings.origin]
@@ -300,7 +300,7 @@ gpu_title = "GPU initialization failed"
 gpu_message = "Ravel could not initialize a graphics adapter. Preview rendering is unavailable."
 gpu_lost_title = "GPU device was lost"
 gpu_lost_message = "The GPU device was lost. GPU evaluation will not recover in this session; please restart Ravel."
-gpu_lost_recovering_message = "The GPU device was lost. Ravel is taking the replacement the window renderer came back on — the picture may pause briefly and no restart is needed."
+gpu_lost_recovering_message = "The GPU device was lost. Ravel is switching to the restored device; the picture may pause briefly. No restart is needed."
 save_title = "Project could not be saved"
 save_message = "Your changes remain unsaved. Check the destination and available disk space, then try again."
 settings_save_title = "Settings could not be saved"
@@ -312,12 +312,12 @@ open_message = "Ravel could not read this project."
 open_too_new_title = "Project requires a newer Ravel"
 open_too_new_message = "This project was created by a newer version of Ravel and cannot be opened safely."
 recovered_title = "Project recovered from backup"
-recovered_message = "The main project file was unreadable, so Ravel opened the previous revision. Save to preserve the recovered copy."
+recovered_message = "The project file could not be read, so Ravel opened the previous revision. Save to keep it."
 backup_path = "Backup"
 import_title = "Some media files were skipped"
 import_message = "Ravel could not import the following files"
 relink_title = "The media could not be relinked"
-relink_message = "Ravel could not read the file you picked, so the reference is unchanged"
+relink_message = "Ravel could not read the selected file"
 
 [audio]
 preparing = "Preparing audio…"
@@ -379,7 +379,7 @@ in_use = "This asset is used by project layers"
 [viewer]
 no_output = "No output — add a layer to the composition"
 eval_error = "Evaluation error"
-display_transform_failed = "The display transform did not run — the viewer cannot show this frame. See the log."
+display_transform_failed = "The display transform failed, so this frame cannot be shown. See the log."
 fit = "Fit"
 actual_size = "Actual size (100%)"
 resolution = "Preview resolution"
@@ -486,7 +486,7 @@ port = "Toggle input port exposure"
 exposed = "Expose this parameter as a project input"
 exposed_remove = "Withdraw this parameter from the project inputs"
 expression = "Toggle expression on this parameter"
-expression_blocked = "An expression would replace what drives this parameter (keyframes, a node output or a blend). Clear it first."
+expression_blocked = "This parameter is driven by keyframes, a node output or a blend. Clear that first to add an expression."
 
 [properties.ports]
 new_name = "New port name"
@@ -494,7 +494,7 @@ add = "Add the port"
 remove = "Remove this port"
 move_up = "Move this port one slot earlier"
 move_down = "Move this port one slot later"
-builtin = "Built-in port — the layer shell owns it"
+builtin = "Built-in port"
 group = "Group"
 
 [properties.ports.type]
@@ -514,12 +514,12 @@ unknown = "Unknown"
 empty_name = "Enter a name for the port"
 duplicate = "This node already has a port or parameter with that name"
 reserved = "That name belongs to a built-in port"
-type_not_allowed = "A layer's In node can only carry value types — wire-only types are available inside a subnet"
+type_not_allowed = "A layer's In node accepts value types only. Wire-only types can be used inside a subnet"
 builtin = "Built-in ports cannot be edited"
 failed = "The port could not be changed"
 
 [properties.exposed]
-empty = "This project declares nothing. Expose a node parameter from its row in Properties to add a declaration."
+empty = "No project inputs. Expose a parameter from its row in Properties."
 description = "What a caller should know about this input"
 remove = "Remove this declaration"
 move_up = "Move this declaration one slot earlier"
@@ -536,7 +536,7 @@ not_an_asset_reference = "A media declaration can only bind to a media node's as
 [properties.exposed.error]
 empty_name = "Enter a name for the declaration"
 duplicate = "This project already declares that name"
-not_exposable = "This parameter cannot be part of an external contract"
+not_exposable = "This parameter cannot be exposed"
 already_exposed = "This parameter is already exposed"
 failed = "The declaration could not be changed"
 
@@ -557,7 +557,7 @@ input = "In"
 output = "Out"
 input_range = "In range"
 output_range = "Out range"
-pinned_input = "The ends keep their input — only the output is editable. To widen the domain add a point beyond this end; to narrow it remove this end (3+ points)"
+pinned_input = "The ends' input is fixed; only the output is editable. Add a point beyond this end to widen the range, or remove this end to narrow it (3+ points)"
 
 [properties.ramp]
 expand = "Show the gradient editor — double-click to add or remove a stop, drag to move one, click to select"
@@ -780,17 +780,17 @@ output_exists = "{count} output file(s) are already there, starting with {first}
 eval = "the render failed: {detail}"
 encode = "writing the output failed: {detail}"
 cancelled = "the render was interrupted; nothing was left behind"
-not_interactive = "the interactive mode needs a terminal to ask on; standard input is not one, so pass the options as flags instead (ravel-cli render --help)"
-output_not_allowed = "the output directory {path} is not under a directory this server was started with --allow-dir for"
+not_interactive = "interactive mode needs a terminal; pass the options as flags instead (ravel-cli render --help)"
+output_not_allowed = "the output directory {path} is not under any --allow-dir directory"
 no_draft = "there is no draft project; call new_project first"
 draft_exists = "a draft project that was not saved is open; pass discard to replace it"
 edit = "operation {index} failed, nothing was applied: {detail}"
 unknown_node_type = "there is no node type {key}; list_node_types lists them"
-project_exists = "{path} already exists; a draft is only saved to a file that is not there yet"
+project_exists = "{path} already exists; save the draft to a new path"
 bad_project_path = "{path} is not a .ravprj path"
 save_failed = "saving {path} failed: {detail}"
 gpu = "no usable GPU adapter was found: {detail}"
-interrupt_handler = "the Ctrl-C handler could not be installed, so an interrupted render could not clean up after itself; the render was not started: {detail}"
+interrupt_handler = "the Ctrl-C handler could not be installed, so the render was not started: {detail}"
 internal = "the render stopped unexpectedly: {detail}"
 
 [cli.codec.reason]
@@ -802,14 +802,14 @@ not_offered = "Ravel does not offer it"
 
 [cli.warn]
 audio_not_rendered = "this composition has {count} layer(s) with audio, and --no-audio was given, so the render is picture only"
-audio_no_decoder = "this composition has {count} layer(s) with audio, but this build has no FFmpeg and cannot decode any, so the render is picture only"
+audio_no_decoder = "this composition has {count} layer(s) with audio, but this build has no FFmpeg, so the render is picture only"
 audio_source_skipped = "the layer \"{layer}\" is silent in the mix: its media asset \"{asset}\" could not be loaded: {detail}"
 binding_issue = "a supplied parameter did not fully reach the project: {detail}"
 media_offline = "the media asset \"{asset}\" is offline, so it renders transparent in: {layers}"
 media_unreadable = "the media asset \"{asset}\" cannot be opened, so it renders transparent in: {layers} ({detail})"
 # {shape} is not translated: it names a stored value's spelling, and a script
 # has to find the same word in every locale.
-identifier_not_static = "the layer \"{layer}\": node {node}'s \"{param}\" is driven by {shape}, so it references nothing and is ignored"
+identifier_not_static = "the layer \"{layer}\": node {node}'s \"{param}\" is driven by {shape}, so it is ignored"
 
 [cli.result]
 completed = "wrote {count} frame(s) to {path}"
@@ -882,13 +882,13 @@ port = "Output port of the referenced layer to read. This node's output takes th
 
 [node."layer.info"]
 label = "Layer Info"
-description = "Reads a layer's shell — placement, size, transform, opacity — without evaluating its network. The world_* ports read the composed matrix: world_scale is the length of each basis vector and world_rotation the angle of the first, so a non-uniform scale above a rotation shears and the two no longer compose back into the matrix (world_position stays exact). Rotations are in radians."
+description = "Reads a layer's time placement, size, transform and opacity. Rotations are in radians; under a non-uniform parent scale, world_scale and world_rotation do not rebuild the matrix exactly."
 [node."layer.info".params]
 layer = "The layer to read. Defaults to the layer this network belongs to."
 
 [node."comp.info"]
 label = "Comp Info"
-description = "Reads a composition's resolution, frame rate, duration, background and layer count without evaluating anything. comp_t and comp_f are the evaluated instant converted back to the composition's clock, not the layer's local time. Across compositions the seconds (comp_t) are the authority and comp_f is that instant in the target's frames, i.e. the seconds times the target's frame rate."
+description = "Reads a composition's resolution, frame rate, duration, background and layer count. comp_t and comp_f are the current time on that composition's clock, not the layer's local time."
 [node."comp.info".params]
 comp = "The composition to read. Defaults to the composition this network belongs to; anything else is a CompId in decimal."
 
@@ -1032,7 +1032,7 @@ rotation = "Euler angles in degrees. A 2D rotation is about Z."
 scale = "Scale factor per axis."
 use_centroid = "Rotate and scale around the geometry's centroid instead of the pivot."
 pivot = "Transform origin when use_centroid is off."
-group = "Name of a bool attribute limiting the moved points (and, on its own, instances) (empty for all). The centroid then covers the flagged elements only."
+group = "Name of a bool attribute limiting the moved points or instances (empty for all). The centroid uses the flagged elements only."
 [node."geometry.transform".group]
 placement = "Placement"
 pivot = "Pivot"
@@ -1081,7 +1081,7 @@ invert = "Flag every element except the ones the range names."
 
 [node."geometry.repeat"]
 label = "Repeat"
-description = "Makes count copies of the input. Copy i is placed by the per-copy transform applied i times, so spirals and nested layouts build up. The output is instances, like the scatter nodes."
+description = "Makes count copies of the input, applying the per-copy transform once more to each copy, which builds spirals and nested layouts. Outputs instances."
 
 [node."geometry.repeat".params]
 count = "Number of copies. The first copy is the input where it is."
@@ -1091,7 +1091,7 @@ scale = "Scale multiplied in by each step. A scale of 0 collapses every copy aft
 
 [node."geometry.distribute"]
 label = "Distribute"
-description = "Aligns or spaces the elements by their size. Moves the paths when there are any, otherwise the instances (a stamped source counts at its size times the instance scale). Spacing keeps the first and last element, ordered by centre, where they are. A point shared by several paths moves with the first of them only, which can distort the others. Elements with a non-finite size are left alone."
+description = "Aligns or spaces the paths, or the instances when there are no paths, by their size. A point shared by several paths moves with the first of them only, which can distort the others."
 
 [node."geometry.distribute".params]
 axis = "The axis the elements move along."
@@ -1099,7 +1099,7 @@ mode = "min, center and max align the left/top edges, the centres or the right/b
 
 [node."geometry.bend"]
 label = "Bend"
-description = "Bends the axis into an arc. Points before the range stay, points past it follow the end of the arc straight on. Bezier tangents are carried along, so curves stay smooth."
+description = "Bends the axis into an arc. Points before the range stay put; points past it continue straight from the end of the arc."
 
 [node."geometry.bend".params]
 axis = "The axis the bend runs along. The other axis is the direction it curls toward."
@@ -1110,7 +1110,7 @@ group = "Name of a boolean point attribute. Only flagged points move. Empty move
 
 [node."geometry.twist"]
 label = "Twist"
-description = "Rotates points around the axis in proportion to their position along it. In the plane this shows as the shape narrowing toward the axis and mirroring past a half turn. Bezier tangents are carried along."
+description = "Rotates points around the axis in proportion to their position along it. In 2D the shape narrows toward the axis and mirrors past a half turn."
 
 [node."geometry.twist".params]
 axis = "The axis the twist runs along."
@@ -1121,7 +1121,7 @@ group = "Name of a boolean point attribute. Only flagged points move. Empty move
 
 [node."geometry.taper"]
 label = "Taper"
-description = "Narrows the shape along the axis. The width at the end of the range is one minus the amount of the original. Bezier tangents are carried along."
+description = "Narrows the shape along the axis; at the end of the range the width is 1 - amount of the original."
 
 [node."geometry.taper".params]
 axis = "The axis the taper runs along."
@@ -1132,7 +1132,7 @@ group = "Name of a boolean point attribute. Only flagged points move. Empty move
 
 [node."geometry.blast"]
 label = "Blast"
-description = "Deletes the elements a boolean group attribute flags (or, inverted, the ones it does not). Deleting a point also deletes every primitive that used it. index is renumbered; id is kept. An empty or unresolvable group deletes nothing."
+description = "Deletes the elements a boolean group attribute flags (or, inverted, the rest). Deleting a point also deletes the primitives that use it. An empty or unresolvable group deletes nothing."
 [node."geometry.blast".params]
 domain = "Which elements are deleted. Deleting primitives keeps their points."
 group = "Name of the boolean attribute on that domain that flags the elements to delete. Empty deletes nothing."
@@ -1140,7 +1140,7 @@ invert = "Delete the elements the group does not flag instead."
 
 [node."geometry.resample"]
 label = "Resample"
-description = "Re-places the points of every path at even arc-length spacing. Attributes are interpolated from the original points; in_tan and out_tan are dropped. Points no path uses are dropped."
+description = "Re-places the points of every path at even arc-length spacing. Attributes are interpolated; in_tan and out_tan are dropped."
 [node."geometry.resample".params]
 length = "Target spacing. The path is divided into the nearest whole number of equal segments. When 0, segments decides instead."
 segments = "Number of equal segments per path. Used when length is 0."
@@ -1165,14 +1165,14 @@ description = "Passes its input through unchanged. For tidying a graph and givin
 
 [node."geometry.iterate"]
 label = "Iterate"
-description = "Runs the network inside it once per piece and merges the results. The geometry is split by an integer primitive attribute, one piece per value in ascending order; the body gets the piece and its iteration index."
+description = "Runs the network inside it once per piece and merges the results. Pieces are split by an integer primitive attribute, one per value in ascending order."
 [node."geometry.iterate".params]
 attribute = "Name of the integer primitive attribute the geometry is split by."
-max_iterations = "Most pieces allowed. More is an error, never a truncation. Raise it only when the body is cheap."
+max_iterations = "Most pieces allowed. More is an error."
 
 [node."geometry.from_image"]
 label = "Image to Geometry"
-description = "Wraps an image as one instance that stamps it, so geometry nodes can repeat and place it. The rectangle is the source's pixel size, centred on the origin; scaling a copy up makes it blurry."
+description = "Wraps an image as one instance that stamps it, so geometry nodes can repeat and place it. The rectangle is the source's pixel size, centred on the origin."
 [node."geometry.from_image".params]
 translate = "Moves the output after this node has built it."
 rotation = "Euler angles in degrees applied to the output; 2D rotation is about Z."
@@ -1227,7 +1227,7 @@ scale = "Uniform scale factor."
 
 [node."color_correct"]
 label = "Color Correct"
-description = "All-in-one grading: white balance, exposure, tone, saturation, curves, three-way wheels, fade and vignette. Each part does nothing at its default."
+description = "All-in-one grading: white balance, exposure, tone, saturation, curves, three-way wheels, fade and vignette."
 [node."color_correct".params]
 brightness = "Added before the contrast, so the contrast scales it (-1 to 1)."
 contrast = "Scales the distance from mid gray (1 is unchanged)."
@@ -1321,7 +1321,7 @@ blue = "Curve applied to the blue channel after the RGB curve."
 
 [node."comp.lift_gamma_gain"]
 label = "Lift / Gamma / Gain"
-description = "Three-way grade on the shadows, midtones and highlights, one RGB value each. Black becomes the lift and white the gain exactly, whatever the gamma. Alpha is kept."
+description = "Three-way grade on the shadows, midtones and highlights, one RGB value each. Alpha is kept."
 [node."comp.lift_gamma_gain".params]
 lift = "RGB that black becomes (0 leaves it unchanged; negative crushes the shadows, positive lifts them)."
 gamma = "Per-channel midtone exponent (1 is unchanged; above 1 brightens that channel, below 1 darkens it)."
@@ -1337,9 +1337,9 @@ hue_vs_lum = "Luminance gain by hue (0.5 is unchanged; the gain is twice the val
 
 [node."comp.directional_blur"]
 label = "Directional Blur"
-description = "Smears an image along one direction. Pixels past the border repeat the edge pixel, so the border never fades."
+description = "Smears an image along one direction; the edges do not fade."
 [node."comp.directional_blur".params]
-length = "Blur length in composition pixels (the same picture at any preview scale)."
+length = "Blur length in composition pixels."
 angle = "Direction in degrees. 0 smears horizontally only, 90 vertically."
 
 [node."comp.radial_blur"]
@@ -1382,7 +1382,7 @@ center = "Center point as a fraction of the frame (0.5, 0.5 is the middle)."
 
 [node."comp.mirror"]
 label = "Mirror"
-description = "Flips the image about the center of the frame. Applying it twice gives the original back."
+description = "Flips the image about the center of the frame."
 [node."comp.mirror".params]
 mode = "horizontal (left and right swap), vertical (top and bottom swap) or both."
 
@@ -1395,7 +1395,7 @@ rows = "Copies down (rounded to a whole number, 1 to 256)."
 
 [node."comp.mask"]
 label = "Mask"
-description = "Keeps the image where a geometry covers it and clears the alpha everywhere else. The geometry is drawn the way Rasterize draws it, so its coverage and anti-aliasing match. Without a geometry the image passes through."
+description = "Keeps the image where a geometry covers it and clears the alpha everywhere else. Without a geometry the image passes through."
 [node."comp.mask".params]
 invert = "Keep the image outside the geometry instead of inside."
 
@@ -1411,7 +1411,7 @@ invert = "Keep only the pixels near the key color and remove the rest."
 
 [node."comp.time_remap"]
 label = "Time Remap"
-description = "Shows the input at a different time. The curve maps the frame being rendered (horizontal) to the input frame to show (vertical); the default empty curve changes nothing. The curve holds its end values outside its first and last points."
+description = "Shows the input at a different time: a curve maps the rendered frame (horizontal) to the input frame shown (vertical). The empty default curve changes nothing."
 [node."comp.time_remap".params]
 curve = "Rendered frame in, input frame out. A straight rising line at slope 1 changes nothing; a falling line plays backwards."
 interpolation = "nearest picks the closest input frame; blend mixes the two input frames around a fractional position."
@@ -1430,7 +1430,7 @@ offset = "Frames ahead of the current one to read. The whole part picks the fram
 
 [node."comp.gradient"]
 label = "Gradient"
-description = "Fills the frame with a gradient through any number of color stops. Positions are fractions of the frame, so the picture looks the same at any resolution."
+description = "Fills the frame with a gradient through any number of color stops. Positions are fractions of the frame."
 [node."comp.gradient".params]
 type = "linear (from start to end) or radial (centered on start, reaching the end color at the distance to end)."
 start = "Where the gradient begins, as a fraction of the frame (0, 0 is the top left)."
@@ -1478,7 +1478,7 @@ color_b = "Color of the other squares."
 
 [node."comp.glow"]
 label = "Glow"
-description = "Adds a blurred copy of the image back onto itself, so bright shapes bleed light. The whole image glows; there is no brightness threshold. Fully transparent images stay transparent."
+description = "Adds a blurred copy of the image back onto itself, so bright shapes bleed light. The whole image glows; there is no brightness threshold."
 [node."comp.glow".params]
 radius = "How far the glow spreads, in composition pixels (up to 64 pixels at the output resolution)."
 intensity = "How strong the glow is. It can go above 1 for an overexposed look."
@@ -1735,7 +1735,7 @@ scope = "Scope"
 
 [node."style.fill"]
 label = "Style Fill"
-description = "Writes the fill attributes (fill flag and Cd) onto a geometry domain; rasterize resolves them per element."
+description = "Writes the fill attributes (fill flag and Cd) onto a geometry domain."
 [node."style.fill".params]
 enabled = "Whether the elements are filled."
 color = "Fill color, written to the Cd attribute."
@@ -1744,7 +1744,7 @@ group = "Bool attribute naming the elements to write; empty writes every element
 
 [node."style.stroke"]
 label = "Style Stroke"
-description = "Writes the stroke attributes (stroke_width and stroke_color) onto a geometry domain; rasterize resolves them per element."
+description = "Writes the stroke attributes (stroke_width and stroke_color) onto a geometry domain."
 [node."style.stroke".params]
 width = "Stroke width in composition pixels; 0 draws no stroke."
 color = "Stroke color, written to the stroke_color attribute."
@@ -1752,7 +1752,7 @@ domain = "Domain to write on (point, primitive, instance)."
 group = "Bool attribute naming the elements to write; empty writes every element."
 cap = "Shape of the stroke ends (butt, round, square); a Detail attribute, so one value for the geometry."
 join = "Shape of the stroke corners (miter, round, bevel); a Detail attribute, so one value for the geometry."
-stroke_align = "Where the stroke lies relative to a closed path (center, inside, outside); an open path always strokes at the center. Writes the Primitive stroke_align attribute, so it follows domain and group."
+stroke_align = "Where the stroke lies relative to a closed path (center, inside, outside); an open path always strokes at the center."
 [node."style.stroke".group]
 stroke = "Stroke"
 target = "Target"
@@ -1760,7 +1760,7 @@ corner = "Corner"
 
 [node."style.dash"]
 label = "Style Dash"
-description = "Writes the dash attributes; a dashed stroke draws on the CPU path because the GPU stroke has no arc length."
+description = "Writes the dash attributes."
 [node."style.dash".params]
 pattern = "Alternating on/off run lengths in composition pixels, for example \"4,2\". Empty draws a solid stroke."
 offset = "Where the pattern starts along the path, in composition pixels."
@@ -1894,7 +1894,7 @@ description = "The magnitude of a vector field, as a scalar field. The zero vect
 
 [node."field.angle"]
 label = "Field Angle"
-description = "The direction of a vector field in radians (atan2 of y over x, -pi to pi), which is what a rotation attribute can take. The zero vector answers 0."
+description = "The direction of a vector field in radians (atan2 of y over x, -pi to pi). The zero vector answers 0."
 
 [node."field.component"]
 label = "Field Component"
@@ -1956,25 +1956,25 @@ scope = "Scope"
 
 [node."text.font"]
 label = "Font"
-description = "Resolves a font family, weight, and style into a font face for the text nodes. A family this machine does not have falls back to the bundled face and logs a warning instead of failing the evaluation."
+description = "Picks a font for the text nodes by family, weight and style. A family that is not installed falls back to the bundled font."
 [node."text.font".params]
-family = "Font family name, matched case-insensitively against the installed and bundled faces."
-weight = "Face weight. The nearest weight the family actually carries is used."
+family = "Font family name, matched case-insensitively against installed and bundled fonts."
+weight = "Font weight; the nearest weight the family has is used."
 style = "Upright or slanted face."
 
 [node."text.layout"]
 label = "Text Layout"
-description = "Shapes a string in a font face and lays it out as one instance per character, with the glyph outlines as instance sources. Each character carries char_index, word_index, line_index, char_progress and advance, so a field modulates the text without a text-specific animation system."
+description = "Lays out a string as one instance per character, using the glyph outlines. Each character carries char_index, word_index, line_index, char_progress and advance for fields to read."
 [node."text.layout".params]
 text = "The string to lay out. A newline starts a new line."
 size = "Em size in composition pixels."
 tracking = "Extra advance after every character, in composition pixels."
-leading = "Baseline-to-baseline distance in composition pixels. Zero uses the face's own line height."
-writing_mode = "Whether characters run along a horizontal line, or downwards along a column with the columns going right to left. A horizontal line still follows the script's own direction. Vertical shaping uses the face's vertical forms for the brackets and punctuation."
-align = "Where each line sits against the origin: starting at it, centred on it, ending at it, or stretched to the wrap width. Vertical text reads it down the column instead of across the line."
+leading = "Baseline-to-baseline distance in composition pixels. Zero uses the font's own line height."
+writing_mode = "Horizontal lines, or vertical columns running top to bottom with the columns going right to left."
+align = "Where each line sits against the origin: starting at it, centred on it, ending at it, or stretched to the wrap width. In vertical text it positions each column top to bottom."
 wrap_width = "Wrap lines longer than this many composition pixels — the length of a column in vertical text. Zero wraps only at the newlines in the string."
-anchor = "Which line of the block lands on the origin: the first baseline, or the top, middle or bottom of the block. Vertical text reads it across the columns, so it picks the first column's centreline or the block's right, middle or left edge."
-position = "Where the layout's origin sits, in composition pixels. Anchor and align decide how the block is placed against this point, so it is the origin rather than the centre. A text on path re-places every character from the path, which leaves this with nothing to move."
+anchor = "Which line of the block lands on the origin: the first baseline, or the top, middle or bottom of the block. In vertical text: the first column's centreline, or the block's right, middle or left edge."
+position = "Where the layout's origin sits, in composition pixels. Anchor and align place the block against this point. Has no effect once the text is placed on a path."
 translate = "Moves the output after this node has built it."
 rotation = "Euler angles in degrees applied to the output; 2D rotation is about Z."
 scale = "Scale factor per axis applied to the output."
@@ -1989,11 +1989,11 @@ transform = "Transform"
 
 [node."text.to_path"]
 label = "Text To Path"
-description = "Flattens character instances into one geometry of outline paths, baking each character's placement into its outline points and carrying the per-character attributes down onto the Point domain. Applying a field to P then distorts the letter shapes themselves instead of moving whole characters. Any instance geometry converts, not only text; a geometry without instances passes through."
+description = "Flattens character instances into outline paths, keeping the per-character attributes on the points. A field on P then distorts the letter shapes instead of moving whole characters."
 
 [node."text.on_path"]
 label = "Text On Path"
-description = "Re-places a text layout's characters along a path: each character sits at its own running advance measured as arc length from the start, and turns to the path's tangent there. Only P and rot are rewritten, so the glyph outlines and the per-character attributes carry through to a field. An unconnected path input passes the text through unchanged, and a run longer than the path piles its remaining characters up on the path's last point."
+description = "Places a text layout's characters along a path, each turned to the path's tangent. Characters past the end of the path pile up on its last point. Without a path the text passes through."
 [node."text.on_path".params]
 offset = "How far along the path the run starts, in composition pixels."
 spacing = "Extra arc length after every character, in composition pixels — tracking measured along the path."
@@ -2054,7 +2054,7 @@ audio_exists_message = "A soundtrack is already there; turn on \"Replace existin
 # `audio-source-skipped`. A render that drops sound never does so quietly.
 [export.warning]
 audio_not_rendered = "This composition has {count} layer(s) with audio, and the soundtrack was turned off, so the render is picture only."
-audio_no_decoder = "This composition has {count} layer(s) with audio, but this build has no FFmpeg and cannot decode any, so the render is picture only."
+audio_no_decoder = "This composition has {count} layer(s) with audio, but this build has no FFmpeg, so the render is picture only."
 audio_source_skipped = "The layer \"{layer}\" is silent in the mix: its media asset \"{asset}\" could not be loaded: {detail}"
 
 [render_queue]

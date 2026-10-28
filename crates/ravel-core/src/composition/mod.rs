@@ -249,6 +249,14 @@ pub struct Layer {
 }
 
 impl Layer {
+    /// Turn the adjustment flag on or off. Turning it on gives the network's
+    /// In node the `source` port the lower stack arrives on; turning it off
+    /// leaves the port, which then reads transparent.
+    pub fn set_adjustment(&mut self, adjustment: bool) {
+        self.adjustment = adjustment;
+        self.network = append_missing_in_ports(&self.network, adjustment);
+    }
+
     pub fn new(id: LayerId, name: impl Into<String>, network: Graph) -> Self {
         Self {
             id,
@@ -1110,29 +1118,38 @@ fn normalize_param_ports(graph: &Graph) -> Graph {
     normalized
 }
 
-/// Append builtin In-node output ports introduced after a network was
-/// persisted. Currently: the layer-local frame index `f`
-/// (REQ-LAYER-002). Appending at the end keeps existing index-addressed
-/// edges valid. Subnet inner In nodes are left untouched — their ports
-/// define the enclosing subnet node's pin interface, which must not
-/// change shape on load. A user-defined custom port that already claims
-/// the builtin name is kept as-is.
-fn append_missing_in_ports(graph: &Graph) -> Graph {
+/// Append builtin In-node output ports a layer's network is missing: the
+/// layer-local frame index `f` (REQ-LAYER-002, introduced after networks
+/// were first persisted) and, on an adjustment layer, the composited lower
+/// stack `source` — no template carries it and `add_custom_port` refuses the
+/// reserved name, so without this an adjustment network cannot read what it
+/// adjusts. Appending at the end keeps existing index-addressed edges valid.
+/// Subnet inner In nodes are left untouched — their ports define the
+/// enclosing subnet node's pin interface, which must not change shape on
+/// load. A user-defined custom port that already claims the builtin name is
+/// kept as-is.
+fn append_missing_in_ports(graph: &Graph, adjustment: bool) -> Graph {
+    use crate::id::DataTypeId;
+    use crate::network::{PORT_FRAME_INDEX, PORT_SOURCE};
     let Some(in_node) = crate::network::find_in_node(graph) else {
         return graph.clone();
     };
-    if in_node
-        .outputs
-        .iter()
-        .any(|p| p.name == crate::network::PORT_FRAME_INDEX)
-    {
+    let mut updated = (**in_node).clone();
+    let wanted = [
+        (PORT_FRAME_INDEX, DataTypeId::SCALAR, true),
+        (PORT_SOURCE, DataTypeId::FRAME_BUFFER, adjustment),
+    ];
+    for (name, data_type, needed) in wanted {
+        if needed && !updated.outputs.iter().any(|p| p.name == name) {
+            updated.outputs.push(crate::graph::OutputPort {
+                name: name.to_string(),
+                data_type,
+            });
+        }
+    }
+    if updated.outputs.len() == in_node.outputs.len() {
         return graph.clone();
     }
-    let mut updated = (**in_node).clone();
-    updated.outputs.push(crate::graph::OutputPort {
-        name: crate::network::PORT_FRAME_INDEX.to_string(),
-        data_type: crate::id::DataTypeId::SCALAR,
-    });
     graph.clone().replace_node(std::sync::Arc::new(updated))
 }
 
@@ -1397,8 +1414,9 @@ impl Document {
         self
     }
 
-    /// Append builtin In-node output ports (currently the frame index `f`)
-    /// to every layer network that predates them. Run on load; idempotent.
+    /// Append builtin In-node output ports (the frame index `f`, and
+    /// `source` on adjustment layers) to every layer network that lacks
+    /// them. Run on load; idempotent.
     pub fn normalize_net_in_ports(mut self) -> Self {
         let comp_ids: Vec<CompId> = self.compositions.keys().copied().collect();
         for id in comp_ids {
@@ -1407,7 +1425,7 @@ impl Document {
             };
             let mut updated = (**comp).clone();
             for layer in updated.layers.iter_mut() {
-                layer.network = append_missing_in_ports(&layer.network);
+                layer.network = append_missing_in_ports(&layer.network, layer.adjustment);
             }
             self.compositions.insert(id, std::sync::Arc::new(updated));
         }
@@ -2970,6 +2988,80 @@ mod tests {
         let comp = doc.get_composition(CompId::new(1)).unwrap();
         let in_node = net::find_in_node(&comp.layers[0].network).unwrap();
         assert_eq!(in_node.outputs.len(), 1);
+    }
+
+    /// The layer templates' In nodes carry no `source` and `add_custom_port`
+    /// refuses the reserved name, so turning a layer into an adjustment layer
+    /// is the only way its network can read the lower stack.
+    #[test]
+    fn set_adjustment_gives_the_in_node_a_source_port() {
+        use crate::graph::Node;
+        use crate::id::{DataTypeId, NodeId};
+        use crate::network as net;
+
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(10), net::NET_IN_TYPE_KEY)
+                    .with_output(net::PORT_BASE_GEOMETRY, DataTypeId::GEOMETRY)
+                    .with_output(net::PORT_TIME, DataTypeId::SCALAR)
+                    .with_output(net::PORT_FRAME_INDEX, DataTypeId::SCALAR),
+            )
+            .unwrap();
+        let mut layer = Layer::new(LayerId::new(1), "L1", network);
+        let names = |layer: &Layer| -> Vec<String> {
+            net::find_in_node(&layer.network)
+                .unwrap()
+                .outputs
+                .iter()
+                .map(|p| p.name.clone())
+                .collect()
+        };
+
+        layer.set_adjustment(true);
+        assert!(layer.adjustment);
+        assert_eq!(names(&layer), ["base_geometry", "t", "f", "source"]);
+        let source = net::find_in_node(&layer.network).unwrap().outputs[3].clone();
+        assert_eq!(source.data_type, DataTypeId::FRAME_BUFFER);
+
+        // Idempotent, and turning it off keeps the port (it reads transparent).
+        layer.set_adjustment(true);
+        layer.set_adjustment(false);
+        assert!(!layer.adjustment);
+        assert_eq!(names(&layer), ["base_geometry", "t", "f", "source"]);
+    }
+
+    /// A project saved with an adjustment layer whose In node lacks `source`
+    /// is repaired on load; a plain layer is not given one.
+    #[test]
+    fn normalize_net_in_ports_adds_source_to_adjustment_layers_only() {
+        use crate::graph::Node;
+        use crate::id::{DataTypeId, NodeId};
+        use crate::network as net;
+
+        let network = || {
+            Graph::new()
+                .add_node(
+                    Node::new(NodeId::new(10), net::NET_IN_TYPE_KEY)
+                        .with_output(net::PORT_FRAME_INDEX, DataTypeId::SCALAR),
+                )
+                .unwrap()
+        };
+        let mut adjustment = Layer::new(LayerId::new(1), "Adj", network());
+        adjustment.adjustment = true;
+        let plain = Layer::new(LayerId::new(2), "Plain", network());
+        let doc = Document::default()
+            .with_composition(test_comp().add_layer(adjustment).add_layer(plain))
+            .normalize_net_in_ports();
+        let comp = doc.get_composition(CompId::new(1)).unwrap();
+        let has_source = |id| {
+            net::find_in_node(&comp.get_layer(LayerId::new(id)).unwrap().network)
+                .unwrap()
+                .outputs
+                .iter()
+                .any(|p| p.name == net::PORT_SOURCE)
+        };
+        assert!(has_source(1));
+        assert!(!has_source(2));
     }
 
     /// A document whose innermost subnet declares a pin (`stale`, wired from a

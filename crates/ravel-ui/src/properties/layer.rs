@@ -834,7 +834,7 @@ pub fn apply_layer_field(
         ("solo", PropertyValue::Bool(v)) => layer.solo = *v,
         ("muted", PropertyValue::Bool(v)) => layer.muted = *v,
         ("locked", PropertyValue::Bool(v)) => layer.locked = *v,
-        ("adjustment", PropertyValue::Bool(v)) => layer.adjustment = *v,
+        ("adjustment", PropertyValue::Bool(v)) => layer.set_adjustment(*v),
         ("fade_in_frames", PropertyValue::Int(v)) => {
             let Some(audio) = layer.audio.as_mut() else {
                 return false;

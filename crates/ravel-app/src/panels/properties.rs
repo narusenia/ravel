@@ -2114,6 +2114,10 @@ pub struct PropertiesGpuiPanel {
     /// Frame the scrub commit being routed right now is keyed at (`None` =
     /// the playhead). Set around `route_change` only.
     frame_override: Option<u64>,
+    /// The vector being edited as its sections showed it when a component's
+    /// text editor opened: the siblings of a typed component keep the values
+    /// of the frame the edit started on, not of a later playback frame.
+    edit_vector: Option<(String, Vec<f32>)>,
     strings: Vec<(String, StringBinding)>,
     selects: Vec<(String, SelectBinding)>,
     colors: Vec<(String, ColorBinding)>,
@@ -2425,6 +2429,7 @@ impl PropertiesGpuiPanel {
             scrubs: Vec::new(),
             edit_frame: None,
             frame_override: None,
+            edit_vector: None,
             strings: Vec::new(),
             selects: Vec::new(),
             colors: Vec::new(),
@@ -4304,12 +4309,34 @@ impl PropertiesGpuiPanel {
                         let ids = node_ids.clone();
                         let sub =
                             cx.subscribe(&entity, move |this, state, event: &ScrubEvent, cx| {
+                                let started = matches!(event, ScrubEvent::EditStarted);
                                 let Some((val, commit)) = this.scrub_event(&state, event, cx)
                                 else {
+                                    if started {
+                                        this.edit_vector = this
+                                            .sections
+                                            .iter()
+                                            .flat_map(|s| &s.fields)
+                                            .find_map(|f| match f {
+                                                PropertyField::Vector {
+                                                    key, components, ..
+                                                } if *key == field_key => {
+                                                    Some((key.clone(), components.clone()))
+                                                }
+                                                _ => None,
+                                            });
+                                    }
                                     return;
                                 };
                                 // The other components keep their current
-                                // section values.
+                                // section values — or, for a typed commit,
+                                // the ones showing when the edit started.
+                                let typed = this.frame_override.is_some();
+                                let snapshot = this
+                                    .edit_vector
+                                    .take()
+                                    .filter(|(key, _)| typed && *key == field_key)
+                                    .map(|(_, components)| components);
                                 let Some(PropertyField::Vector { components, .. }) = this
                                     .sections
                                     .iter()
@@ -4318,7 +4345,7 @@ impl PropertiesGpuiPanel {
                                 else {
                                     return;
                                 };
-                                let mut components = components.clone();
+                                let mut components = snapshot.unwrap_or_else(|| components.clone());
                                 if component >= components.len() {
                                     return;
                                 }
@@ -10622,6 +10649,70 @@ mod tests {
         assert_eq!(source_of(0), "1");
         assert_eq!(source_of(1), "frame * 4");
         assert_eq!(source_of(2), "3");
+    }
+
+    /// Typing one component during playback must not key its siblings with the
+    /// values of the frame playback has moved on to: they keep what they
+    /// showed when the edit started.
+    #[gpui::test]
+    fn a_typed_vector_component_keeps_its_siblings_at_the_edit_start_frame(
+        cx: &mut TestAppContext,
+    ) {
+        let node = Node::new(NodeId::next(), "test").with_param(
+            "offset",
+            ParameterValue::Channel2([
+                AnimationChannel::constant(0.0),
+                AnimationChannel::keyframes(ramp_curve()),
+            ]),
+        );
+        let (window, _editor, project, path, node_id) = setup_target_for_node(cx, node);
+        set_playback_frame(5, cx);
+        window
+            .update(cx, |panel, window, cx| panel.rebuild_widgets(window, cx))
+            .unwrap();
+        let scrub = window
+            .read_with(cx, |panel, _| {
+                panel
+                    .scrubs
+                    .iter()
+                    .find(|(key, _)| key == "offset#x")
+                    .map(|(_, binding)| binding.state.clone())
+                    .expect("a scrub widget for the x component")
+            })
+            .unwrap();
+
+        window
+            .update(cx, |_panel, window, cx| {
+                scrub.update(cx, |state, cx| state.begin_edit(window, cx));
+            })
+            .unwrap();
+        set_playback_frame(8, cx);
+        window
+            .update(cx, |_panel, window, cx| {
+                scrub.update(cx, |state, cx| {
+                    let editor = state.editor().cloned().expect("editor open");
+                    editor.update(cx, |input, cx| input.set_value("777", window, cx));
+                    state.commit_edit(cx);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let ParameterValue::Channel2(channels) = node_param(&project, &path, node_id, "offset", cx)
+        else {
+            panic!("offset stays a channel pair");
+        };
+        let eval = ravel_core::eval::EvalContext::new(
+            5,
+            ravel_core::types::FrameRate::new(30, 1),
+            (16, 16),
+        );
+        assert_eq!(channels[0].evaluate(5.0, &eval), 777.0);
+        assert_eq!(
+            channels[1].evaluate(5.0, &eval),
+            5.0,
+            "the sibling keeps its edit-start value, not frame 8's"
+        );
     }
 
     /// Per-component attach and detach on a vector: the neighbours keep what

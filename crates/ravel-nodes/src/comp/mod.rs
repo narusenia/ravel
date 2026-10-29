@@ -146,6 +146,15 @@ fn network_context_at(
     }
 }
 
+/// The remapped source frame clamped to `[in_frame, out_frame - 1]`, or
+/// `None` when it is not finite.
+fn clamp_remap(layer: &Layer, value: f64) -> Option<f64> {
+    let last = (layer.out_frame as f64 - 1.0).max(layer.in_frame as f64);
+    value
+        .is_finite()
+        .then(|| value.clamp(layer.in_frame as f64, last))
+}
+
 /// The context the layer's network is evaluated in once the shell's time
 /// remap is applied (REQ-LAYER-001).
 ///
@@ -170,9 +179,11 @@ fn layer_network_context_remapped(
     let Some(remap) = &layer.time_remap else {
         return layer_network_context(comp, local_frame, ctx, resolution);
     };
-    let last = (layer.out_frame as f64 - 1.0).max(layer.in_frame as f64);
-    let remapped = f64::from(remap.evaluate(layer_local_frame(layer, ctx), ctx))
-        .clamp(layer.in_frame as f64, last);
+    let value = f64::from(remap.evaluate(layer_local_frame(layer, ctx), ctx));
+    let Some(remapped) = clamp_remap(layer, value) else {
+        // A non-finite remap reads as "no remap" rather than frame 0 at time NaN.
+        return layer_network_context(comp, local_frame, ctx, resolution);
+    };
     network_context_at(comp, remapped.floor() as u64, remapped, ctx, resolution)
 }
 
@@ -263,6 +274,20 @@ mod tests {
 
     fn comp() -> Composition {
         Composition::new(CompId::new(1), "Comp", (1920, 1080), FPS, 300)
+    }
+
+    #[test]
+    fn a_non_finite_remap_is_ignored_and_a_finite_one_is_clamped() {
+        let layer = Layer::new(
+            ravel_core::id::LayerId::new(1),
+            "L",
+            ravel_core::graph::Graph::new(),
+        )
+        .with_time(0, 10, 50);
+        assert_eq!(clamp_remap(&layer, f64::NAN), None);
+        assert_eq!(clamp_remap(&layer, f64::INFINITY), None);
+        assert_eq!(clamp_remap(&layer, 3.0), Some(10.0));
+        assert_eq!(clamp_remap(&layer, 99.0), Some(49.0));
     }
 
     #[test]

@@ -206,11 +206,12 @@ TCP では待ち受けない。Ravel は API キーもネットワークも持�
 ライブ用の別ツールは無い（列挙の経路を増やさない）。
 
 - 実装は `draft: true` と同じ経路: アプリから受け取った写しを `ProjectFile` にして、
-  下書きと同じ `inspect` / `plan_from_draft` / 下書き用レンダラーへ渡す。`project` に同じ
-  文書を保存して開いた場合と同じ結果になる（`tests/mcp_assembly.rs`）
+  下書きと同じ `inspect` / `plan_from_draft` / 下書き用レンダラーへ渡す。文書の中身については、
+  `project` に同じ文書を保存して開いた場合と同じ結果になる（`tests/mcp_assembly.rs`）。プロジェクト層の
+  設定は写しに無く CLI の既定値を使うので、それに左右される結果（キャッシュ予算など）は一致しない
 - 1 つだけ指定する。`project` / `draft` / `live` の 2 つ以上、またはどれも無しは `-32602`。
   `--attach` なしの `live: true` は `app-not-running`
-- 呼び出しごとにつなぎ、写しを 1 回読む（読み取りの要求は
+- 呼び出しごとにつなぎ、写しを 1 回読み取る（読み取りの要求は
   [ライブ編集ソケット](live-edit.md)）。**文書も undo も変わらず、確認も出ない**
 - `app-not-running` / `app-disconnected` は `live_edit` と同じ分類。読み取りは何も適用
   しないので、`app-disconnected` のあとは繰り返してよい

@@ -2074,4 +2074,229 @@ mod animation {
         assert!(!clear(param_target(&path, NodeId::new(5), "w"), 0, 0.0).is_destructive());
         assert!(!layer_op(CompId::new(7), LayerId::new(3), |_| {}).is_destructive());
     }
+
+    fn set_expr(target: ChannelTarget, component: u32, source: &str) -> EditOp {
+        EditOp::SetExpression {
+            target,
+            component,
+            expression: source.to_string(),
+        }
+    }
+
+    fn expression_channel(source: &str) -> AnimationChannel {
+        AnimationChannel::new(ChannelSource::Expression(ParameterExpression::new(source)))
+    }
+
+    #[test]
+    fn set_expression_evaluates_to_the_expression_at_several_frames() {
+        let reg = registry();
+        let (doc, path, node, comp, layer) = started_layer();
+        let ops = [
+            set_expr(param_target(&path, node, "width"), 0, "frame * 2 + 1"),
+            set_expr(
+                shell_target(comp, layer, ShellProperty::Rotation),
+                0,
+                "frame * 30",
+            ),
+        ];
+        let applied = apply_batch(&doc, &ops, &cx(&reg)).unwrap();
+        let l = layer_of(&applied.document, comp, layer);
+        let ParameterValue::Channel(width) = param_of(&applied.document, &path, node, "width")
+        else {
+            panic!("an expression on a Float becomes a channel");
+        };
+        // The layer starts at comp frame 10: `frame` is the layer's own.
+        for (comp_frame, local) in [(10, 0.0), (15, 5.0), (40, 30.0)] {
+            assert_eq!(
+                at(&width, &l, comp_frame),
+                local * 2.0 + 1.0,
+                "{comp_frame}"
+            );
+            assert_eq!(at(&l.transform.rotation, &l, comp_frame), local * 30.0);
+        }
+    }
+
+    #[test]
+    fn set_expression_replaces_a_constant_keys_and_an_expression() {
+        let reg = registry();
+        let (doc, path, node, comp, layer) = started_layer();
+        let width = || param_target(&path, node, "width");
+        let opacity = || shell_target(comp, layer, ShellProperty::Opacity);
+        let keyed = apply_batch(
+            &doc,
+            &[
+                set_keys(width(), 0, vec![linear(10, 2.0), linear(20, 8.0)]),
+                set_keys(opacity(), 0, vec![linear(10, 0.0), linear(20, 1.0)]),
+            ],
+            &cx(&reg),
+        )
+        .unwrap()
+        .document;
+        for (from, what) in [(&doc, "a constant"), (&keyed, "keys")] {
+            let done = apply(from, &set_expr(width(), 0, "frame"), &cx(&reg)).unwrap();
+            let ParameterValue::Channel(c) = param_of(&done.document, &path, node, "width") else {
+                panic!("{what}");
+            };
+            assert!(matches!(&c.source, ChannelSource::Expression(e) if e.source() == "frame"));
+        }
+        let done = apply(&keyed, &set_expr(opacity(), 0, "0.25"), &cx(&reg)).unwrap();
+        let l = layer_of(&done.document, comp, layer);
+        assert_eq!(at(&l.opacity, &l, 12), 0.25);
+        // An expression is replaced by another; clear_animation removes it.
+        let again = apply(&done.document, &set_expr(opacity(), 0, "0.5"), &cx(&reg)).unwrap();
+        let l = layer_of(&again.document, comp, layer);
+        assert_eq!(at(&l.opacity, &l, 12), 0.5);
+        let cleared = apply(&again.document, &clear(opacity(), 0, 1.0), &cx(&reg)).unwrap();
+        let l = layer_of(&cleared.document, comp, layer);
+        assert!(matches!(l.opacity.source, ChannelSource::Constant(1.0)));
+    }
+
+    /// The Properties panel stores a source that does not compile; this path
+    /// refuses it, says where, and keeps the document.
+    #[test]
+    fn an_expression_that_does_not_compile_is_refused_with_its_position() {
+        let reg = registry();
+        let (doc, path, node, comp, layer) = started_layer();
+        let targets = [
+            param_target(&path, node, "width"),
+            shell_target(comp, layer, ShellProperty::Rotation),
+        ];
+        for target in targets {
+            for source in ["frame *", "no_such_name", "frame +\n  *", "", "   "] {
+                let op = set_expr(target.clone(), 0, source);
+                let err = apply(&doc, &op, &cx(&reg)).unwrap_err();
+                assert_eq!(err.code(), "expression-error", "{source:?}");
+                let EditError::InvalidExpression { line, column, .. } = err else {
+                    panic!("{source:?}");
+                };
+                assert!(line >= 1 && column >= 1, "{source:?}");
+                let batch = apply_batch(&doc, &[op], &cx(&reg)).unwrap_err();
+                assert!(batch.to_string().contains("line "), "{batch}");
+            }
+        }
+        // The position is the compiler's own, not a placeholder.
+        let err = apply(
+            &doc,
+            &set_expr(targets_one(&path, node), 0, "1 +\n  *"),
+            &cx(&reg),
+        );
+        let Err(EditError::InvalidExpression { line, .. }) = err else {
+            panic!("1 +\\n *");
+        };
+        assert_eq!(line, 2, "the error is on the second line");
+        // Nothing was written: the whole batch leaves the input as it was.
+        let before = doc.clone();
+        let _ = apply_batch(
+            &doc,
+            &[
+                set_expr(param_target(&path, node, "width"), 0, "frame"),
+                set_expr(param_target(&path, node, "width"), 0, "frame *"),
+            ],
+            &cx(&reg),
+        )
+        .unwrap_err();
+        assert_eq!(doc, before);
+    }
+
+    fn targets_one(path: &NetworkPath, node: NodeId) -> ChannelTarget {
+        param_target(path, node, "width")
+    }
+
+    #[test]
+    fn set_expression_on_a_driven_channel_is_refused_and_changes_nothing() {
+        let reg = registry();
+        let (doc, path, node, comp, layer) = started_layer();
+        let blend = ChannelSource::Blend(
+            Box::new(ChannelSource::Constant(1.0)),
+            Box::new(ChannelSource::Constant(2.0)),
+            crate::animation::blend::BlendMode::Mix,
+            0.5,
+        );
+        let node_output = ChannelSource::NodeOutput(NodeId::new(99), crate::id::OutputPortIndex(0));
+        for source in [blend, node_output] {
+            let driven = AnimationChannel::new(source);
+            let param = with_param_value(
+                &doc,
+                &path,
+                node,
+                "width",
+                ParameterValue::Channel(driven.clone()),
+            );
+            let shell =
+                document::update_layer(&doc, comp, layer, |l| l.opacity = driven.clone()).unwrap();
+            for (document, target) in [
+                (&param, param_target(&path, node, "width")),
+                (&shell, shell_target(comp, layer, ShellProperty::Opacity)),
+            ] {
+                let err = apply(document, &set_expr(target, 0, "1"), &cx(&reg)).unwrap_err();
+                assert_eq!(err.code(), "driven-parameter");
+            }
+        }
+        // The control: set_keyframes refuses an expression as driven, and
+        // set_expression does not, so the two checks are not the same one.
+        let expr = with_param_value(
+            &doc,
+            &path,
+            node,
+            "width",
+            ParameterValue::Channel(expression_channel("frame")),
+        );
+        let target = || param_target(&path, node, "width");
+        assert!(
+            apply(
+                &expr,
+                &set_keys(target(), 0, vec![linear(10, 1.0)]),
+                &cx(&reg)
+            )
+            .is_err()
+        );
+        assert!(apply(&expr, &set_expr(target(), 0, "frame + 1"), &cx(&reg)).is_ok());
+    }
+
+    #[test]
+    fn an_unknown_component_and_an_identifier_parameter_are_refused() {
+        let reg = registry();
+        let (doc, path, node, comp, layer) = started_layer();
+        let err = apply(
+            &doc,
+            &set_expr(shell_target(comp, layer, ShellProperty::Opacity), 3, "1"),
+            &cx(&reg),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "unknown-channel");
+        let _ = (path, node);
+        let (doc, path, node) = doc_with_node("layer.ref");
+        let err = apply(
+            &doc,
+            &set_expr(param_target(&path, node, "layer"), 0, "1"),
+            &cx(&reg),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "invalid-keyframes");
+    }
+
+    #[test]
+    fn set_expression_round_trips_through_json_and_is_not_destructive() {
+        let wire = r#"{"op":"set_expression","comp":7,"layer":"l","property":"rotation","expression":"frame * 2"}"#;
+        let op: EditOp = serde_json::from_str(wire).unwrap();
+        let EditOp::SetExpression {
+            target,
+            component,
+            expression,
+        } = &op
+        else {
+            panic!("set_expression");
+        };
+        assert!(matches!(
+            target,
+            ChannelTarget::Shell {
+                property: ShellProperty::Rotation,
+                ..
+            }
+        ));
+        assert_eq!((*component, expression.as_str()), (0, "frame * 2"));
+        assert!(!op.is_destructive());
+        let back: EditOp = serde_json::from_str(&serde_json::to_string(&op).unwrap()).unwrap();
+        assert_eq!(back, op);
+    }
 }

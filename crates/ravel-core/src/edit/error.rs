@@ -51,6 +51,12 @@ pub enum EditError {
     DrivenParameter { node: NodeId, key: String },
     #[error("{target} has no component {component}")]
     UnknownChannel { target: String, component: u32 },
+    #[error("invalid expression: {message} (line {line}, column {column})")]
+    InvalidExpression {
+        line: u32,
+        column: u32,
+        message: String,
+    },
     #[error("invalid keyframes: {0}")]
     InvalidKeyframes(String),
     #[error("frame {frame} is before the start of layer {layer:?}")]
@@ -114,6 +120,7 @@ impl EditError {
                 "animated-parameter"
             }
             Self::UnknownChannel { .. } => "unknown-channel",
+            Self::InvalidExpression { .. } => "expression-error",
             Self::InvalidKeyframes(_) => "invalid-keyframes",
             Self::KeyBeforeLayerStart { .. } => "key-before-layer-start",
             Self::InvalidLayerEdit(_) => "invalid-layer-edit",

@@ -251,6 +251,15 @@ mod tests {
                 component: 0,
                 value: 1.0,
             },
+            EditOp::SetExpression {
+                target: ChannelTarget::Shell {
+                    comp: comp.clone(),
+                    layer: layer.clone(),
+                    property: ShellProperty::Rotation,
+                },
+                component: 0,
+                expression: "frame".into(),
+            },
             serde_json::from_value(json!({"op": "set_layer", "comp": 1, "layer": 1, "name": "x"}))
                 .unwrap(),
         ];

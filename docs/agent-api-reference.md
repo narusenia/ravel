@@ -728,6 +728,11 @@ transforms it is built from (`NetworkPath`, `CompositionSettings`,
 // SetLayer sets only the fields it is given (`parent: null` clears). Refusals: driven-parameter,
 // animated-parameter (a constant on an animated shell channel), key-before-layer-start,
 // invalid-keyframes, unknown-channel, invalid-layer-edit.
+// SetExpression {target, component, expression: String}: the source goes through
+// `ParameterExpression::new` (the evaluator's compile) and a source that does not
+// compile is `InvalidExpression {line, column, message}` ("expression-error"), unlike
+// the Properties panel, which stores it; replaces constant / keys / expression,
+// `driven-parameter` on a node-output or blend channel.
 // {"op":"set_keyframes","comp":"c","layer":"l","property":"opacity","keys":[{"frame":0,"value":0,"interpolation":"linear"}]}
 edit::apply(&Document, &EditOp, &EditContext) -> Result<Applied, EditError>
 edit::apply_batch(&Document, &[EditOp], &EditContext) -> Result<Applied, BatchError>

@@ -85,7 +85,7 @@ TCP では待ち受けない。Ravel は API キーもネットワークも持�
 - ノードは `describe_node` が返すテンプレートから作る。パラメータは `{"type": "float", "value": 150}`
   のように型付きで書き、数値は範囲にクランプされる。未知のキーはエラー
 - 駆動されたパラメータ（式・ノード出力・ブレンド）への `set_parameter` / `set_keyframes` は `driven-parameter` で拒否
-- 動き（`AI-8`）: `set_keyframes` / `clear_animation` / `set_layer` も `edit`（と `live_edit`）の
+- 動き（`AI-8` / `AI-9`）: `set_keyframes` / `clear_animation` / `set_expression` / `set_layer` も `edit`（と `live_edit`）の
   操作で、確認は出ない（`live_edit` ならアプリの undo で戻る。`edit` の下書きに undo は無い）。対象は 2 種類で、フィールドは操作の隣に書く
   - ノードのパラメータ: `path` + `node` + `key`
   - レイヤーの殻: `comp` + `layer` + `property`（`anchor_point` / `position` / `scale` /
@@ -102,6 +102,10 @@ TCP では待ち受けない。Ravel は API キーもネットワークも持�
     `anchor_point` / `position` / `scale` / `rotation` / `opacity` / `blend_mode` / `parent` /
     `solo` / `muted` / `locked`）。`parent: null` で解除、循環は `invalid-layer-edit`。
     アニメ済みの殻プロパティへの定数は `animated-parameter`、駆動済みは `driven-parameter`
+  - `set_expression {target, component?, expression}` は 1 チャンネルを式の文字列にする
+    （`AI-9`）。定数・キー・既存の式を置き換えてよい。ノード出力・ブレンドで駆動されたチャンネルは
+    `driven-parameter`。コンパイルできない式は `expression-error` で拒否し、文書は変わらない
+    （下の「式」）。式を外すのは `clear_animation`
   - 殻の `time_remap` は予約欄（まだ評価されない）。書けるが見た目は変わらない
 - **色の値はリニア光**（`Color` の保存形式。`data-model.md` の色の節）。sRGB の値や
   `#RRGGBB` をそのまま渡すと白っぽく出る。sRGB の 0.2 はリニアで約 0.033
@@ -151,6 +155,22 @@ TCP では待ち受けない。Ravel は API キーもネットワークも持�
   許可ディレクトリは、利用者だけが書き込める場所を指定すること
 
 読み取り系のツールは許可ディレクトリを要らない。
+
+## 式（`set_expression`）
+
+- 式の文字列は `ParameterExpression::new` を通る。Properties パネルと評価器が使うのと同じ
+  コンパイル（語彙は `Scope::parameter_context()`）なので、受け入れた式は評価される
+- **使える変数と関数の一覧は [`../specifications/expression-language.md`](../specifications/expression-language.md)**
+  （§5 組み込み関数、§8「パラメータ式の語彙」: `frame` / `time` / `fps` / `res.*` / `comp.*` /
+  `pi` / `e`）。`@` の属性はパラメータ式では使えない
+- `frame` は**レイヤー自身のフレーム**（`set_keyframes` の `frame` がコンポのフレームなのと違う）。
+  レイヤーを動かせば式の値も動く
+- 失敗は `expression-error`。`edit` では `{id, index, message, line, column}`（位置は 1 始まり）。
+  `live_edit` ではアプリの応答の `message` に `(line L, column C)` が入る。
+  UI は壊れた式も保存するが、エージェントの経路は保存しない。空・空白のみも拒否
+  （「式が無い」は `clear_animation` で表す）
+- `time_remap` に式を置いても、タイムリマップがまだ評価されないので見た目は変わらない
+- `edit` の下書きに undo は無い。`live_edit` の式は 1 呼び出し 1 段で Cmd+Z で戻る
 
 ## 動作中のアプリを編集する（`--attach`）
 

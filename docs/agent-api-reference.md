@@ -1014,7 +1014,9 @@ UI is REQ-PLUGIN-005's own work.
 Layer::new(id, name, network: Graph) .with_time(start, in, out)
     // shell: start_frame (i64, negative allowed), solo/muted/locked,
     // transform (rotation in DEGREES), opacity, blend_mode, adjustment,
-    // parent, audio: Option<AudioSource>; reserved v2: time_remap, track_matte
+    // parent, audio: Option<AudioSource>, time_remap (source-frame channel for the
+    // network only), track_matte: Option<TrackMatte{layer = SOURCE id, kind}> on the TARGET;
+    // see Composition::track_matte_of / matte_sources / can_be_matte_of
     // LayerSource is REMOVED — kinds are creation templates (REQ-LAYER-008)
 AudioSource::new(asset_id: AssetId, stream_index)   // AssetId::UNSET = no asset
     // gain defaults to a constant 1.0; fade frames default to 0;
@@ -2644,6 +2646,7 @@ processor runs, and **§P** means the section's `translate` also carries
 | `comp.background` | CPU | fills the composition-sized RGBA f32 buffer from `Composition.background_color`; bottom of every compiled shell chain |
 | `comp.transform` | CPU | layer transform channels (degrees) + parent chain, inverse-mapped premultiplied bilinear resample; identity passes through |
 | `comp.opacity` | CPU | alpha × layer opacity (layer-local frame); 1.0 passes through |
+| `comp.matte.{alpha,alpha_inverted,luma,luma_inverted}` | CPU | track-matte stage between Opacity and Merge: `a' = a * m` (RGB kept); `m` = matte alpha or Rec.709 luma(straight rgb) × alpha, `1 - m` when inverted; kind is in the type key; `matte.rs` |
 | `comp.merge.*` | CPU | straight-alpha Porter-Duff over with W3C blend modes; `.adjustment` mixes bg/adjusted by layer opacity (effect strength) and bypasses outside the interval |
 | `net.in` / `net.out` | CPU | network interface nodes (REQ-LAYER-002); produce `PortRecord`s (a single-output `net.in` yields the value directly); custom In ports prefer scope bindings over own params, then fall back to the **port's** typed zero |
 

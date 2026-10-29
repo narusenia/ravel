@@ -333,7 +333,7 @@ fn empty_frame() -> Arc<dyn NodeData> {
     Arc::new(FrameBuffer::new_zeroed(0, 0))
 }
 
-fn pixel_at(pixels: &[f32], width: u32, height: u32, x: u32, y: u32) -> [f32; 4] {
+pub(super) fn pixel_at(pixels: &[f32], width: u32, height: u32, x: u32, y: u32) -> [f32; 4] {
     if x >= width || y >= height {
         return [0.0; 4];
     }

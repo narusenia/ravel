@@ -148,6 +148,7 @@ fn shell_property(group: PropertyGroup) -> ShellProperty {
         PropertyGroup::Rotation => ShellProperty::Rotation,
         PropertyGroup::Opacity => ShellProperty::Opacity,
         PropertyGroup::AudioGain => ShellProperty::AudioGain,
+        PropertyGroup::TimeRemap => ShellProperty::TimeRemap,
     }
 }
 
@@ -244,6 +245,9 @@ fn shell_default_channels(group: PropertyGroup) -> Vec<AnimationChannel> {
         PropertyGroup::AudioGain => {
             vec![ravel_core::composition::AudioSource::default().gain]
         }
+        // No default: the row only exists while a remap does, and a layer
+        // that has none is not "modified" by lacking one.
+        PropertyGroup::TimeRemap => Vec::new(),
     }
 }
 
@@ -269,6 +273,17 @@ pub fn property_rows(layer: &Layer, registry: &NodeRegistry) -> Vec<PropertyRow>
             id: PropertyRowId::Shell(PropertyGroup::AudioGain),
             label: None,
             channel_names: shell_channel_names(PropertyGroup::AudioGain)
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        });
+    }
+
+    if layer.time_remap.is_some() {
+        rows.push(PropertyRow {
+            id: PropertyRowId::Shell(PropertyGroup::TimeRemap),
+            label: None,
+            channel_names: shell_channel_names(PropertyGroup::TimeRemap)
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
@@ -1010,6 +1025,7 @@ fn shell_channels(layer: &Layer, group: PropertyGroup) -> Vec<&AnimationChannel>
             .as_ref()
             .map(|audio| vec![&audio.gain])
             .unwrap_or_default(),
+        PropertyGroup::TimeRemap => layer.time_remap.iter().collect(),
         PropertyGroup::AnchorPoint => {
             vec![
                 &layer.transform.anchor_point[0],
@@ -1028,6 +1044,7 @@ pub fn shell_channel_names(group: PropertyGroup) -> &'static [&'static str] {
         PropertyGroup::Rotation => &["timeline.property.rotation"],
         PropertyGroup::Opacity => &["timeline.property.opacity"],
         PropertyGroup::AudioGain => &["timeline.property.gain"],
+        PropertyGroup::TimeRemap => &["timeline.property.time_remap"],
     }
 }
 
@@ -1270,6 +1287,34 @@ mod tests {
         assert!(set_channel_value(&mut layer, &row, 1, 3, 12.0));
         assert!(
             (layer.transform.anchor_point[1].evaluate(3.0, &eval_ctx()) - 12.0).abs()
+                < f32::EPSILON
+        );
+    }
+
+    #[test]
+    fn time_remap_is_a_shell_keyframe_row_only_while_the_remap_is_on() {
+        let mut layer = test_layer();
+        let row = PropertyRowId::Shell(PropertyGroup::TimeRemap);
+        let has_row = |layer: &Layer| {
+            property_rows(layer, &registry())
+                .iter()
+                .any(|candidate| candidate.id == row)
+        };
+        assert!(!has_row(&layer));
+
+        layer.time_remap = Some(AnimationChannel::constant(0.0));
+        assert!(has_row(&layer));
+        // The row edits the remap channel itself, so the curve editor can.
+        assert!(insert_keyframe(&mut layer, &row, 0, 4));
+        assert!(set_channel_value(&mut layer, &row, 0, 4, 12.0));
+        assert!(
+            (layer
+                .time_remap
+                .as_ref()
+                .unwrap()
+                .evaluate(4.0, &eval_ctx())
+                - 12.0)
+                .abs()
                 < f32::EPSILON
         );
     }

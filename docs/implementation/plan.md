@@ -14,9 +14,12 @@ The Track/Clip timeline model described by early planning documents is
 obsolete. The current model is the REQ-LAYER Composition/Layer model: a
 `Document` contains compositions, each composition owns an ordered list of
 layer shells, and each layer owns one node network. The shell holds time
-placement, transform, opacity, and blend state. `compile_composition` expands
-that shell into synthetic DAG nodes and evaluation crosses layer-network
-boundaries recursively.
+placement, transform, opacity, and blend state, plus an optional time remap
+(retimes only the layer's network) and an optional track matte (another layer's
+alpha or luma cuts this layer out; the matte source stops compositing itself).
+`compile_composition` expands that shell into synthetic DAG nodes and
+evaluation crosses layer-network boundaries recursively. Audio is not
+time-remapped.
 
 The implementation is in `crates/ravel-core/src/composition/`, with the
 boundary processors and shell-compositing processors in

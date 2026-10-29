@@ -11,7 +11,9 @@ use crate::keyframes::{
 };
 use crate::panels::timeline::PropertyGroup;
 use ravel_core::animation::channel::AnimationChannel;
-use ravel_core::composition::{AssetMetadata, AudioStreamMetadata, BlendMode, Composition, Layer};
+use ravel_core::composition::{
+    AssetMetadata, AudioStreamMetadata, BlendMode, Composition, Layer, TrackMatte, TrackMatteKind,
+};
 use ravel_core::eval::EvalContext;
 use ravel_core::graph::ParameterValue;
 use ravel_core::id::{LayerId, NodeId};
@@ -47,7 +49,7 @@ pub fn sections_for_layer(
     if let Some(audio) = audio_section(layer, ctx, audio_asset) {
         sections.push(audio);
     }
-    sections.push(compositing_section(layer));
+    sections.push(compositing_section(layer, comp));
     if let Some(custom) = custom_parameters_section(layer, ctx) {
         sections.push(custom);
     }
@@ -74,6 +76,34 @@ pub const VALUE_OFF: &str = "properties.value.off";
 /// the key itself, never the translated word — so switching language cannot
 /// change what picking "(none)" does.
 pub const PARENT_NONE: &str = "properties.value.none";
+
+/// The Track Matte picker's "no matte" option: the same state word as
+/// [`PARENT_NONE`], and likewise its own stored value.
+pub const MATTE_NONE: &str = PARENT_NONE;
+
+/// Locale keys of the Track Matte kind picker. They are the stored values of
+/// its options for the reason [`PARENT_NONE`] is: the host translates them at
+/// the display boundary and the language never changes what an edit writes.
+pub const MATTE_ALPHA: &str = "properties.value.matte_alpha";
+pub const MATTE_ALPHA_INVERTED: &str = "properties.value.matte_alpha_inverted";
+pub const MATTE_LUMA: &str = "properties.value.matte_luma";
+pub const MATTE_LUMA_INVERTED: &str = "properties.value.matte_luma_inverted";
+
+/// The option value a matte kind is stored under.
+fn matte_kind_value(kind: TrackMatteKind) -> &'static str {
+    match kind {
+        TrackMatteKind::Alpha => MATTE_ALPHA,
+        TrackMatteKind::AlphaInverted => MATTE_ALPHA_INVERTED,
+        TrackMatteKind::Luma => MATTE_LUMA,
+        TrackMatteKind::LumaInverted => MATTE_LUMA_INVERTED,
+    }
+}
+
+fn parse_matte_kind(value: &str) -> Option<TrackMatteKind> {
+    TrackMatteKind::ALL
+        .into_iter()
+        .find(|kind| matte_kind_value(*kind) == value)
+}
 
 /// Locale keys of the Layer section's `source` row, which names what the
 /// layer *is* rather than carrying data. The network form takes the node
@@ -128,10 +158,16 @@ pub fn sections_for_layers(
     let per_layer: Vec<Vec<PropertySection>> = layers
         .iter()
         .map(|layer| {
+            // The matte kind row exists only for a layer that has a matte, so
+            // it would shift the field indices `merge_sections` pairs by.
+            let mut compositing = compositing_section(layer, comp);
+            compositing
+                .fields
+                .retain(|field| field.key() != "track_matte_kind");
             vec![
                 transform_section(layer, comp, ctx),
                 timing_section(layer),
-                compositing_section(layer),
+                compositing,
             ]
         })
         .collect();
@@ -466,6 +502,13 @@ fn timing_section(layer: &Layer) -> PropertySection {
                 key: "duration".into(),
                 value: counted_value(DURATION_FRAMES, layer.duration()),
             },
+            // On: the network is evaluated at the remap channel's frame, which
+            // starts as an identity so switching it on changes nothing; the
+            // curve is then edited in the Timeline's graph view.
+            PropertyField::Bool {
+                key: "time_remap".into(),
+                value: layer.time_remap.is_some(),
+            },
         ],
     }
 }
@@ -579,7 +622,33 @@ fn audio_section(
     })
 }
 
-fn compositing_section(layer: &Layer) -> PropertySection {
+/// The Track Matte picker: `(none)` plus every layer
+/// [`Composition::can_be_matte_of`] allows, each addressed by layer id and
+/// numbered by its Timeline row like the Parent picker. A stored source the
+/// list does not carry (deleted, or no longer valid) reads as "no matte".
+fn track_matte_field(layer: &Layer, comp: &Composition) -> PropertyField {
+    let total = comp.layers.len();
+    let mut options = vec![ParamOption::fixed(MATTE_NONE)];
+    options.extend(
+        comp.layers
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| comp.can_be_matte_of(layer.id, candidate.id))
+            .map(|(index, candidate)| layer_param_option(index, total, candidate)),
+    );
+    let value = layer
+        .track_matte
+        .map(|matte| matte.layer.raw().to_string())
+        .filter(|id| options.iter().any(|option| &option.value == id))
+        .unwrap_or_else(|| MATTE_NONE.to_string());
+    PropertyField::Enum {
+        key: "track_matte".into(),
+        value,
+        options,
+    }
+}
+
+fn compositing_section(layer: &Layer, comp: &Composition) -> PropertySection {
     let blend_mode = match layer.blend_mode {
         BlendMode::Normal => "Normal",
         BlendMode::Add => "Add",
@@ -588,33 +657,49 @@ fn compositing_section(layer: &Layer) -> PropertySection {
         BlendMode::Overlay => "Overlay",
     };
 
+    let mut fields = vec![
+        PropertyField::Enum {
+            key: "blend_mode".into(),
+            value: blend_mode.into(),
+            options: ["Normal", "Add", "Multiply", "Screen", "Overlay"]
+                .map(ParamOption::fixed)
+                .to_vec(),
+        },
+        PropertyField::Bool {
+            key: "solo".into(),
+            value: layer.solo,
+        },
+        PropertyField::Bool {
+            key: "muted".into(),
+            value: layer.muted,
+        },
+        PropertyField::Bool {
+            key: "locked".into(),
+            value: layer.locked,
+        },
+        PropertyField::Bool {
+            key: "adjustment".into(),
+            value: layer.adjustment,
+        },
+        track_matte_field(layer, comp),
+    ];
+    // The kind means nothing without a source, so its row appears with one.
+    if let Some(matte) = layer
+        .track_matte
+        .filter(|matte| comp.can_be_matte_of(layer.id, matte.layer))
+    {
+        fields.push(PropertyField::Enum {
+            key: "track_matte_kind".into(),
+            value: matte_kind_value(matte.kind).into(),
+            options: TrackMatteKind::ALL
+                .map(|kind| ParamOption::fixed(matte_kind_value(kind)))
+                .to_vec(),
+        });
+    }
+
     PropertySection {
         title: "properties.section.compositing".into(),
-        fields: vec![
-            PropertyField::Enum {
-                key: "blend_mode".into(),
-                value: blend_mode.into(),
-                options: ["Normal", "Add", "Multiply", "Screen", "Overlay"]
-                    .map(ParamOption::fixed)
-                    .to_vec(),
-            },
-            PropertyField::Bool {
-                key: "solo".into(),
-                value: layer.solo,
-            },
-            PropertyField::Bool {
-                key: "muted".into(),
-                value: layer.muted,
-            },
-            PropertyField::Bool {
-                key: "locked".into(),
-                value: layer.locked,
-            },
-            PropertyField::Bool {
-                key: "adjustment".into(),
-                value: layer.adjustment,
-            },
-        ],
+        fields,
     }
 }
 
@@ -831,6 +916,41 @@ pub fn apply_layer_field(
                 layer.parent = Some(id);
             }
         }
+        // The Track Matte picker stores the source's layer id, like Parent.
+        // Choosing one keeps the kind already set (Alpha when there was none).
+        // Only the self-matte is refused here; the cycle rule is what
+        // `track_matte_field` leaves out of the options.
+        ("track_matte", PropertyValue::String(v)) => {
+            if v == MATTE_NONE {
+                layer.track_matte = None;
+            } else {
+                let Some(id) = v
+                    .parse()
+                    .ok()
+                    .map(LayerId::new)
+                    .filter(|id| *id != layer.id)
+                else {
+                    return false;
+                };
+                let kind = layer
+                    .track_matte
+                    .map_or(TrackMatteKind::Alpha, |matte| matte.kind);
+                layer.track_matte = Some(TrackMatte { layer: id, kind });
+            }
+        }
+        ("track_matte_kind", PropertyValue::String(v)) => {
+            let (Some(kind), Some(matte)) = (parse_matte_kind(v), layer.track_matte.as_mut())
+            else {
+                return false;
+            };
+            matte.kind = kind;
+        }
+        // On starts from the identity — first and last visible frame mapped to
+        // themselves — so enabling it changes nothing on screen. A constant 0
+        // would freeze the layer on its first frame.
+        ("time_remap", PropertyValue::Bool(on)) => {
+            layer.time_remap = on.then(|| identity_time_remap(layer));
+        }
         ("solo", PropertyValue::Bool(v)) => layer.solo = *v,
         ("muted", PropertyValue::Bool(v)) => layer.muted = *v,
         ("locked", PropertyValue::Bool(v)) => layer.locked = *v,
@@ -873,6 +993,21 @@ pub fn apply_layer_field(
         _ => return false,
     }
     true
+}
+
+/// A time remap that maps every visible frame to itself: keys at the first and
+/// the last visible frame (`in_frame`, `out_frame - 1`), interpolated linearly.
+/// A one-frame layer gets the one key.
+fn identity_time_remap(layer: &Layer) -> AnimationChannel {
+    use ravel_core::animation::curve::KeyframeCurve;
+    use ravel_core::animation::interpolation::Interpolation;
+    let first = layer.in_frame;
+    let last = layer.out_frame.saturating_sub(1).max(first);
+    let mut curve = KeyframeCurve::new();
+    for frame in [first, last] {
+        curve.insert(frame, frame as f32, Interpolation::Linear);
+    }
+    AnimationChannel::keyframes(curve)
 }
 
 /// The animatable components backing a field key, for the key-toggle button:
@@ -2377,5 +2512,226 @@ mod tests {
         if let Some(PropertyField::Int { value, .. }) = start {
             assert_eq!(*value, 10);
         }
+    }
+
+    // ----- Track matte and time remap pickers -------------------------------
+
+    /// A layer with a `frame` output, which is what a matte source needs.
+    fn frame_layer(id: u64, name: &str) -> Layer {
+        let mut layer = test_layer();
+        layer.id = LayerId::new(id);
+        layer.name = name.into();
+        layer
+    }
+
+    fn compositing_fields(layer: &Layer, comp: &Composition) -> Vec<PropertyField> {
+        sections_for_layer(layer, comp, &ctx(), None)
+            .into_iter()
+            .find(|section| section.title == "properties.section.compositing")
+            .expect("compositing section")
+            .fields
+    }
+
+    fn matte_picker(layer: &Layer, comp: &Composition) -> (String, Vec<ParamOption>) {
+        compositing_fields(layer, comp)
+            .into_iter()
+            .find_map(|field| match field {
+                PropertyField::Enum {
+                    key,
+                    value,
+                    options,
+                } if key == "track_matte" => Some((value, options)),
+                _ => None,
+            })
+            .expect("the compositing section carries a Track Matte picker")
+    }
+
+    fn matte_kind_row(layer: &Layer, comp: &Composition) -> Option<String> {
+        compositing_fields(layer, comp)
+            .into_iter()
+            .find_map(|field| match field {
+                PropertyField::Enum { key, value, .. } if key == "track_matte_kind" => Some(value),
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn the_matte_picker_offers_only_layers_that_can_be_a_matte() {
+        let target = frame_layer(1, "Target");
+        let source = frame_layer(2, "Source");
+        let mut adjustment = frame_layer(3, "Adj");
+        adjustment.adjustment = true;
+        let null = Layer::new(LayerId::new(4), "Null", Graph::new()).with_time(0, 0, 300);
+        let mut matted_by_target = frame_layer(5, "Back");
+        matted_by_target.track_matte = Some(TrackMatte {
+            layer: LayerId::new(1),
+            kind: TrackMatteKind::Alpha,
+        });
+        let comp = comp_of(&[&target, &source, &adjustment, &null, &matted_by_target]);
+
+        let (value, options) = matte_picker(&target, &comp);
+        assert_eq!(value, MATTE_NONE);
+        assert_eq!(
+            options,
+            [
+                ParamOption::fixed(MATTE_NONE),
+                // Not itself, not the adjustment, not the null, not the layer
+                // whose own matte is this one (that would be a cycle).
+                ParamOption::new("2", "4. Source"),
+            ]
+        );
+        assert_eq!(
+            matte_kind_row(&target, &comp),
+            None,
+            "no source, no kind row"
+        );
+    }
+
+    #[test]
+    fn picking_a_matte_and_a_kind_edits_the_shell() {
+        let mut target = frame_layer(1, "Target");
+        let source = frame_layer(2, "Source");
+        let comp = comp_of(&[&target, &source]);
+
+        assert!(apply_layer_field(
+            &mut target,
+            "track_matte",
+            &PropertyValue::String("2".into()),
+            0
+        ));
+        assert_eq!(
+            target.track_matte,
+            Some(TrackMatte {
+                layer: LayerId::new(2),
+                kind: TrackMatteKind::Alpha
+            }),
+            "a fresh matte starts as Alpha"
+        );
+        let comp = {
+            let mut c = comp.clone();
+            c.layers[0] = target.clone();
+            c
+        };
+        assert_eq!(matte_picker(&target, &comp).0, "2");
+        assert_eq!(matte_kind_row(&target, &comp).as_deref(), Some(MATTE_ALPHA));
+
+        for (value, kind) in [
+            (MATTE_ALPHA_INVERTED, TrackMatteKind::AlphaInverted),
+            (MATTE_LUMA, TrackMatteKind::Luma),
+            (MATTE_LUMA_INVERTED, TrackMatteKind::LumaInverted),
+        ] {
+            assert!(apply_layer_field(
+                &mut target,
+                "track_matte_kind",
+                &PropertyValue::String(value.into()),
+                0
+            ));
+            assert_eq!(target.track_matte.unwrap().kind, kind);
+        }
+        // Picking another source keeps the kind.
+        assert!(apply_layer_field(
+            &mut target,
+            "track_matte",
+            &PropertyValue::String("7".into()),
+            0
+        ));
+        assert_eq!(
+            target.track_matte,
+            Some(TrackMatte {
+                layer: LayerId::new(7),
+                kind: TrackMatteKind::LumaInverted
+            })
+        );
+        assert!(apply_layer_field(
+            &mut target,
+            "track_matte",
+            &PropertyValue::String(MATTE_NONE.into()),
+            0
+        ));
+        assert_eq!(target.track_matte, None);
+    }
+
+    #[test]
+    fn matte_edits_the_picker_never_produces_are_refused() {
+        let mut layer = frame_layer(1, "L");
+        for (key, value) in [
+            ("track_matte", "1"),             // itself
+            ("track_matte", "banana"),        // not an id
+            ("track_matte_kind", MATTE_LUMA), // no matte yet
+        ] {
+            assert!(
+                !apply_layer_field(&mut layer, key, &PropertyValue::String(value.into()), 0),
+                "{key}={value}"
+            );
+            assert_eq!(layer.track_matte, None);
+        }
+        layer.track_matte = Some(TrackMatte {
+            layer: LayerId::new(2),
+            kind: TrackMatteKind::Alpha,
+        });
+        assert!(!apply_layer_field(
+            &mut layer,
+            "track_matte_kind",
+            &PropertyValue::String("Luma".into()),
+            0
+        ));
+        assert_eq!(layer.track_matte.unwrap().kind, TrackMatteKind::Alpha);
+    }
+
+    #[test]
+    fn a_dangling_matte_source_reads_as_no_matte() {
+        let mut target = frame_layer(1, "Target");
+        target.track_matte = Some(TrackMatte {
+            layer: LayerId::new(404),
+            kind: TrackMatteKind::Luma,
+        });
+        let comp = comp_of(&[&target]);
+        assert_eq!(matte_picker(&target, &comp).0, MATTE_NONE);
+        assert_eq!(matte_kind_row(&target, &comp), None);
+    }
+
+    #[test]
+    fn the_time_remap_toggle_starts_from_an_identity_and_switches_off() {
+        let mut layer = frame_layer(1, "L").with_time(0, 20, 80);
+        let row = |layer: &Layer| {
+            solo_sections(layer, &ctx(), None)
+                .into_iter()
+                .flat_map(|section| section.fields)
+                .find_map(|field| match field {
+                    PropertyField::Bool { key, value } if key == "time_remap" => Some(value),
+                    _ => None,
+                })
+                .expect("the timing section carries the Time Remap switch")
+        };
+        assert!(!row(&layer));
+
+        assert!(apply_layer_field(
+            &mut layer,
+            "time_remap",
+            &PropertyValue::Bool(true),
+            0
+        ));
+        assert!(row(&layer));
+        let remap = layer.time_remap.as_ref().expect("the remap exists");
+        // Visible frames are 20..=79; each maps to itself, in between too.
+        for frame in [20.0, 33.5, 50.0, 79.0] {
+            let got = remap.evaluate(frame, &ctx());
+            assert!((f64::from(got) - frame).abs() < 1e-4, "{frame} -> {got}");
+        }
+
+        assert!(apply_layer_field(
+            &mut layer,
+            "time_remap",
+            &PropertyValue::Bool(false),
+            0
+        ));
+        assert_eq!(layer.time_remap, None);
+    }
+
+    #[test]
+    fn a_one_frame_layer_gets_a_one_key_identity() {
+        let layer = frame_layer(1, "L").with_time(0, 5, 6);
+        let remap = identity_time_remap(&layer);
+        assert!((remap.evaluate(5.0, &ctx()) - 5.0).abs() < 1e-6);
     }
 }

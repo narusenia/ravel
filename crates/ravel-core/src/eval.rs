@@ -2368,6 +2368,7 @@ impl Evaluator {
                             NodeRole::Network,
                             NodeRole::Transform,
                             NodeRole::Opacity,
+                            NodeRole::Matte,
                             NodeRole::Merge,
                         ] {
                             let id = deterministic_node_id(*comp_id, layer.id, role);
@@ -3796,6 +3797,8 @@ fn layer_shell_changed(new: &Layer, old: &Layer) -> bool {
         || new.blend_mode != old.blend_mode
         || new.adjustment != old.adjustment
         || new.parent != old.parent
+        || new.time_remap != old.time_remap
+        || new.track_matte != old.track_matte
 }
 
 /// Node types that read shell fields straight off the `Document`, with no
@@ -8432,6 +8435,31 @@ mod tests {
             .evaluate_sub(segment, &inner2, NodeId::new(8), &ctx_at(0), Vec::new())
             .unwrap();
         assert!((v.downcast_ref::<Scalar>().unwrap().0 - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn time_remap_and_track_matte_edits_count_as_shell_changes() {
+        use crate::animation::channel::AnimationChannel;
+        use crate::composition::{Layer, TrackMatte, TrackMatteKind};
+
+        let before = Layer::new(LayerId::new(1), "L", Graph::new());
+        let mut after = before.clone();
+        assert!(!layer_shell_changed(&after, &before));
+        after.time_remap = Some(AnimationChannel::constant(3.0));
+        assert!(layer_shell_changed(&after, &before));
+
+        let mut matted = before.clone();
+        matted.track_matte = Some(TrackMatte {
+            layer: LayerId::new(2),
+            kind: TrackMatteKind::Alpha,
+        });
+        assert!(layer_shell_changed(&matted, &before));
+        let mut inverted = matted.clone();
+        inverted.track_matte = Some(TrackMatte {
+            layer: LayerId::new(2),
+            kind: TrackMatteKind::AlphaInverted,
+        });
+        assert!(layer_shell_changed(&inverted, &matted));
     }
 
     /// A layer's rendered frame folds in its ancestors' transforms, so a shell

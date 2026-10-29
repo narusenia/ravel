@@ -26,6 +26,7 @@ mod generate;
 pub(crate) mod grade;
 mod key;
 mod mask;
+mod matte;
 mod merge;
 mod opacity;
 mod solid;
@@ -44,6 +45,7 @@ pub use generate::{
 pub use grade::{CompGradeProcessor, GradeKind};
 pub use key::{CompKeyProcessor, comp_key_mode_is_known};
 pub use mask::CompMaskProcessor;
+pub use matte::CompMatteProcessor;
 pub use merge::{CompMergeGpuProcessor, CompMergeProcessor};
 pub use opacity::{CompOpacityGpuProcessor, CompOpacityProcessor};
 pub use solid::CompSolidProcessor;
@@ -115,15 +117,74 @@ fn layer_network_context(
     resolution: (u32, u32),
 ) -> EvalContext {
     let sub_frame = ctx.sample_frame() - ctx.frame as f64;
+    network_context_at(
+        comp,
+        local_frame as u64,
+        local_frame as f64 + sub_frame,
+        ctx,
+        resolution,
+    )
+}
+
+/// A layer-network context that sits at the continuous local position
+/// `sample`, addressed by the integer index `frame`.
+fn network_context_at(
+    comp: &Composition,
+    frame: u64,
+    sample: f64,
+    ctx: &EvalContext,
+    resolution: (u32, u32),
+) -> EvalContext {
     EvalContext {
-        frame: local_frame as u64,
-        time: (local_frame as f64 + sub_frame) / comp.frame_rate.as_f64(),
+        frame,
+        time: sample / comp.frame_rate.as_f64(),
         fps: comp.frame_rate,
         resolution,
         comp_resolution: comp.resolution,
         min_precision: ctx.min_precision,
         quality: ctx.quality,
     }
+}
+
+/// The remapped source frame clamped to `[in_frame, out_frame - 1]`, or
+/// `None` when it is not finite.
+fn clamp_remap(layer: &Layer, value: f64) -> Option<f64> {
+    let last = (layer.out_frame as f64 - 1.0).max(layer.in_frame as f64);
+    value
+        .is_finite()
+        .then(|| value.clamp(layer.in_frame as f64, last))
+}
+
+/// The context the layer's network is evaluated in once the shell's time
+/// remap is applied (REQ-LAYER-001).
+///
+/// The remap channel maps the layer's local *output* frame (continuous, so a
+/// slow-motion layer is not stair-stepped) to the local *source* frame the
+/// network is evaluated at, both in frames. The result is clamped to
+/// `[in_frame, out_frame - 1]` — the layer's first and last visible frame —
+/// so a remap that runs past either end holds that frame instead of reading
+/// outside the layer. Only the **network** is retimed: transform, opacity and
+/// merge keys stay on the layer's output timeline (After Effects behaviour),
+/// and the `[in, out)` visibility test stays on the unremapped frame.
+///
+/// `frame` becomes `floor(remapped)` (keyframe addressing) and `time` keeps
+/// the fraction. Without a remap this is [`layer_network_context`].
+fn layer_network_context_remapped(
+    comp: &Composition,
+    layer: &Layer,
+    local_frame: i64,
+    ctx: &EvalContext,
+    resolution: (u32, u32),
+) -> EvalContext {
+    let Some(remap) = &layer.time_remap else {
+        return layer_network_context(comp, local_frame, ctx, resolution);
+    };
+    let value = f64::from(remap.evaluate(layer_local_frame(layer, ctx), ctx));
+    let Some(remapped) = clamp_remap(layer, value) else {
+        // A non-finite remap reads as "no remap" rather than frame 0 at time NaN.
+        return layer_network_context(comp, local_frame, ctx, resolution);
+    };
+    network_context_at(comp, remapped.floor() as u64, remapped, ctx, resolution)
 }
 
 // ===========================================================================
@@ -172,7 +233,7 @@ impl NodeProcessor for CompNetworkProcessor {
         let frame_index = net::frame_port_index(out_node)
             .ok_or_else(|| anyhow::anyhow!("comp.network: net.out has no frame port"))?;
 
-        let local = layer_network_context(&comp, local_frame, ctx, resolution);
+        let local = layer_network_context_remapped(&comp, layer, local_frame, ctx, resolution);
 
         let mut bindings: Vec<(String, Arc<dyn NodeData>)> = Vec::new();
         if layer.adjustment
@@ -213,6 +274,20 @@ mod tests {
 
     fn comp() -> Composition {
         Composition::new(CompId::new(1), "Comp", (1920, 1080), FPS, 300)
+    }
+
+    #[test]
+    fn a_non_finite_remap_is_ignored_and_a_finite_one_is_clamped() {
+        let layer = Layer::new(
+            ravel_core::id::LayerId::new(1),
+            "L",
+            ravel_core::graph::Graph::new(),
+        )
+        .with_time(0, 10, 50);
+        assert_eq!(clamp_remap(&layer, f64::NAN), None);
+        assert_eq!(clamp_remap(&layer, f64::INFINITY), None);
+        assert_eq!(clamp_remap(&layer, 3.0), Some(10.0));
+        assert_eq!(clamp_remap(&layer, 99.0), Some(49.0));
     }
 
     #[test]

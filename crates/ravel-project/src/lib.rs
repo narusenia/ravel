@@ -727,12 +727,15 @@ pub fn document_to_ron(document: &Document) -> Result<String, ProjectError> {
 /// structural checks a load applies. For a document handed over in memory (the
 /// live-edit read), which a running app already holds normalized; a file goes
 /// through [`ProjectFile::load`] instead.
+/// Like a load, it advances the id counters past the document's ids, so
+/// anything the caller mints afterwards cannot collide with them.
 pub fn document_from_ron(text: &str) -> Result<Document, ProjectError> {
     let document: Document = ron_options()
         .from_str(text)
         .map_err(ProjectError::DocumentParse)?;
     document.validate_subnet_depth()?;
     document.validate()?;
+    document.advance_id_counters();
     Ok(document)
 }
 
@@ -3883,6 +3886,32 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// The in-memory parse (the live-edit read) advances the counters as a
+    /// file load does, so ids the CLI mints afterwards cannot collide.
+    #[test]
+    fn document_from_ron_advances_the_id_counters() {
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(70_000), "constant").with_output("v", DataTypeId::SCALAR),
+            )
+            .unwrap();
+        let comp = Composition::new(
+            CompId::new(70_002),
+            "live comp",
+            (640, 480),
+            FrameRate::new(30, 1),
+            100,
+        )
+        .add_layer(Layer::new(LayerId::new(70_001), "live", network));
+        let text = document_to_ron(&Document::default().with_composition(comp)).unwrap();
+
+        let _parsed = document_from_ron(&text).unwrap();
+
+        assert!(NodeId::next().raw() > 70_000);
+        assert!(LayerId::next().raw() > 70_001);
+        assert!(CompId::next().raw() > 70_002);
     }
 
     #[test]

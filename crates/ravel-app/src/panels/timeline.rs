@@ -378,6 +378,8 @@ fn channel_scrub_style(row: &PropertyRowId) -> ChannelScrubStyle {
         PropertyRowId::Shell(PropertyGroup::AudioGain) => {
             (1.0, Some(0.0..=f32::MAX), Some(0.0..=2.0))
         }
+        // A frame number: stored units are the displayed ones.
+        PropertyRowId::Shell(PropertyGroup::TimeRemap) => (1.0, Some(0.0..=f32::MAX), None),
         PropertyRowId::Network { .. } => (1.0, None, None),
     };
     ChannelScrubStyle { factor, hard, ui }
@@ -6584,6 +6586,7 @@ fn shell_group_label(group: PropertyGroup) -> SharedString {
         PropertyGroup::Rotation => SharedString::from(t!("timeline.property.rotation")),
         PropertyGroup::Opacity => SharedString::from(t!("timeline.property.opacity")),
         PropertyGroup::AudioGain => SharedString::from(t!("timeline.property.gain")),
+        PropertyGroup::TimeRemap => SharedString::from(t!("timeline.property.time_remap")),
     }
 }
 

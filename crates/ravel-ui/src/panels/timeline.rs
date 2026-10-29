@@ -179,6 +179,8 @@ pub enum PropertyGroup {
     Opacity,
     AudioGain,
     AnchorPoint,
+    /// The layer's time remap; a row exists only while the remap is on.
+    TimeRemap,
 }
 
 /// The visualization shown in the timeline's time-based right pane.

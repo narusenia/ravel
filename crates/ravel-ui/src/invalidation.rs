@@ -46,9 +46,18 @@ use ravel_core::runtime::InvalidationHint;
 /// different merge and drops the opacity node; `solo` and `muted` decide
 /// which layers are compiled at all; `parent` is here for the same reason —
 /// `compile.rs` wires an edge from the parent's synthetic Transform node, so
-/// re-parenting changes the graph's shape.
-pub const STRUCTURAL_LAYER_FIELDS: [&str; 5] =
-    ["blend_mode", "solo", "muted", "adjustment", "parent"];
+/// re-parenting changes the graph's shape; `track_matte` and
+/// `track_matte_kind` add, drop or retype the matte stage and take the source
+/// out of the merge chain.
+pub const STRUCTURAL_LAYER_FIELDS: [&str; 7] = [
+    "blend_mode",
+    "solo",
+    "muted",
+    "adjustment",
+    "parent",
+    "track_matte",
+    "track_matte_kind",
+];
 
 /// The hint an edit to the layer field `key` posts (the Properties panel's
 /// vocabulary). See the module documentation for the three outcomes.
@@ -203,14 +212,22 @@ mod tests {
         }
     }
 
-    /// The five that stay `Structural`, named one by one so that dropping
+    /// The seven that stay `Structural`, named one by one so that dropping
     /// one from the list is a failure rather than a silent reclassification
     /// the loop above would happily agree with.
     #[test]
     fn the_merge_chain_fields_stay_structural() {
         let layer = layer_with_in_node();
         let comp = comp_of(&layer).id;
-        for key in ["blend_mode", "solo", "muted", "adjustment", "parent"] {
+        for key in [
+            "blend_mode",
+            "solo",
+            "muted",
+            "adjustment",
+            "parent",
+            "track_matte",
+            "track_matte_kind",
+        ] {
             assert_eq!(
                 layer_field_hint(key, comp, &layer),
                 InvalidationHint::Structural,
@@ -223,7 +240,7 @@ mod tests {
         }
         assert_eq!(
             STRUCTURAL_LAYER_FIELDS.len(),
-            5,
+            7,
             "a field joined or left the structural list without a reason here"
         );
     }

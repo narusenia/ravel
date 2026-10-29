@@ -7671,6 +7671,130 @@ mod tests {
         assert_eq!(layer(&project, comp_id, lid, cx).parent, Some(other));
     }
 
+    // ----- Track matte and time remap (layer-shell-wiring plan, units 3) ----
+
+    /// Picking a matte source reaches the document in one undo step, and the
+    /// compiled composition then carries the matte stage and no longer merges
+    /// the source on its own — the edit changes what is evaluated.
+    #[gpui::test]
+    fn picking_a_track_matte_rewires_the_composite_in_one_undo_step(cx: &mut TestAppContext) {
+        use ravel_core::composition::TrackMatteKind;
+        use ravel_core::composition::compile::{
+            NodeRole, compile_composition, deterministic_node_id,
+        };
+
+        let (window, project, comp_id, lid) = setup(cx);
+        let source = add_sibling(&project, comp_id, "Matte", cx);
+        let compiled = |cx: &mut TestAppContext| {
+            let comp = project.read_with(cx, |p, _| {
+                p.document().get_composition(comp_id).unwrap().clone()
+            });
+            let result = compile_composition(&comp, Graph::new()).unwrap();
+            let has = |layer: LayerId, role: NodeRole| {
+                result
+                    .graph
+                    .node(deterministic_node_id(comp_id, layer, role))
+                    .is_some()
+            };
+            (has(lid, NodeRole::Matte), has(source, NodeRole::Merge))
+        };
+        assert_eq!(
+            compiled(cx),
+            (false, true),
+            "both layers composite at first"
+        );
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.apply_layer_change(
+                    "track_matte",
+                    PropertyValue::String(source.raw().to_string()),
+                    true,
+                    cx,
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            layer(&project, comp_id, lid, cx)
+                .track_matte
+                .map(|m| m.layer),
+            Some(source)
+        );
+        assert_eq!(
+            compiled(cx),
+            (true, false),
+            "the layer is matted and the source stopped compositing"
+        );
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.apply_layer_change(
+                    "track_matte_kind",
+                    PropertyValue::String(ravel_ui::properties::layer::MATTE_LUMA_INVERTED.into()),
+                    true,
+                    cx,
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            layer(&project, comp_id, lid, cx)
+                .track_matte
+                .map(|m| m.kind),
+            Some(TrackMatteKind::LumaInverted)
+        );
+
+        // Each edit is one undo step: kind, then source.
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(
+            layer(&project, comp_id, lid, cx)
+                .track_matte
+                .map(|m| m.kind),
+            Some(TrackMatteKind::Alpha)
+        );
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(layer(&project, comp_id, lid, cx).track_matte, None);
+        assert_eq!(compiled(cx), (false, true));
+    }
+
+    /// The Time Remap switch is one undo step each way, and switching on does
+    /// not change the layer's timing: the starting remap is the identity.
+    #[gpui::test]
+    fn the_time_remap_switch_is_one_undo_step_and_starts_as_an_identity(cx: &mut TestAppContext) {
+        let (window, project, comp_id, lid) = setup(cx);
+        let toggle = |on: bool,
+                      window: &gpui::WindowHandle<PropertiesGpuiPanel>,
+                      cx: &mut TestAppContext| {
+            window
+                .update(cx, |panel, _window, cx| {
+                    panel.apply_layer_change("time_remap", PropertyValue::Bool(on), true, cx);
+                })
+                .unwrap();
+        };
+
+        toggle(true, &window, cx);
+        let on = layer(&project, comp_id, lid, cx);
+        let remap = on.time_remap.as_ref().expect("the remap is on");
+        let eval = ravel_core::eval::EvalContext::new(
+            0,
+            ravel_core::types::FrameRate::new(30, 1),
+            (16, 16),
+        );
+        for frame in [0.0, 100.5, 299.0] {
+            assert!(
+                (f64::from(remap.evaluate(frame, &eval)) - frame).abs() < 1e-3,
+                "frame {frame}"
+            );
+        }
+
+        toggle(false, &window, cx);
+        assert_eq!(layer(&project, comp_id, lid, cx).time_remap, None);
+
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert!(layer(&project, comp_id, lid, cx).time_remap.is_some());
+        project.update(cx, |project, cx| assert!(project.undo(cx)));
+        assert_eq!(layer(&project, comp_id, lid, cx).time_remap, None);
+    }
+
     /// A layer never offers itself or one of its descendants as a parent: the
     /// picker is what keeps a parenting cycle out of the document.
     #[gpui::test]

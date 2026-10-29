@@ -35,9 +35,9 @@
 | 節 | 内容 |
 |---|---|
 | Layer | 名前、ラベル |
-| Timing | 開始フレーム、表示区間（in / out） |
+| Timing | 開始フレーム、表示区間（in / out）、Time Remap スイッチ（オンで恒等 2 キーを入れる。カーブは Timeline の行で編集） |
 | Transform | parent（親レイヤーのドロップダウン。候補は自身と子孫を除く同一コンプのレイヤー）+ anchor / position / scale / rotation（各成分がアニメーション可能なチャネル） |
-| Compositing | 不透明度、ブレンドモード、調整レイヤーフラグ、solo / mute / lock |
+| Compositing | 不透明度、ブレンドモード、調整レイヤーフラグ、solo / mute / lock、Track Matte（マット元の選択と、マット元があるときだけ種類 4 種） |
 | Audio | ゲイン、フェード（音声を持つ殻のみ） |
 | Composition | 名前、解像度、フレームレート、尺、背景色 |
 | Node Info | ID、型、ラベル |
@@ -213,7 +213,6 @@
 
 | 項目 | 担当 |
 |---|---|
-| `time_remap` / `track_matte` の露出 | `SHELL-3` |
 | メディアアセットの入力色空間 | `CM-8` |
 | Vector のリンクトグル（均一スケール） | `LOW-APP-31` |
 | グラデーションのインラインエディタ | `PARAM-4` |

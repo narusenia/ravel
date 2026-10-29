@@ -238,9 +238,10 @@ struct Layer {
     locked: bool,
     // 親子
     parent: Option<LayerId>,       // Transform 継承（P/R/S のみ、opacity/blend は継承しない）
-    // v2 予約フィールド（評価されない。永続化互換のため存在）
+    // タイムリマップ / トラックマット（評価される。下の「レイヤーローカル時間」と
+    // 「トラックマット」を参照）
     time_remap: Option<AnimationChannel>,
-    track_matte: Option<TrackMatte>,
+    track_matte: Option<TrackMatte>,   // 対象レイヤー側が持つ。`layer` がマット元
 }
 ```
 
@@ -343,12 +344,50 @@ Network/Transform/Opacity/Merge）。再コンパイルで ID が安定し、Eva
 - `comp.merge.adjustment`: `mix(background, adjusted, opacity)`
   （premultiplied 空間で補間）。opacity はエフェクト強度
   （REQ-LAYER-010）。表示区間外は background バイパス。
+- `comp.matte.{alpha,alpha_inverted,luma,luma_inverted}`: トラックマット段
+  （Opacity と Merge の間）。入力 `input` のアルファに、`matte` 入力から
+  取ったマット値 `m` を掛ける（RGB は不変）。`m` は alpha = `a`、
+  luma = Rec.709 輝度（straight の RGB）× `a`、`*_inverted` は `1 - m`。
+  CPU 実装のみ（GPU 常駐フレームは読み戻す）。種別は type key に入るので、
+  種別の変更はブレンドモード同様コンパイルし直しになる。
 
 **レイヤーローカル時間**（REQ-LAYER-006）: 境界ノードは EvalContext を
 ローカル時間（`comp_frame - start_frame + in_frame`、秒ベース）に書き換えて
 内部評価に渡す（スコープ付き EvalContext）。表示区間 `[in, out)` の外では
-ネットワークを評価せず透明フレームを返す。タイムリマップは v2
-（`time_remap` 予約フィールド）。
+ネットワークを評価せず透明フレームを返す。
+
+**タイムリマップ**（`time_remap`、殻の `AnimationChannel`）: レイヤーの
+ローカル**出力**フレーム（連続値）を、ネットワークを評価する**ソース側の
+ローカルフレーム**（フレーム単位、連続値）へ写す。境界ノード
+（`comp.network`）が評価時刻だけを差し替えるので、コンパイル結果の
+トポロジは変わらない。写した値は `[in_frame, out_frame - 1]`（最初と
+最後の表示フレーム）にクランプされる。`frame` は `floor(写した値)`
+（キーフレームの添字）、`time` は小数部を保ったまま `写した値 / fps`
+なので、0.5 倍速のネットワーク内アニメーションは 0.5 フレーム位置の値を
+取る（フレームブレンドはしない）。**リマップするのはネットワークだけ**で、
+Transform / Opacity / Merge のキーはレイヤーの出力タイムライン上のまま
+（After Effects と同じ）。表示区間 `[in, out)` の判定もリマップ前の
+ローカルフレームで行う。`layer.ref` はリマップを見ない（整数フレームで
+参照先ネットワークを評価する）。音声はリマップしない（制限）。
+ノードレベルのタイムリマップ（`comp.time_remap`、FX-5）とは別物。
+UI は Properties の Timing にある Time Remap スイッチで、オンにすると
+`in_frame → in_frame` と `out_frame - 1 → out_frame - 1` の 2 キー（恒等）が
+入り、カーブは Timeline の行（グラフ表示）で編集する。
+
+**トラックマット**（`track_matte: Option<TrackMatte { layer, kind }>`）:
+**マットを掛けられる対象レイヤー**がフィールドを持ち、`layer` が**マット元**
+の `LayerId`（並べ替えで壊れない）。`kind` は `Alpha` / `AlphaInverted` /
+`Luma` / `LumaInverted` の 4 種。コンパイラは対象の Opacity 出力とマット元の Opacity 出力を
+`comp.matte.*` へ繋ぎ、その出力を対象の Merge の前景にする。マット元は
+Opacity までのチェーンを持つが**自分の Merge を作らない**（二重に見えない）。
+マット元の画は、そのレイヤー自身の殻（Transform / Opacity / 自身の
+`time_remap`）を通した同じコンポフレームの結果。次のいずれも**エラーに
+せず「マット無し」**として合成する（`Composition::track_matte_of` が唯一の
+判定）: マット元がコンポに無い / 対象自身 / `frame` 出力が無い /
+調整レイヤー（元も対象も）/ 合成に参加しない（mute・非 solo）/ 元が対象を
+マットにしている循環。マット元自身の `track_matte` は、元が合成されない
+ので無視される。種類の追加は列挙子の追加で、旧ファイルの読み込みに
+影響しない（フォーマットバージョンは上げない）。
 
 **Layer Ref**（`layer.ref`、REQ-LAYER-005）: パラメータは `layer`
 （同一コンポ内の参照先 LayerId の十進表記を持つ String。既定は `""` =
@@ -421,7 +460,8 @@ Layer Ref が他レイヤーのネットワークを解決）、スコープ付�
   Layer Ref の循環も同層で検出する（REQ-LAYER-005）。
 - **fps/解像度不一致**: 子 Comp / 異 fps メディアは秒ベースでマッピング（REQ-LAYER-006）。
 - **フレーム範囲**: `[in, out)` 半開区間。
-- **time remap**: v2 対応。`time_remap: Option<AnimationChannel>` 予約済み。
+- **time remap**: 評価される（上の「タイムリマップ」）。音声の再生は
+  リマップに繋がっていない。
 - **muted Layer と Parenting**: 親子付けは可視性と独立（REQ-LAYER-001）。
   muted / 非-solo の親は synthetic ノードごとコンパイルされない（プレパスで
   除外される）が、子の `comp.transform` が `world_matrix` で Document から

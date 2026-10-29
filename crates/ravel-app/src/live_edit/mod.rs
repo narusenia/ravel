@@ -198,14 +198,16 @@ async fn read_document(
         let p = project.read(cx);
         (p.document().clone(), p.project_path().map(PathBuf::from))
     });
-    let text = cx
-        .background_executor()
-        .spawn(async move { ravel_project::document_to_ron(&document) })
-        .await;
-    match text {
-        Ok(text) => protocol::read_response(id, path.as_deref(), &text),
-        Err(error) => protocol::read_failed(id, &error.to_string()),
-    }
+    // The JSON line is built there too: it is as large as the RON text.
+    let id = id.clone();
+    cx.background_executor()
+        .spawn(async move {
+            match ravel_project::document_to_ron(&document) {
+                Ok(text) => protocol::read_response(&id, path.as_deref(), &text),
+                Err(error) => protocol::read_failed(&id, &error.to_string()),
+            }
+        })
+        .await
 }
 
 #[cfg(unix)]

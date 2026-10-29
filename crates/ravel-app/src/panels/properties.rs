@@ -4343,10 +4343,12 @@ impl PropertiesGpuiPanel {
                                     .flat_map(|s| &s.fields)
                                     .find(|f| f.key() == field_key)
                                 else {
+                                    this.frame_override = None;
                                     return;
                                 };
                                 let mut components = snapshot.unwrap_or_else(|| components.clone());
                                 if component >= components.len() {
+                                    this.frame_override = None;
                                     return;
                                 }
                                 components[component] = val;

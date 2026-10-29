@@ -69,6 +69,7 @@ several plans here wait on its later units rather than on each other.
 | `geometry-fracture-plan.md` | Voronoi cell fracture in 2D and 3D, polygon triangulation, selectable algorithms | `3d-scene-plan.md` (unit 1, for the 3D variant) | REQ-CORE-010, REQ-MOGRAPH-001, REQ-3D-003 |
 | `viewer-scopes-plan.md` | Waveform monitor, vectorscope, histogram and parade: the counted linear-frame tap the pixel readout already needs, one bounded summary per published frame, and the four panels that draw it | — | REQ-UI-004, REQ-UI-005 |
 | `ai-assistant-mcp-plan.md` | Letting a model-agnostic agent work on a project over MCP: a read, render and new-file authoring server over `ravel-cli` first, then live edits in the running app as undoable document commits sharing REQ-PLUGIN-006's edit layer, with an in-app assistant panel deferred | — | REQ-PLUGIN-007, REQ-PLUGIN-006, REQ-INFRA-007 |
+| `expression-editor-assist-plan.md` | Completion, syntax highlighting and inline error underlines for the expression box: public error-tolerant token classes and vocabulary in `ravel-core`, then a code-editor-kind (`EditorState`) widget with a Ravel-drawn completion popup — **`EXED-1` is a spike that decides the route; the fallback needs a fresh user decision** | `done/expression-language-plan.md` (merged) | REQ-CORE-014, REQ-CORE-015, REQ-UI-002 |
 
 `panel-placement-plan.md` (#181) is **superseded** by
 `done/free-pane-docking-plan.md`: the view-toggle problem is solved by

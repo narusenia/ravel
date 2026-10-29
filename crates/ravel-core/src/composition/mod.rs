@@ -91,9 +91,10 @@ pub enum BlendMode {
 ///
 /// A source that some composited layer uses as a matte does not composite
 /// itself. A matte that cannot work — the source is missing, is the layer
-/// itself, produces no frame, is an adjustment layer, is not composited
-/// (muted / un-soloed), or names this layer as its own matte (a cycle) — is
-/// evaluated as **no matte**, never as an error. See
+/// itself, produces no frame, is an adjustment layer, or has a matte of its
+/// own (which rules out cycles and chains) — is evaluated as **no matte**,
+/// never as an error. The source's mute / solo state does not matter: a
+/// hidden layer still works as a matte. See
 /// [`Composition::track_matte_of`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackMatte {
@@ -789,10 +790,13 @@ impl Composition {
             && source.has_frame_output()
             && !layer.adjustment
             && !source.adjustment
+            // The target must composite; the source need not (a hidden layer
+            // still works as a matte, as in After Effects).
             && self.composites(layer)
-            && self.composites(source)
-            // A↔B: neither is used as the other's matte.
-            && source.track_matte.is_none_or(|back| back.layer != layer.id);
+            // A layer with a matte of its own cannot be a source. One rule
+            // removes every cycle (A↔B, A→B→C→A) and every chain (A→B→C:
+            // A's matte is unusable, B composites normally).
+            && source.track_matte.is_none();
         usable.then_some((source, matte.kind))
     }
 
@@ -808,15 +812,13 @@ impl Composition {
 
     /// Whether choosing `source` as `layer`'s matte would work, i.e. whether
     /// a picker should list it: another layer of this composition that
-    /// produces a frame, is not an adjustment layer, and is not already
-    /// matted by `layer` (which would form a cycle).
+    /// produces a frame, is not an adjustment layer, and has no matte of its
+    /// own (the rule [`track_matte_of`](Self::track_matte_of) applies).
     pub fn can_be_matte_of(&self, layer: LayerId, source: LayerId) -> bool {
         source != layer
-            && self.get_layer(source).is_some_and(|s| {
-                s.has_frame_output()
-                    && !s.adjustment
-                    && s.track_matte.is_none_or(|back| back.layer != layer)
-            })
+            && self
+                .get_layer(source)
+                .is_some_and(|s| s.has_frame_output() && !s.adjustment && s.track_matte.is_none())
     }
 
     /// The Timeline row number of the layer with `id`, or `None` when the

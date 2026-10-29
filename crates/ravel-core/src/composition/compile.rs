@@ -244,10 +244,16 @@ fn make_merge_node(comp_id: CompId, layer: &Layer) -> Node {
 /// The rule itself lives on [`Composition::composites`], which is what the
 /// Viewer's hit test reads too: what composites and what can be picked off the
 /// screen have to be the same set.
-fn active_layers(comp: &Composition) -> Vec<&Layer> {
+///
+/// A layer that serves as a track matte is kept even when muted or un-soloed:
+/// its frame still feeds the matte stage, it just gets no Merge.
+fn active_layers<'a>(
+    comp: &'a Composition,
+    matte_sources: &std::collections::HashSet<LayerId>,
+) -> Vec<&'a Layer> {
     comp.layers
         .iter()
-        .filter(|layer| comp.composites(layer))
+        .filter(|layer| comp.composites(layer) || matte_sources.contains(&layer.id))
         .collect()
 }
 
@@ -265,7 +271,8 @@ pub fn compile_composition(
     comp: &Composition,
     graph: Graph,
 ) -> Result<CompilationResult, CompileError> {
-    let active = active_layers(comp);
+    let matte_sources = comp.matte_sources();
+    let active = active_layers(comp, &matte_sources);
 
     let mut g = graph;
     let background = make_background_node(comp.id);
@@ -273,7 +280,6 @@ pub fn compile_composition(
     let mut synthetic_nodes = vec![background_id];
     g = g.add_node(background)?;
     let mut prev_merge_id = background_id;
-    let matte_sources = comp.matte_sources();
     let mut matte_edges: Vec<(NodeId, NodeId)> = Vec::new();
 
     // Process layers bottom-to-top (index 0 = bottom).
@@ -840,8 +846,6 @@ mod tests {
     fn a_track_matte_that_cannot_work_compiles_as_no_matte() {
         let mut adjustment = frame_layer(2);
         adjustment.adjustment = true;
-        let mut muted = frame_layer(2);
-        muted.muted = true;
         let cases: Vec<(&str, Composition)> = vec![
             (
                 "missing source",
@@ -869,12 +873,6 @@ mod tests {
                     .add_layer(matted(frame_layer(1), 2, TrackMatteKind::Alpha))
                     .add_layer(adjustment),
             ),
-            (
-                "muted source",
-                test_comp()
-                    .add_layer(matted(frame_layer(1), 2, TrackMatteKind::Alpha))
-                    .add_layer(muted),
-            ),
         ];
         for (name, comp) in cases {
             let result =
@@ -891,6 +889,56 @@ mod tests {
                 - usize::from(name == "no frame output");
             assert_eq!(merge_count(&result), expected, "{name}");
         }
+    }
+
+    #[test]
+    fn a_muted_source_still_mattes_without_merging() {
+        let mut muted = frame_layer(2);
+        muted.muted = true;
+        let comp = test_comp()
+            .add_layer(matted(frame_layer(1), 2, TrackMatteKind::Alpha))
+            .add_layer(muted);
+        let result = compile_composition(&comp, Graph::new()).unwrap();
+        let matte = node_of(1, NodeRole::Matte);
+        assert!(result.graph.node(matte).is_some());
+        assert!(result.graph.node(node_of(2, NodeRole::Network)).is_some());
+        assert!(
+            result
+                .graph
+                .edges()
+                .any(|e| e.source == node_of(2, NodeRole::Opacity)
+                    && e.target == matte
+                    && e.target_port == InputPortIndex(1))
+        );
+        assert!(result.graph.node(node_of(2, NodeRole::Merge)).is_none());
+        assert_eq!(merge_count(&result), 1);
+        assert!(result.graph.topological_sort().is_ok());
+    }
+
+    #[test]
+    fn a_three_cycle_and_a_chain_never_swallow_the_composite() {
+        // A→B→C→A: nobody can be a source, everyone composites.
+        let cycle = test_comp()
+            .add_layer(matted(frame_layer(1), 2, TrackMatteKind::Alpha))
+            .add_layer(matted(frame_layer(2), 3, TrackMatteKind::Alpha))
+            .add_layer(matted(frame_layer(3), 1, TrackMatteKind::Alpha));
+        let result = compile_composition(&cycle, Graph::new()).unwrap();
+        assert_eq!(merge_count(&result), 3);
+        assert!(cycle.matte_sources().is_empty());
+
+        // A→B→C: B has a matte so A's is unusable; B→C works, C is the source.
+        let chain = test_comp()
+            .add_layer(matted(frame_layer(1), 2, TrackMatteKind::Alpha))
+            .add_layer(matted(frame_layer(2), 3, TrackMatteKind::Alpha))
+            .add_layer(frame_layer(3));
+        let result = compile_composition(&chain, Graph::new()).unwrap();
+        assert!(result.graph.node(node_of(1, NodeRole::Matte)).is_none());
+        assert!(result.graph.node(node_of(2, NodeRole::Matte)).is_some());
+        assert!(result.graph.node(node_of(1, NodeRole::Merge)).is_some());
+        assert!(result.graph.node(node_of(2, NodeRole::Merge)).is_some());
+        assert!(result.graph.node(node_of(3, NodeRole::Merge)).is_none());
+        assert!(!chain.can_be_matte_of(LayerId::new(1), LayerId::new(2)));
+        assert!(chain.can_be_matte_of(LayerId::new(1), LayerId::new(3)));
     }
 
     #[test]

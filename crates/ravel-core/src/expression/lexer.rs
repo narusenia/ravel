@@ -144,73 +144,13 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Token>, ExpressionError> {
     let mut position = 0usize;
 
     while position < bytes.len() {
-        let start = position;
-        let byte = bytes[position];
-
-        if byte.is_ascii_whitespace() {
+        if bytes[position].is_ascii_whitespace() {
             position += 1;
             continue;
         }
-
-        let kind = if byte.is_ascii_digit()
-            || (byte == b'.' && bytes.get(position + 1).is_some_and(u8::is_ascii_digit))
-        {
-            let (value, end) = lex_number(source, position)?;
-            position = end;
-            TokenKind::Number(value)
-        } else if byte == b'_' || byte.is_ascii_alphabetic() {
-            let end = ident_end(bytes, position);
-            let name = SmolStr::new(&source[position..end]);
-            position = end;
-            TokenKind::Ident(name)
-        } else {
-            let (kind, width) = match byte {
-                b'@' => (TokenKind::At, 1),
-                b'.' => (TokenKind::Dot, 1),
-                b',' => (TokenKind::Comma, 1),
-                b'(' => (TokenKind::LParen, 1),
-                b')' => (TokenKind::RParen, 1),
-                b'?' => (TokenKind::Question, 1),
-                b':' => (TokenKind::Colon, 1),
-                b'+' => (TokenKind::Plus, 1),
-                b'-' => (TokenKind::Minus, 1),
-                b'*' => (TokenKind::Star, 1),
-                b'/' => (TokenKind::Slash, 1),
-                b'%' => (TokenKind::Percent, 1),
-                b'<' if bytes.get(position + 1) == Some(&b'=') => (TokenKind::LessEqual, 2),
-                b'<' => (TokenKind::Less, 1),
-                b'>' if bytes.get(position + 1) == Some(&b'=') => (TokenKind::GreaterEqual, 2),
-                b'>' => (TokenKind::Greater, 1),
-                b'=' if bytes.get(position + 1) == Some(&b'=') => (TokenKind::EqualEqual, 2),
-                // `=` is one of the symbols the surface syntax deliberately
-                // leaves free for a later grammar (see the compatibility rule
-                // in docs/specifications/expression-language.md). It gets its
-                // own message because writing it is nearly always a typo for
-                // `==` or a habit from a language that has statements.
-                b'=' => {
-                    return Err(ExpressionError::new(
-                        ExpressionErrorKind::Assignment,
-                        Span::new(position as u32, position as u32 + 1),
-                        source,
-                    ));
-                }
-                b'!' if bytes.get(position + 1) == Some(&b'=') => (TokenKind::BangEqual, 2),
-                b'!' => (TokenKind::Bang, 1),
-                b'&' if bytes.get(position + 1) == Some(&b'&') => (TokenKind::AmpAmp, 2),
-                b'|' if bytes.get(position + 1) == Some(&b'|') => (TokenKind::PipePipe, 2),
-                _ => {
-                    let ch = source[position..].chars().next().unwrap_or('\u{fffd}');
-                    let span = Span::new(position as u32, (position + ch.len_utf8()) as u32);
-                    return Err(ExpressionError::new(
-                        ExpressionErrorKind::UnexpectedCharacter(ch),
-                        span,
-                        source,
-                    ));
-                }
-            };
-            position += width;
-            kind
-        };
+        let start = position;
+        let (kind, end) = lex_token(source, position)?;
+        position = end;
 
         let span = Span::new(start as u32, position as u32);
         if tokens.len() >= MAX_TOKENS {
@@ -228,6 +168,77 @@ pub(crate) fn tokenize(source: &str) -> Result<Vec<Token>, ExpressionError> {
         span: Span::empty_at(bytes.len() as u32),
     });
     Ok(tokens)
+}
+
+/// Lex the one token starting at `position`, which must not be whitespace.
+///
+/// The scanning rules live here and nowhere else: [`tokenize`] stops at the
+/// first `Err`, while the editor's tolerant classification
+/// (`expression::highlight`) skips the error's span and carries on, so the two
+/// cannot disagree about what a token is.
+pub(crate) fn lex_token(
+    source: &str,
+    position: usize,
+) -> Result<(TokenKind, usize), ExpressionError> {
+    let bytes = source.as_bytes();
+    let byte = bytes[position];
+
+    if byte.is_ascii_digit()
+        || (byte == b'.' && bytes.get(position + 1).is_some_and(u8::is_ascii_digit))
+    {
+        let (value, end) = lex_number(source, position)?;
+        return Ok((TokenKind::Number(value), end));
+    }
+    if byte == b'_' || byte.is_ascii_alphabetic() {
+        let end = ident_end(bytes, position);
+        return Ok((TokenKind::Ident(SmolStr::new(&source[position..end])), end));
+    }
+
+    let (kind, width) = match byte {
+        b'@' => (TokenKind::At, 1),
+        b'.' => (TokenKind::Dot, 1),
+        b',' => (TokenKind::Comma, 1),
+        b'(' => (TokenKind::LParen, 1),
+        b')' => (TokenKind::RParen, 1),
+        b'?' => (TokenKind::Question, 1),
+        b':' => (TokenKind::Colon, 1),
+        b'+' => (TokenKind::Plus, 1),
+        b'-' => (TokenKind::Minus, 1),
+        b'*' => (TokenKind::Star, 1),
+        b'/' => (TokenKind::Slash, 1),
+        b'%' => (TokenKind::Percent, 1),
+        b'<' if bytes.get(position + 1) == Some(&b'=') => (TokenKind::LessEqual, 2),
+        b'<' => (TokenKind::Less, 1),
+        b'>' if bytes.get(position + 1) == Some(&b'=') => (TokenKind::GreaterEqual, 2),
+        b'>' => (TokenKind::Greater, 1),
+        b'=' if bytes.get(position + 1) == Some(&b'=') => (TokenKind::EqualEqual, 2),
+        // `=` is one of the symbols the surface syntax deliberately
+        // leaves free for a later grammar (see the compatibility rule
+        // in docs/specifications/expression-language.md). It gets its
+        // own message because writing it is nearly always a typo for
+        // `==` or a habit from a language that has statements.
+        b'=' => {
+            return Err(ExpressionError::new(
+                ExpressionErrorKind::Assignment,
+                Span::new(position as u32, position as u32 + 1),
+                source,
+            ));
+        }
+        b'!' if bytes.get(position + 1) == Some(&b'=') => (TokenKind::BangEqual, 2),
+        b'!' => (TokenKind::Bang, 1),
+        b'&' if bytes.get(position + 1) == Some(&b'&') => (TokenKind::AmpAmp, 2),
+        b'|' if bytes.get(position + 1) == Some(&b'|') => (TokenKind::PipePipe, 2),
+        _ => {
+            let ch = source[position..].chars().next().unwrap_or('\u{fffd}');
+            let span = Span::new(position as u32, (position + ch.len_utf8()) as u32);
+            return Err(ExpressionError::new(
+                ExpressionErrorKind::UnexpectedCharacter(ch),
+                span,
+                source,
+            ));
+        }
+    };
+    Ok((kind, position + width))
 }
 
 fn ident_end(bytes: &[u8], start: usize) -> usize {

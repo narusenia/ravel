@@ -277,7 +277,16 @@ impl ScrubInputState {
         }
     }
 
-    fn begin_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The open text editor, if any.
+    ///
+    /// `pub`, with [`begin_edit`](Self::begin_edit) and
+    /// [`commit_edit`](Self::commit_edit), because the panel tests in
+    /// `ravel-app` drive a text edit the way they drive a drag.
+    pub fn editor(&self) -> Option<&Entity<InputState>> {
+        self.editor.as_ref()
+    }
+
+    pub fn begin_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.editor.is_some() {
             return;
         }
@@ -316,7 +325,7 @@ impl ScrubInputState {
     /// needs edit-event tracking, and the difference is invisible: the field
     /// keeps showing `0.12` either way. Losing precision by clicking is the
     /// worse of the two, so this is the side to err on.
-    fn commit_edit(&mut self, cx: &mut Context<Self>) {
+    pub fn commit_edit(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.take() else {
             return;
         };

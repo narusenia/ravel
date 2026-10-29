@@ -2109,6 +2109,11 @@ pub struct PropertiesGpuiPanel {
     project: Option<Entity<ProjectState>>,
     registry: NodeRegistry,
     scrubs: Vec<(String, ScrubBinding)>,
+    /// Playback frame showing when a scrub's text editor last opened.
+    edit_frame: Option<u64>,
+    /// Frame the scrub commit being routed right now is keyed at (`None` =
+    /// the playhead). Set around `route_change` only.
+    frame_override: Option<u64>,
     strings: Vec<(String, StringBinding)>,
     selects: Vec<(String, SelectBinding)>,
     colors: Vec<(String, ColorBinding)>,
@@ -2418,6 +2423,8 @@ impl PropertiesGpuiPanel {
             project,
             registry,
             scrubs: Vec::new(),
+            edit_frame: None,
+            frame_override: None,
             strings: Vec::new(),
             selects: Vec::new(),
             colors: Vec::new(),
@@ -2938,7 +2945,10 @@ impl PropertiesGpuiPanel {
         else {
             return;
         };
-        let local_frame = layer_local_frame(&layer, Self::playback_frame(cx));
+        let frame = self
+            .frame_override
+            .unwrap_or_else(|| Self::playback_frame(cx));
+        let local_frame = layer_local_frame(&layer, frame);
 
         let hint = layer_field_hint(key, comp_id, &layer);
 
@@ -3631,9 +3641,37 @@ impl PropertiesGpuiPanel {
         }
         let node_ids = node_ids.to_vec();
         let key = key.to_string();
+        let frame = self.frame_override;
         self.with_node_editor(cx, move |editor, cx| {
-            editor.apply_property_change(&node_ids, &key, &value, commit, cx);
+            editor.apply_property_change_at(&node_ids, &key, &value, commit, frame, cx);
         });
+    }
+
+    /// Handles a scrub's events common to every field: records the frame when
+    /// its text editor opens, and returns `(value, commit)` for the rest. A
+    /// commit typed in the editor is keyed at that recorded frame (set into
+    /// `frame_override` for the `route_change` that follows); a drag commit
+    /// keeps the playhead.
+    fn scrub_event(
+        &mut self,
+        state: &Entity<ScrubInputState>,
+        event: &ScrubEvent,
+        cx: &App,
+    ) -> Option<(f32, bool)> {
+        self.frame_override = None;
+        match event {
+            ScrubEvent::Change(v) => Some((*v, false)),
+            ScrubEvent::Commit(v) => {
+                if state.read(cx).last_commit_was_edit() {
+                    self.frame_override = self.edit_frame.take();
+                }
+                Some((*v, true))
+            }
+            ScrubEvent::EditStarted => {
+                self.edit_frame = Some(Self::playback_frame(cx));
+                None
+            }
+        }
     }
 
     /// Commit the current text once on Enter or blur. Updating the retained
@@ -4211,11 +4249,9 @@ impl PropertiesGpuiPanel {
                     let entity = cx.new(|_| state);
                     let field_key = key.clone();
                     let ids = node_ids.clone();
-                    let sub = cx.subscribe(&entity, move |this, _state, event: &ScrubEvent, cx| {
-                        let (val, commit) = match event {
-                            ScrubEvent::Change(v) => (*v, false),
-                            ScrubEvent::Commit(v) => (*v, true),
-                            ScrubEvent::EditStarted => return,
+                    let sub = cx.subscribe(&entity, move |this, state, event: &ScrubEvent, cx| {
+                        let Some((val, commit)) = this.scrub_event(&state, event, cx) else {
+                            return;
                         };
                         let value = if integer {
                             PropertyValue::Int(val.round() as i32)
@@ -4223,6 +4259,7 @@ impl PropertiesGpuiPanel {
                             PropertyValue::Float(val)
                         };
                         this.route_change(&field_key, value, commit, &ids, cx);
+                        this.frame_override = None;
                     });
                     self.scrubs.push((key, ScrubBinding { state: entity, sub }));
                 }
@@ -4266,11 +4303,10 @@ impl PropertiesGpuiPanel {
                         let field_key = key.clone();
                         let ids = node_ids.clone();
                         let sub =
-                            cx.subscribe(&entity, move |this, _state, event: &ScrubEvent, cx| {
-                                let (val, commit) = match event {
-                                    ScrubEvent::Change(v) => (*v, false),
-                                    ScrubEvent::Commit(v) => (*v, true),
-                                    ScrubEvent::EditStarted => return,
+                            cx.subscribe(&entity, move |this, state, event: &ScrubEvent, cx| {
+                                let Some((val, commit)) = this.scrub_event(&state, event, cx)
+                                else {
+                                    return;
                                 };
                                 // The other components keep their current
                                 // section values.
@@ -4289,6 +4325,7 @@ impl PropertiesGpuiPanel {
                                 components[component] = val;
                                 let value = PropertyValue::Vector(components);
                                 this.route_change(&field_key, value, commit, &ids, cx);
+                                this.frame_override = None;
                             });
                         self.scrubs
                             .push((component_key, ScrubBinding { state: entity, sub }));
@@ -7317,6 +7354,138 @@ mod tests {
             .unwrap();
     }
 
+    /// Keys `position_x` on layer `lid` as a 0 -> 100 ramp over frames 0..100
+    /// and parks the playhead at `frame`.
+    fn ramp_position_x(
+        project: &Entity<ProjectState>,
+        comp_id: CompId,
+        lid: LayerId,
+        frame: u64,
+        cx: &mut TestAppContext,
+    ) {
+        project.update(cx, |project, cx| {
+            let doc = update_layer(project.document(), comp_id, lid, |l| {
+                let mut curve = ravel_core::animation::curve::KeyframeCurve::new();
+                let linear = ravel_core::animation::interpolation::Interpolation::Linear;
+                curve.insert(0, 0.0, linear);
+                curve.insert(100, 100.0, linear);
+                l.transform.position[0] = AnimationChannel::new(ChannelSource::Keyframes(curve));
+            })
+            .unwrap();
+            project.commit_document(doc, InvalidationHint::None, cx);
+        });
+        set_playback_frame(frame, cx);
+    }
+
+    fn set_playback_frame(frame: u64, cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::panels::PlaybackPosition {
+                frame,
+                fps: ravel_core::types::FrameRate::new(30, 1),
+            });
+        });
+        cx.run_until_parked();
+    }
+
+    fn layer_position_x_at(
+        project: &Entity<ProjectState>,
+        comp_id: CompId,
+        lid: LayerId,
+        frame: u64,
+        cx: &mut TestAppContext,
+    ) -> f32 {
+        let eval = ravel_core::eval::EvalContext::new(
+            frame,
+            ravel_core::types::FrameRate::new(30, 1),
+            (16, 16),
+        );
+        layer(project, comp_id, lid, cx).transform.position[0].evaluate(frame as f64, &eval)
+    }
+
+    fn position_x_scrub(
+        window: &gpui::WindowHandle<PropertiesGpuiPanel>,
+        cx: &mut TestAppContext,
+    ) -> Entity<ScrubInputState> {
+        window
+            .read_with(cx, |panel, _| {
+                panel
+                    .scrubs
+                    .iter()
+                    .find(|(key, _)| key == "position_x")
+                    .map(|(_, binding)| binding.state.clone())
+                    .expect("a scrub widget for position_x")
+            })
+            .unwrap()
+    }
+
+    /// A value typed while playback runs is keyed at the frame that showed
+    /// when the field opened, not at the frame playback has reached.
+    #[gpui::test]
+    fn a_typed_layer_value_keys_the_frame_the_edit_started_on(cx: &mut TestAppContext) {
+        let (window, project, comp_id, lid) = setup(cx);
+        ramp_position_x(&project, comp_id, lid, 10, cx);
+        window
+            .update(cx, |panel, window, cx| panel.rebuild_widgets(window, cx))
+            .unwrap();
+        let scrub = position_x_scrub(&window, cx);
+
+        window
+            .update(cx, |_panel, window, cx| {
+                scrub.update(cx, |state, cx| state.begin_edit(window, cx));
+            })
+            .unwrap();
+        set_playback_frame(50, cx);
+        window
+            .update(cx, |_panel, window, cx| {
+                scrub.update(cx, |state, cx| {
+                    let editor = state.editor().cloned().expect("editor open");
+                    editor.update(cx, |input, cx| input.set_value("777", window, cx));
+                    state.commit_edit(cx);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(layer_position_x_at(&project, comp_id, lid, 10, cx), 777.0);
+        assert_eq!(layer_position_x_at(&project, comp_id, lid, 100, cx), 100.0);
+        // A key at 50 would pull this off the 10 -> 100 segment's value of
+        // 777 -> 100 interpolated: it must still be that ramp.
+        let at_50 = layer_position_x_at(&project, comp_id, lid, 50, cx);
+        assert!(
+            (at_50 - (777.0 + (100.0 - 777.0) * 40.0 / 90.0)).abs() < 1e-2,
+            "no key was written at the frame playback moved to: {at_50}"
+        );
+    }
+
+    /// Clicking into a scrub field and leaving it during playback writes no
+    /// key and no undo step.
+    #[gpui::test]
+    fn leaving_a_layer_scrub_untouched_during_playback_records_nothing(cx: &mut TestAppContext) {
+        let (window, project, comp_id, lid) = setup(cx);
+        ramp_position_x(&project, comp_id, lid, 10, cx);
+        window
+            .update(cx, |panel, window, cx| panel.rebuild_widgets(window, cx))
+            .unwrap();
+        let scrub = position_x_scrub(&window, cx);
+        let before = layer(&project, comp_id, lid, cx);
+
+        window
+            .update(cx, |_panel, window, cx| {
+                scrub.update(cx, |state, cx| state.begin_edit(window, cx));
+            })
+            .unwrap();
+        set_playback_frame(50, cx);
+        scrub.update(cx, |state, cx| state.commit_edit(cx));
+        cx.run_until_parked();
+
+        assert_eq!(layer(&project, comp_id, lid, cx), before);
+        let shown = scrub.read_with(cx, |state, _| state.value());
+        assert!(
+            (shown - 50.0).abs() < 1e-3,
+            "the field shows the live value again once the editor closes: {shown}"
+        );
+    }
+
     /// Undoing a panel edit is reflected in the displayed value.
     #[gpui::test]
     fn undo_refreshes_the_displayed_value(cx: &mut TestAppContext) {
@@ -10027,6 +10196,67 @@ mod tests {
             "amount",
             ParameterValue::Channel(AnimationChannel::new(source)),
         )
+    }
+
+    /// A node parameter typed during playback is keyed at the frame that showed
+    /// when the field opened (the node editor resolves the layer-local frame at
+    /// commit time, so the panel has to hand it the earlier one).
+    #[gpui::test]
+    fn a_typed_node_value_keys_the_frame_the_edit_started_on(cx: &mut TestAppContext) {
+        let (window, _editor, project, path, node_id) =
+            setup_target_for_node(cx, node_with_amount(ChannelSource::Keyframes(ramp_curve())));
+        set_playback_frame(5, cx);
+        window
+            .update(cx, |panel, window, cx| panel.rebuild_widgets(window, cx))
+            .unwrap();
+        let scrub = window
+            .read_with(cx, |panel, _| {
+                panel
+                    .scrubs
+                    .iter()
+                    .find(|(key, _)| key == "amount")
+                    .map(|(_, binding)| binding.state.clone())
+                    .expect("a scrub widget for the amount row")
+            })
+            .unwrap();
+
+        window
+            .update(cx, |_panel, window, cx| {
+                scrub.update(cx, |state, cx| state.begin_edit(window, cx));
+            })
+            .unwrap();
+        set_playback_frame(8, cx);
+        window
+            .update(cx, |_panel, window, cx| {
+                scrub.update(cx, |state, cx| {
+                    let editor = state.editor().cloned().expect("editor open");
+                    editor.update(cx, |input, cx| input.set_value("777", window, cx));
+                    state.commit_edit(cx);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let ParameterValue::Channel(channel) = node_param(&project, &path, node_id, "amount", cx)
+        else {
+            panic!("amount stays a channel");
+        };
+        let at = |frame: u64| {
+            let eval = ravel_core::eval::EvalContext::new(
+                frame,
+                ravel_core::types::FrameRate::new(30, 1),
+                (16, 16),
+            );
+            channel.evaluate(frame as f64, &eval)
+        };
+        assert_eq!(at(5), 777.0, "keyed at the frame the edit started on");
+        assert_eq!(at(10), 10.0);
+        let expected_at_8 = 777.0 + (10.0 - 777.0) * 3.0 / 5.0;
+        assert!(
+            (at(8) - expected_at_8).abs() < 1e-2,
+            "no key at the frame playback moved to: {}",
+            at(8)
+        );
     }
 
     /// `Blend(Keyframes, Expression)` is a state the core supports (EXPR-2).

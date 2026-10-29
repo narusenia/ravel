@@ -583,6 +583,10 @@ pub struct TimelineGpuiPanel {
     /// so the whole gesture edits one frame
     /// ([`TimelineGpuiPanel::write_channel_value`]).
     active_scrub: Option<((CompId, TimelineChannelRef), u64)>,
+    /// The channel whose scrub text editor is open, and the layer-local frame
+    /// that was under the playhead when it opened: a value typed during
+    /// playback is keyed there, not wherever the playhead has moved to.
+    edit_scrub: Option<((CompId, TimelineChannelRef), u64)>,
     /// Whether the graph view paints time/value grid lines and value labels.
     show_curve_grid: bool,
     /// Visible value range of the graph editor, shared with the Properties
@@ -812,6 +816,7 @@ impl TimelineGpuiPanel {
             selected_keyframes: HashSet::new(),
             scrubs: HashMap::new(),
             active_scrub: None,
+            edit_scrub: None,
             show_curve_grid: true,
             curve_value_range: CurveValueRange::auto(),
             ruler_width: Rc::new(Cell::new(0.0)),
@@ -3224,12 +3229,26 @@ impl TimelineGpuiPanel {
         // recur across compositions, so a binding of the composition being
         // left must never be reused by the one being entered.
         let target = channel.clone();
-        let sub = cx.subscribe(&state, move |this, _state, event: &ScrubEvent, cx| {
+        let sub = cx.subscribe(&state, move |this, state, event: &ScrubEvent, cx| {
+            let key = (comp_id, target.clone());
             let (value, commit) = match event {
                 ScrubEvent::Change(value) => (*value, false),
                 ScrubEvent::Commit(value) => (*value, true),
+                ScrubEvent::EditStarted => {
+                    let frame = this.channel_local_frame(comp_id, &target, cx);
+                    this.edit_scrub = frame.map(|frame| (key, frame));
+                    return;
+                }
             };
-            this.write_channel_value(comp_id, &target, value, commit, cx);
+            let typed_at = if commit && state.read(cx).last_commit_was_edit() {
+                this.edit_scrub
+                    .take()
+                    .filter(|(open, _)| *open == key)
+                    .map(|(_, frame)| frame)
+            } else {
+                None
+            };
+            this.write_channel_value(comp_id, &target, value, commit, typed_at, cx);
         });
         self.scrubs.insert(
             (comp_id, channel.clone()),
@@ -3421,12 +3440,28 @@ impl TimelineGpuiPanel {
     /// mid-gesture keeps the gesture already accepted: its values are in the
     /// live document, so refusing the rest would strand them there with no
     /// undo step of their own.
+    /// The layer-local frame under the playhead for `channel`'s layer.
+    fn channel_local_frame(
+        &self,
+        comp_id: CompId,
+        channel: &TimelineChannelRef,
+        cx: &App,
+    ) -> Option<u64> {
+        let project = self.project.as_ref()?;
+        let document = project.read(cx).document();
+        let layer = document
+            .get_composition(comp_id)?
+            .get_layer(channel.layer)?;
+        Some(keyframes::layer_local_frame(layer, self.state.playhead()))
+    }
+
     fn write_channel_value(
         &mut self,
         comp_id: CompId,
         channel: &TimelineChannelRef,
         display: f32,
         commit: bool,
+        typed_at: Option<u64>,
         cx: &mut Context<Self>,
     ) {
         let Some(project) = self.project.clone() else {
@@ -3451,7 +3486,7 @@ impl TimelineGpuiPanel {
         if locked && started.is_none() {
             return;
         }
-        let local = started.unwrap_or(frame_now);
+        let local = started.or(typed_at).unwrap_or(frame_now);
         self.active_scrub = (!commit).then_some((key, local));
 
         let stored = display / channel_scrub_style(&channel.row).factor;
@@ -9566,6 +9601,85 @@ mod tests {
             Some(0.0),
             "the frame the playhead moved to is untouched"
         );
+    }
+
+    /// A value typed into a channel row's text field belongs to the frame that
+    /// was under the playhead when the field opened, not the one playback has
+    /// reached by the time Enter is pressed.
+    #[gpui::test]
+    fn a_typed_scrub_value_keys_the_frame_the_edit_started_on(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+        let channel = TimelineChannelRef {
+            layer: a,
+            row: row.clone(),
+            component: 0,
+        };
+        window
+            .update(cx, |panel, _window, cx| panel.scrub_playhead(10, cx))
+            .unwrap();
+        let scrub = channel_scrub_widget(&window, &channel, cx);
+        window
+            .update(cx, |_panel, window, cx| {
+                scrub.update(cx, |state, cx| state.begin_edit(window, cx));
+            })
+            .unwrap();
+        window
+            .update(cx, |panel, _window, cx| panel.scrub_playhead(0, cx))
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |_panel, window, cx| {
+                scrub.update(cx, |state, cx| {
+                    let editor = state.editor().cloned().expect("editor open");
+                    editor.update(cx, |input, cx| input.set_value("777", window, cx));
+                    state.commit_edit(cx);
+                });
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        let l = layer(&project, comp_id, a, cx);
+        assert_eq!(keyframes::channel_value_at(&l, &row, 0, 10), Some(777.0));
+        assert_eq!(
+            keyframes::channel_value_at(&l, &row, 0, 0),
+            Some(0.0),
+            "the frame the playhead moved to is untouched"
+        );
+    }
+
+    /// Clicking into the field and leaving it changes nothing, even though the
+    /// playhead moved in between (the phantom key it used to write is a
+    /// document change, so an unchanged layer also means no undo step).
+    #[gpui::test]
+    fn leaving_a_scrub_field_untouched_during_playback_records_nothing(cx: &mut TestAppContext) {
+        let (window, project, comp_id, a, _b) = setup(cx);
+        add_position_x_keys(&project, comp_id, a, cx);
+        let row = PropertyRowId::Shell(PropertyGroup::Position);
+        let channel = TimelineChannelRef {
+            layer: a,
+            row: row.clone(),
+            component: 0,
+        };
+        window
+            .update(cx, |panel, _window, cx| panel.scrub_playhead(10, cx))
+            .unwrap();
+        let scrub = channel_scrub_widget(&window, &channel, cx);
+        let before = layer(&project, comp_id, a, cx);
+        window
+            .update(cx, |_panel, window, cx| {
+                scrub.update(cx, |state, cx| state.begin_edit(window, cx));
+            })
+            .unwrap();
+        window
+            .update(cx, |panel, _window, cx| panel.scrub_playhead(0, cx))
+            .unwrap();
+        cx.run_until_parked();
+        scrub.update(cx, |state, cx| state.commit_edit(cx));
+        cx.run_until_parked();
+
+        assert_eq!(layer(&project, comp_id, a, cx), before);
     }
 
     /// `render` must build no widgets. Creating entities and subscriptions

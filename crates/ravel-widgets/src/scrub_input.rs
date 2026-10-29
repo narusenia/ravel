@@ -40,6 +40,10 @@ pub enum ScrubEvent {
     Change(f32),
     /// Final value on drag end. Record undo here.
     Commit(f32),
+    /// The text editor opened. A host that keys edits by time records the
+    /// frame on screen now: playback may move on before the user commits, and
+    /// the value belongs to the frame they saw when they started typing.
+    EditStarted,
 }
 
 /// Pure scrub math: value after dragging `dx` pixels from `start_value`.
@@ -99,6 +103,11 @@ pub struct ScrubInputState {
     /// Text editor shown after a click without drag movement.
     editor: Option<Entity<InputState>>,
     editor_sub: Option<Subscription>,
+    /// Latest `set_value` received while the editor was open; applied when it
+    /// closes without committing, so the field shows the current value again.
+    pending_value: Option<f32>,
+    /// The most recent `Commit` came from the text editor, not a drag.
+    committed_by_edit: bool,
 }
 
 impl ScrubInputState {
@@ -115,6 +124,8 @@ impl ScrubInputState {
             changed_in_drag: false,
             editor: None,
             editor_sub: None,
+            pending_value: None,
+            committed_by_edit: false,
         }
     }
 
@@ -148,8 +159,22 @@ impl ScrubInputState {
         self.dragging
     }
 
+    /// Whether the most recent `Commit` was typed in the text editor rather
+    /// than ended a drag. Read it from the `Commit` handler.
+    pub fn last_commit_was_edit(&self) -> bool {
+        self.committed_by_edit
+    }
+
+    /// Refresh the shown value from outside. While the text editor is open the
+    /// update is held back: moving `value` under it would make the commit
+    /// compare against a label the user never saw.
     pub fn set_value(&mut self, value: f32) {
-        self.value = self.quantize(self.clamp(value));
+        let value = self.quantize(self.clamp(value));
+        if self.editor.is_some() {
+            self.pending_value = Some(value);
+        } else {
+            self.value = value;
+        }
     }
 
     fn clamp(&self, value: f32) -> f32 {
@@ -170,6 +195,7 @@ impl ScrubInputState {
     /// in `ravel-app`.
     pub fn begin_drag(&mut self, x: f32) {
         self.dragging = true;
+        self.committed_by_edit = false;
         self.drag_start_x = x;
         self.drag_start_value = self.value;
         self.changed_in_drag = false;
@@ -251,7 +277,16 @@ impl ScrubInputState {
         }
     }
 
-    fn begin_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The open text editor, if any.
+    ///
+    /// `pub`, with [`begin_edit`](Self::begin_edit) and
+    /// [`commit_edit`](Self::commit_edit), because the panel tests in
+    /// `ravel-app` drive a text edit the way they drive a drag.
+    pub fn editor(&self) -> Option<&Entity<InputState>> {
+        self.editor.as_ref()
+    }
+
+    pub fn begin_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.editor.is_some() {
             return;
         }
@@ -272,6 +307,7 @@ impl ScrubInputState {
         );
         self.editor = Some(editor);
         self.editor_sub = Some(sub);
+        cx.emit(ScrubEvent::EditStarted);
         cx.notify();
     }
 
@@ -289,23 +325,28 @@ impl ScrubInputState {
     /// needs edit-event tracking, and the difference is invisible: the field
     /// keeps showing `0.12` either way. Losing precision by clicking is the
     /// worse of the two, so this is the side to err on.
-    fn commit_edit(&mut self, cx: &mut Context<Self>) {
+    pub fn commit_edit(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.take() else {
             return;
         };
         self.editor_sub = None;
 
         let text = editor.read(cx).value().to_string();
-        if text.trim() == self.label() {
-            cx.notify();
-            return;
-        }
-        if let Ok(parsed) = text.trim().parse::<f32>() {
+        let pending = self.pending_value.take();
+        if text.trim() != self.label()
+            && let Ok(parsed) = text.trim().parse::<f32>()
+        {
             let next = self.quantize(self.clamp(parsed));
             if (next - self.value).abs() > f32::EPSILON {
                 self.value = next;
+                self.committed_by_edit = true;
                 cx.emit(ScrubEvent::Commit(next));
+                cx.notify();
+                return;
             }
+        }
+        if let Some(pending) = pending {
+            self.value = pending;
         }
         cx.notify();
     }
@@ -505,6 +546,7 @@ mod tests {
             cx.subscribe(&state, move |_state, event: &ScrubEvent, _cx| match event {
                 ScrubEvent::Change(v) => changes.borrow_mut().push(*v),
                 ScrubEvent::Commit(v) => commits.borrow_mut().push(*v),
+                ScrubEvent::EditStarted => {}
             })
             .detach();
         });
@@ -616,6 +658,67 @@ mod tests {
                 assert_eq!(view.state.read(cx).value(), 0.123456);
             })
             .unwrap();
+    }
+
+    /// Opens the editor on a scrub showing 5, moves the underlying value to 9
+    /// the way a playback refresh does, types `text`, and commits. Returns the
+    /// commits recorded and the final value.
+    fn edit_while_value_moves(cx: &mut TestAppContext, text: Option<&str>) -> (Vec<f32>, f32) {
+        cx.update(gpui_base::init);
+        let commits: Rc<RefCell<Vec<f32>>> = Rc::default();
+        let log = commits.clone();
+        let window = cx.add_window(|window, cx| {
+            let state = cx.new(|_| ScrubInputState::new(5.0));
+            cx.subscribe(
+                &state,
+                move |_this: &mut ScrubTestView, _s, event: &ScrubEvent, _cx| {
+                    if let ScrubEvent::Commit(v) = event {
+                        log.borrow_mut().push(*v);
+                    }
+                },
+            )
+            .detach();
+            state.update(cx, |state, cx| state.begin_edit(window, cx));
+            ScrubTestView { state }
+        });
+        window
+            .update(cx, |view, window, cx| {
+                view.state.update(cx, |state, cx| {
+                    state.set_value(9.0);
+                    if let Some(text) = text {
+                        let editor = state.editor.clone().expect("editor open");
+                        editor.update(cx, |input, cx| input.set_value(text, window, cx));
+                    }
+                    state.commit_edit(cx);
+                });
+            })
+            .unwrap();
+        let value = window
+            .update(cx, |view, _w, cx| view.state.read(cx).value())
+            .unwrap();
+        let commits = commits.borrow().clone();
+        (commits, value)
+    }
+
+    /// A playback refresh must not turn "clicked in and out" into a commit of
+    /// the frame that moved underneath, and the field shows the live value
+    /// again once the editor closes.
+    #[gpui::test]
+    fn leaving_the_editor_untouched_commits_nothing_and_shows_the_live_value(
+        cx: &mut TestAppContext,
+    ) {
+        let (commits, value) = edit_while_value_moves(cx, None);
+        assert!(commits.is_empty(), "phantom commit: {commits:?}");
+        assert_eq!(value, 9.0);
+    }
+
+    /// Typing the value the refresh moved to is still an edit: the user asked
+    /// for 9 while 5 was showing.
+    #[gpui::test]
+    fn typing_the_value_the_refresh_moved_to_still_commits(cx: &mut TestAppContext) {
+        let (commits, value) = edit_while_value_moves(cx, Some("9"));
+        assert_eq!(commits, vec![9.0]);
+        assert_eq!(value, 9.0);
     }
 
     #[gpui::test]

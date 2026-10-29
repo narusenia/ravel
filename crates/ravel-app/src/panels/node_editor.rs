@@ -1749,16 +1749,23 @@ impl NodeEditorPanel {
     /// [`PlaybackPosition`](super::PlaybackPosition) (REQ-LAYER-006).
     /// `None` without a context or when the owning layer is gone.
     pub fn current_local_frame(&self, cx: &App) -> Option<u64> {
+        self.local_frame_at(None, cx)
+    }
+
+    /// [`Self::current_local_frame`] for an explicit playback `frame` (`None`
+    /// = the one under the playhead now).
+    fn local_frame_at(&self, frame: Option<u64>, cx: &App) -> Option<u64> {
         let context = self.context.as_ref()?;
         let project = self.project.as_ref()?;
         let document = project.read(cx).document();
         let layer = document
             .get_composition(context.comp)?
             .get_layer(context.layer)?;
-        let frame = cx
-            .try_global::<super::PlaybackPosition>()
-            .map(|position| position.frame)
-            .unwrap_or_default();
+        let frame = frame.unwrap_or_else(|| {
+            cx.try_global::<super::PlaybackPosition>()
+                .map(|position| position.frame)
+                .unwrap_or_default()
+        });
         Some(ravel_ui::keyframes::layer_local_frame(layer, frame))
     }
 
@@ -2040,12 +2047,28 @@ impl NodeEditorPanel {
     /// (`commit == false`, e.g. mid-scrub) update the document without
     /// recording undo; the gesture-ending `commit == true` call records one
     /// Document undo step for the whole edit.
+    #[cfg(test)]
     pub(crate) fn apply_property_change(
         &mut self,
         node_ids: &[NodeId],
         key: &str,
         value: &ravel_ui::properties::PropertyValue,
         commit: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_property_change_at(node_ids, key, value, commit, None, cx);
+    }
+
+    /// [`Self::apply_property_change`] keyed at playback `frame` instead of the
+    /// playhead (`None` = now): a value typed during playback belongs to the
+    /// frame that was showing when the user started typing.
+    pub(crate) fn apply_property_change_at(
+        &mut self,
+        node_ids: &[NodeId],
+        key: &str,
+        value: &ravel_ui::properties::PropertyValue,
+        commit: bool,
+        frame: Option<u64>,
         cx: &mut Context<Self>,
     ) {
         let (Some(project), Some(path)) = (self.project.clone(), self.context.clone()) else {
@@ -2060,7 +2083,7 @@ impl NodeEditorPanel {
                 value: value.clone(),
             })
             .collect();
-        let local_frame = self.current_local_frame(cx);
+        let local_frame = self.local_frame_at(frame, cx);
         // A node that lacks the key, or whose edit is refused, is skipped; the
         // other selected nodes still apply, all in one document.
         let refused = project.update(cx, |project, cx| {

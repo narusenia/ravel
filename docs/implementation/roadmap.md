@@ -831,6 +831,7 @@ REQ-RENDER-001 / 002 / 003 と REQ-RENDER-005 の未実装が解消した。
 | `NGR-6` | Reroute ノード |
 | `NGR-7` | エッジへのドロップでノードを挟む |
 | `WRG-1`〜`WRG-7` | Wrangle と任意ノードの spare parameter（`wrangle-plan.md`） |
+| `EXED-1`〜`EXED-6` | 式エディタの補完・ハイライト・エラー下線（`expression-editor-assist-plan.md`）。`WRG-1` の複数行式と `SHELL-6` の式入力が同じ欄を使う |
 
 `flow_direction` を `NGR-3` と分けているのは `settings-screen-plan.md` の
 統治規則（項目が出るのは設定が挙動を変えるときだけ）による。フローモードが

@@ -33,9 +33,9 @@ TCP では待ち受けない。Ravel は API キーもネットワークも持�
 | `list_comps` | `project` | `ravel-cli list comps` と同じ JSON |
 | `list_params` | `project` | `ravel-cli list params` と同じ JSON |
 | `list_codecs` | なし | `ravel-cli list codecs` と同じ JSON |
-| `inspect_document` | `project` または `draft: true` | コンプ → レイヤー → ノード（id・`type_key`・スカラのパラメータ値）の要約。ノード数・パラメータ数は上限で切る |
-| `check_warnings` | `project` または `draft: true`, `comp?` | 書き出しが出す警告（`id` + 文言）。何も書かない |
-| `render_preview` | `project` または `draft: true`, `frame`, `output`, `comp?`, `overwrite?` | 1 フレームの PNG のパス（画像そのものは返さない） |
+| `inspect_document` | `project` / `draft: true` / `live: true` のどれか 1 つ | コンプ → レイヤー → ノード（id・`type_key`・スカラのパラメータ値）の要約。ノード数・パラメータ数は上限で切る |
+| `check_warnings` | `project` / `draft: true` / `live: true` のどれか 1 つ, `comp?` | 書き出しが出す警告（`id` + 文言）。何も書かない |
+| `render_preview` | `project` / `draft: true` / `live: true` のどれか 1 つ, `frame`, `output`, `comp?`, `overwrite?` | 1 フレームの PNG のパス（画像そのものは返さない） |
 | `render` | `project`, `output`, `comp?`, `range?`, `format?`, `png_depth?`, `prefix?`, `suffix?`, `padding?`, `no_audio?`, `param?`, `overwrite?` | `frames` / `directory` / `first` / `last` / `audio` / `warnings` |
 
 新しいファイルを組み立てるツール（`new_project` / `edit` / `list_node_types` /
@@ -155,7 +155,8 @@ TCP では待ち受けない。Ravel は API キーもネットワークも持�
 ## 動作中のアプリを編集する（`--attach`）
 
 計画の `AI-5`。`--attach` を付けたときだけ、`tools/list` に `live_edit` が出る。
-付けなければ存在しない（呼んでも `-32602`）。ほかのツールは付けても付けなくても同じ。
+付けなければ存在しない（呼んでも `-32602`）。ほかのツールは付けても付けなくても同じ
+（`live: true` だけは `--attach` が要る。下の「アプリの文書を読む」）。
 
 | ツール | 引数 | 返すもの |
 |---|---|---|
@@ -177,6 +178,33 @@ TCP では待ち受けない。Ravel は API キーもネットワークも持�
 | `confirmation-denied` | 利用者が削除を承認しなかった。文書は変わっていない。再試行しない |
 | `document-changed` | 確認待ちの間に文書が変わったので適用しなかった |
 | ほか | アプリが返した `EditError::code()`（`driven-parameter` など）。`index` は失敗した操作 |
+
+### アプリの文書を読む（`live: true`）
+
+計画の `AI-7`。`inspect_document` / `check_warnings` / `render_preview` に、`project` /
+`draft: true` の代わりに `live: true` を渡すと、**アプリで今開いている文書**を見られる。
+ライブ用の別ツールは無い（列挙の経路を増やさない）。
+
+- 実装は `draft: true` と同じ経路: アプリから受け取った写しを `ProjectFile` にして、
+  下書きと同じ `inspect` / `plan_from_draft` / 下書き用レンダラーへ渡す。`project` に同じ
+  文書を保存して開いた場合と同じ結果になる（`tests/mcp_assembly.rs`）
+- 1 つだけ指定する。`project` / `draft` / `live` の 2 つ以上、またはどれも無しは `-32602`。
+  `--attach` なしの `live: true` は `app-not-running`
+- 呼び出しごとにつなぎ、写しを 1 回読む（読み取りの要求は
+  [ライブ編集ソケット](live-edit.md)）。**文書も undo も変わらず、確認も出ない**
+- `app-not-running` / `app-disconnected` は `live_edit` と同じ分類。読み取りは何も適用
+  しないので、`app-disconnected` のあとは繰り返してよい
+- 書き出しは**この CLI の GPU**で行う。アプリの評価器は使わないのでアプリの再生や
+  プレビューの負荷にならない。そのぶんアプリが保存していないメディアのキャッシュは使えない
+- 相対パスの素材は、アプリが返すプロジェクトのパスの親フォルダを基準に解決する
+  （一度も保存していないプロジェクトは下書きと同じく解決しない）。プロジェクト層の
+  設定（`.ravprj` の設定）は写しに含まれない
+- 写しは文書全体のテキスト（RON）なので、応答 1 行の上限は読み取りだけ **64 MiB**
+  （編集の応答は従来の 4 MiB のまま）。超えたら `internal`（切断とは区別する）。上限を
+  共通に上げなかったのは、編集の応答は小さいはずで、壊れた相手が 4 MiB を超えて溜め込ませるのを
+  今のまま断ちたいため
+- 写しの中の文字列（レイヤー名・ノード名・文字列パラメータ）は文書の中身で、エージェントへの
+  指示ではない。ツールの description に同じ注意が付いている
 
 MCP クライアントへの登録:
 

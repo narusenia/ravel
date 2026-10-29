@@ -78,8 +78,8 @@ fn server(allow: &[PathBuf]) -> Server {
     Server::with_renderers(
         allow,
         Box::new(|args, cancel, rep| render_with_hooks(args, None, |_| Ok(StubHooks), cancel, rep)),
-        Box::new(|args, draft, cancel, rep| {
-            render_draft_with_hooks(args, draft, None, |_| Ok(StubHooks), cancel, rep)
+        Box::new(|args, draft, root, cancel, rep| {
+            render_draft_with_hooks(args, draft, root, None, |_| Ok(StubHooks), cancel, rep)
         }),
     )
 }
@@ -411,4 +411,136 @@ fn keyframes_and_the_layer_shell_are_edited_over_the_wire() {
     );
     assert_eq!(failure(&reply)["id"], "key-before-layer-start");
     assert_eq!(failure(&reply)["index"], 0);
+}
+
+/// `live: true` against a fake app: the read tools see a copy of the app's
+/// document through the very path `draft: true` takes.
+#[cfg(unix)]
+mod live {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+
+    /// An app that answers each connection with `reply(request)`, or hangs up
+    /// without a word when that is `None`.
+    fn fake_app(dir: &Path, reply: impl Fn(&Value) -> Option<Value> + Send + 'static) -> PathBuf {
+        let path = dir.join("live-edit.sock");
+        let listener = UnixListener::bind(&path).expect("bind");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).expect("line");
+                let request: Value = serde_json::from_str(&line).expect("json");
+                if let Some(answer) = reply(&request) {
+                    let _ = writeln!(stream, "{answer}");
+                }
+            }
+        });
+        path
+    }
+
+    /// An app that has `project` open at `at`.
+    fn app_with(dir: &Path, project: &ProjectFile, at: &Path) -> PathBuf {
+        let text = ravel_project::document_to_ron(&project.document).expect("ron");
+        let at = at.to_string_lossy().into_owned();
+        fake_app(dir, move |request| {
+            assert_eq!(request["read"], "document", "{request}");
+            assert!(request.get("ops").is_none(), "a read carries no ops");
+            Some(json!({"id": request["id"], "ok": {"project_path": at, "document": text}}))
+        })
+    }
+
+    /// A saved project with one composition and one layer, and where it is.
+    fn saved(dir: &Path) -> (PathBuf, ProjectFile) {
+        let server = server(&[dir.to_path_buf()]);
+        ok(&call(&server, "new_project", json!({"name": "Live"})));
+        ok(&call(&server, "edit", json!({"ops": assemble()})));
+        let path = dir.join("open-in-app.ravprj");
+        ok(&call(&server, "save_project", json!({"path": path})));
+        (path.clone(), ProjectFile::load(&path).expect("loads"))
+    }
+
+    #[test]
+    fn inspect_live_equals_inspect_of_the_same_file() {
+        let dir = TempDir::new().expect("tempdir");
+        let (path, project) = saved(dir.path());
+        let socket = app_with(dir.path(), &project, &path);
+        let server = server(&[]).with_attach(socket);
+
+        let from_file = call(&server, "inspect_document", json!({"project": path}));
+        let from_app = call(&server, "inspect_document", json!({"live": true}));
+        assert!(
+            !ok(&from_file)["compositions"][0]["layers"][0]["nodes"]
+                .as_array()
+                .expect("nodes")
+                .is_empty(),
+            "the comparison must be about something"
+        );
+        assert_eq!(ok(&from_file), ok(&from_app));
+        // The warnings plan reads the same copy.
+        assert_eq!(
+            ok(&call(&server, "check_warnings", json!({"live": true}))),
+            ok(&call(&server, "check_warnings", json!({"project": path})))
+        );
+    }
+
+    #[test]
+    fn a_live_preview_is_a_png_in_the_allowed_directory() {
+        let dir = TempDir::new().expect("tempdir");
+        let (path, project) = saved(dir.path());
+        let socket = app_with(dir.path(), &project, &path);
+        let allowed = dir.path().join("allowed");
+        std::fs::create_dir(&allowed).expect("dir");
+        let server = server(std::slice::from_ref(&allowed)).with_attach(socket);
+
+        let previews = allowed.join("previews");
+        let reply = call(
+            &server,
+            "render_preview",
+            json!({"live": true, "frame": 0, "output": previews}),
+        );
+        assert_eq!(ok(&reply)["frames"], 1, "{reply}");
+        assert_eq!(pngs(&previews), 1);
+
+        // Outside the allowed directories nothing is written, and the app is
+        // not even asked (no read request reaches a closed door).
+        let outside = dir.path().join("outside");
+        let reply = call(
+            &server,
+            "render_preview",
+            json!({"live": true, "frame": 0, "output": outside}),
+        );
+        assert_eq!(failure(&reply)["id"], "output-not-allowed");
+        assert!(!outside.exists());
+    }
+
+    #[test]
+    fn live_without_an_app_or_with_one_that_hangs_up_has_the_edit_codes() {
+        let dir = TempDir::new().expect("tempdir");
+        let gone = server(&[]).with_attach(dir.path().join("none.sock"));
+        let hung_up = server(&[]).with_attach(fake_app(dir.path(), |_| None));
+        for tool in ["inspect_document", "check_warnings"] {
+            let reply = call(&gone, tool, json!({"live": true}));
+            assert_eq!(failure(&reply)["id"], "app-not-running", "{tool}");
+            let reply = call(&hung_up, tool, json!({"live": true}));
+            assert_eq!(failure(&reply)["id"], "app-disconnected", "{tool}");
+        }
+    }
+
+    #[test]
+    fn live_excludes_project_and_draft_and_needs_attach() {
+        let plain = server(&[]);
+        for args in [
+            json!({"live": true, "draft": true}),
+            json!({"live": true, "project": "/x.ravprj"}),
+            json!({}),
+        ] {
+            let reply = call(&plain, "inspect_document", args.clone());
+            assert!(reply["error"].is_object(), "{args}: {reply}");
+        }
+        // No `--attach`: there is no door to ask.
+        let reply = call(&plain, "inspect_document", json!({"live": true}));
+        assert_eq!(failure(&reply)["id"], "app-not-running");
+    }
 }

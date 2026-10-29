@@ -14,13 +14,17 @@
 //!   [`CliError::AppDisconnected`], the app may or may not have applied it, so
 //!   look at the document before repeating it.
 //!
+//! A read ([`live_read`]) is the same round trip with a different request and a
+//! larger response bound: the answer is the whole document.
+//!
 //! The wire format is in `crates/ravel-app/src/live_edit/protocol.rs`; this
 //! crate cannot depend on the app, so it speaks the same few JSON fields.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ravel_core::edit::EditOp;
+use ravel_project::ProjectFile;
 use serde_json::{Value, json};
 
 use crate::error::CliError;
@@ -28,6 +32,12 @@ use crate::error::CliError;
 /// The longest response line read, in bytes: a bound on what a misbehaving
 /// peer can make this process buffer.
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The bound for a read, whose answer is the whole document as text. A
+/// document of a few hundred layers is several MiB of RON, so it gets its own
+/// limit instead of raising the one every edit answer is held to. The request
+/// side keeps 4 MiB: a read request is a few bytes.
+const MAX_READ_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[cfg(unix)]
 fn connect(endpoint: &Path) -> std::io::Result<impl Read + Write> {
@@ -71,15 +81,74 @@ pub fn live_edit(endpoint: &Path, ops: &[EditOp]) -> Result<Value, CliError> {
     exchange(stream, ops)
 }
 
-/// The request / response round trip on an open connection.
-fn exchange(mut stream: impl Read + Write, ops: &[EditOp]) -> Result<Value, CliError> {
-    let request = json!({ "id": 1, "ops": ops });
+/// A copy of the document open in the app, and where its project lives.
+pub struct LiveDocument {
+    pub project: ProjectFile,
+    /// The directory relative asset paths resolve against; `None` for a
+    /// project that was never saved.
+    pub root: Option<PathBuf>,
+}
+
+/// Ask the app listening on `endpoint` for a copy of its open document. The
+/// app changes nothing and records no undo step.
+pub fn live_read(endpoint: &Path) -> Result<LiveDocument, CliError> {
+    let stream = connect(endpoint).map_err(|error| {
+        tracing::debug!(%error, endpoint = %endpoint.display(), "live read connect failed");
+        CliError::AppNotRunning
+    })?;
+    read_exchange(stream)
+}
+
+fn read_exchange(stream: impl Read + Write) -> Result<LiveDocument, CliError> {
+    let ok = round_trip(
+        stream,
+        &json!({ "id": 1, "read": "document" }),
+        MAX_READ_RESPONSE_BYTES,
+    )?;
+    let text = ok["document"]
+        .as_str()
+        .ok_or_else(|| CliError::Internal("the app's read reply has no `document`".into()))?;
+    let document = ravel_project::document_from_ron(text)
+        .map_err(|e| CliError::Internal(format!("the app's document did not parse: {e}")))?;
+    let path = ok["project_path"].as_str().map(PathBuf::from);
+    let root = path.as_deref().and_then(ravel_project::project_root_of);
+    // What a load does to a file: references measured against the project.
+    let document = document.with_resolved_assets(root.as_deref(), &Default::default());
+    Ok(LiveDocument {
+        project: ProjectFile::from_document(
+            "live",
+            ravel_project::timestamp::rfc3339_now(),
+            document,
+        ),
+        root,
+    })
+}
+
+/// The request / response round trip of an edit on an open connection.
+fn exchange(stream: impl Read + Write, ops: &[EditOp]) -> Result<Value, CliError> {
+    round_trip(stream, &json!({ "id": 1, "ops": ops }), MAX_RESPONSE_BYTES)
+}
+
+/// One request line out, one response line in: the `ok` payload, or the
+/// app's refusal.
+fn round_trip(
+    mut stream: impl Read + Write,
+    request: &Value,
+    max_response: u64,
+) -> Result<Value, CliError> {
     writeln!(stream, "{request}")
         .and_then(|()| stream.flush())
         .map_err(|_| CliError::AppDisconnected)?;
     let mut line = String::new();
-    match BufReader::new(stream.take(MAX_RESPONSE_BYTES)).read_line(&mut line) {
+    match BufReader::new(stream.take(max_response)).read_line(&mut line) {
         Ok(n) if n > 0 && line.ends_with('\n') => {}
+        // The bound was hit before the end of the line: not a disconnect.
+        Ok(n) if n as u64 >= max_response => {
+            return Err(CliError::Internal(format!(
+                "the app's reply is longer than {} MiB",
+                max_response / (1024 * 1024)
+            )));
+        }
         _ => return Err(CliError::AppDisconnected),
     }
     let mut response: Value = serde_json::from_str(&line)
@@ -172,6 +241,37 @@ mod tests {
             exchange(std::io::Cursor::new(b"{\"id\":1".to_vec()), &[]),
             Err(CliError::AppDisconnected)
         ));
+    }
+
+    /// What the app said, and a sink for what was sent.
+    struct Duplex(std::io::Cursor<Vec<u8>>);
+    impl Read for Duplex {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+    impl Write for Duplex {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A document answer past the edit limit still arrives, and the same line
+    /// is refused for an edit, as what it is rather than as a disconnect.
+    #[test]
+    fn a_read_answer_may_exceed_the_edit_limit() {
+        let big = "x".repeat(5 * 1024 * 1024);
+        let line = format!("{}\n", json!({"id": 1, "ok": {"document": big}}));
+        let answer = || Duplex(std::io::Cursor::new(line.clone().into_bytes()));
+        let ok = round_trip(answer(), &json!({}), MAX_READ_RESPONSE_BYTES).unwrap();
+        assert_eq!(ok["document"].as_str().unwrap().len(), big.len());
+        match round_trip(answer(), &json!({}), MAX_RESPONSE_BYTES) {
+            Err(CliError::Internal(message)) => assert!(message.contains("4 MiB"), "{message}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

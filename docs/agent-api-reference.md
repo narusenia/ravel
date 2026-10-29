@@ -4190,14 +4190,14 @@ mcp::ensure_allowed(&Path, &[PathBuf]) -> Result<(), CliError>
     // canonical-prefix check; CliError::OutputNotAllowed = "output-not-allowed"
     // (EXIT_USAGE). Listings reuse listing::*_json — no second enumeration.
 // AI-3: assembling a new file (the draft; docs/dev/mcp-cli.md, "組み立て")
-mcp::Server::with_renderers(&[PathBuf], Box<Renderer>, Box<DraftRenderer>)
+mcp::Server::with_renderers(&[PathBuf], Box<Renderer>, Box<DraftRenderer>)   // DraftRenderer gets the project root (None for a draft)
     // tools new_project / edit (ravel_core::edit::apply_batch) / list_node_types /
     // describe_node / save_project; inspect_document / check_warnings /
     // render_preview take `draft: true`. Errors: CliError::{NoDraft, DraftExists,
     // Edit{index, source}, UnknownNodeType, ProjectExists, BadProjectPath,
     // SaveFailed} = "no-draft", "draft-exists", <EditError::code()>,
     // "unknown-node-type", "project-exists", "bad-project-path", "save-failed"
-plan_from_draft(&RenderArgs, &ProjectFile) / render_draft(..) /
+plan_from_draft(&RenderArgs, &ProjectFile, Option<&Path> root) / render_draft(..) /
 render_draft_with_hooks(..)   // the in-memory twins of plan_from_args / render /
                               // render_with_hooks; one plan, one writer
 
@@ -4222,6 +4222,13 @@ live::live_edit(&Path, &[EditOp]) -> Result<Value, CliError>  // one connection 
     // CliError::{AppNotRunning, AppDisconnected, LiveEdit{code, index, message}}
     // = "app-not-running", "app-disconnected", "live-edit-refused" (the tool
     // result's `id` is the app's own `code`)
+// AI-7: reading the live document
+live::live_read(&Path) -> Result<LiveDocument{project: ProjectFile, root: Option<PathBuf>}, CliError>
+    // request {"id", "read": "document"}; answer limit 64 MiB (edits: 4 MiB).
+    // The `live: true` of inspect_document / check_warnings / render_preview
+    // takes the draft path with this copy (mcp::Server::in_memory)
+live_edit::protocol::{Action::{Edit, ReadDocument}, Request::ops(), read_response, read_failed}
+ravel_project::{document_to_ron, document_from_ron}   // the wire form of a read
 
 // EXPORT-7: the interactive mode, a layer over `listing` + `plan_render`
 interactive::gate(stdin_is_terminal: bool) -> Result<(), CliError>

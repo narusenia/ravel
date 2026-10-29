@@ -24,8 +24,8 @@ use crate::graph::Graph;
 use crate::id::{CompId, EdgeId, LayerId, NodeId};
 use crate::registry::NodeRegistry;
 use animation::{
-    ChannelWrite, LayerEdit, apply_layer_edit, build_curve, param_clamp, shell_clamp,
-    write_param_channel, write_shell_channel,
+    ChannelWrite, LayerEdit, apply_layer_edit, build_curve, compiled_expression, param_clamp,
+    shell_clamp, write_param_channel, write_shell_channel,
 };
 pub use document::{CompositionSettings, NetworkPath};
 use document::{
@@ -215,13 +215,23 @@ fn edit_layer<T>(
     Ok(out)
 }
 
-/// Write one channel of `target`: the keys of `SetKeyframes`, or the constant
-/// of `ClearAnimation`.
+/// What [`write_channel`] puts on a channel.
+enum ChannelInput<'a> {
+    /// `SetKeyframes`
+    Keys(&'a [KeyInput]),
+    /// `ClearAnimation`
+    Constant(f32),
+    /// `SetExpression`
+    Expression(&'a str),
+}
+
+/// Write one channel of `target`: the keys of `SetKeyframes`, the constant of
+/// `ClearAnimation` or the expression of `SetExpression`.
 fn write_channel(
     doc: &mut Document,
     target: &ChannelTarget,
     component: u32,
-    write: Result<&[KeyInput], f32>,
+    input: ChannelInput<'_>,
     cx: &EditContext,
     aliases: &Aliases,
 ) -> Result<(), EditError> {
@@ -231,14 +241,17 @@ fn write_channel(
             let node = resolve_node(aliases, node)?;
             let layer = layer_of(doc, path.comp, path.layer)?;
             edit_network(doc, path, |graph| {
-                let write = match write {
-                    Ok(keys) => ChannelWrite::Keys(build_curve(
+                let write = match &input {
+                    ChannelInput::Keys(keys) => ChannelWrite::Keys(build_curve(
                         keys,
                         &layer,
                         param_clamp(&graph, node, key, cx)?,
                     )?),
-                    Err(value) => {
-                        ChannelWrite::Constant(param_clamp(&graph, node, key, cx)?(value))
+                    ChannelInput::Constant(value) => {
+                        ChannelWrite::Constant(param_clamp(&graph, node, key, cx)?(*value))
+                    }
+                    ChannelInput::Expression(source) => {
+                        ChannelWrite::Expression(compiled_expression(source)?)
                     }
                 };
                 Ok((write_param_channel(graph, node, key, component, write)?, ()))
@@ -253,9 +266,14 @@ fn write_channel(
             let layer = resolve_layer(aliases, layer)?;
             edit_layer(doc, comp, layer, |layer| {
                 let clamp = shell_clamp(*property);
-                let write = match write {
-                    Ok(keys) => ChannelWrite::Keys(build_curve(keys, layer, clamp)?),
-                    Err(value) => ChannelWrite::Constant(clamp(value)),
+                let write = match &input {
+                    ChannelInput::Keys(keys) => {
+                        ChannelWrite::Keys(build_curve(keys, layer, clamp)?)
+                    }
+                    ChannelInput::Constant(value) => ChannelWrite::Constant(clamp(*value)),
+                    ChannelInput::Expression(source) => {
+                        ChannelWrite::Expression(compiled_expression(source)?)
+                    }
                 };
                 write_shell_channel(layer, *property, component, write)
             })
@@ -415,7 +433,14 @@ fn step(
             component,
             keys,
         } => {
-            write_channel(doc, target, *component, Ok(keys), cx, aliases)?;
+            write_channel(
+                doc,
+                target,
+                *component,
+                ChannelInput::Keys(keys),
+                cx,
+                aliases,
+            )?;
             Ok(Vec::new())
         }
         EditOp::ClearAnimation {
@@ -428,7 +453,23 @@ fn step(
                     "the value is not a finite number".into(),
                 ));
             }
-            write_channel(doc, target, *component, Err(*value), cx, aliases)?;
+            write_channel(
+                doc,
+                target,
+                *component,
+                ChannelInput::Constant(*value),
+                cx,
+                aliases,
+            )?;
+            Ok(Vec::new())
+        }
+        EditOp::SetExpression {
+            target,
+            component,
+            expression,
+        } => {
+            let input = ChannelInput::Expression(expression);
+            write_channel(doc, target, *component, input, cx, aliases)?;
             Ok(Vec::new())
         }
         EditOp::SetLayer {

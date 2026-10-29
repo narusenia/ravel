@@ -265,6 +265,21 @@ pub enum EditOp {
         component: u32,
         value: f32,
     },
+    /// Replace one channel of `target` by the expression `expression`
+    /// (`rotation = frame * 2`, see `docs/dev/mcp-cli.md` for the vocabulary).
+    /// The source goes through the compile the evaluator uses and is refused
+    /// with `expression-error` (line and column in the message) if it does not
+    /// compile, unlike the Properties panel, which stores such a source. A
+    /// constant, keys or an expression may be replaced; a channel driven by a
+    /// node output or a blend is refused (`driven-parameter`). Remove one with
+    /// `ClearAnimation`.
+    SetExpression {
+        #[serde(flatten)]
+        target: ChannelTarget,
+        #[serde(default)]
+        component: u32,
+        expression: String,
+    },
     /// Set shell properties of a layer; absent fields are left alone. A
     /// transform or opacity constant is refused on an animated channel
     /// (`animated-parameter`) or a driven one (`driven-parameter`);
@@ -320,6 +335,7 @@ impl EditOp {
             | Self::SetParameter { .. }
             | Self::SetKeyframes { .. }
             | Self::ClearAnimation { .. }
+            | Self::SetExpression { .. }
             | Self::SetLayer { .. } => false,
             Self::RemoveComposition { .. }
             | Self::RemoveLayer { .. }

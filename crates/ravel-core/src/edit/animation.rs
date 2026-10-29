@@ -11,7 +11,7 @@
 
 use super::param::channel_is_driven;
 use super::{EditContext, EditError, KeyInput, KeyInterpolation};
-use crate::animation::channel::{AnimationChannel, ChannelSource};
+use crate::animation::channel::{AnimationChannel, ChannelSource, ParameterExpression};
 use crate::animation::curve::{KeyframeCurve, set_curve_interpolation};
 use crate::animation::interpolation::Interpolation;
 use crate::composition::{BlendMode, Layer, ShellProperty};
@@ -65,8 +65,9 @@ pub(super) fn build_curve(
     Ok(curve)
 }
 
-/// Whether `clear_animation` may discard the source: keys and expressions
-/// are the caller's to remove, a node output or a blend is wired elsewhere.
+/// Whether `clear_animation` and `set_expression` may discard the source: keys
+/// and expressions are the caller's to remove or replace, a node output or a
+/// blend is wired elsewhere.
 fn removable(source: &ChannelSource) -> bool {
     matches!(
         source,
@@ -74,10 +75,38 @@ fn removable(source: &ChannelSource) -> bool {
     )
 }
 
+/// The expression `source` as the evaluator will run it, or the refusal.
+///
+/// [`ParameterExpression::new`] is the compile the Properties panel and the
+/// evaluator use (same scope, same options), so an expression accepted here is
+/// one that evaluates; the panel stores one that fails to compile, this path
+/// does not.
+pub(super) fn compiled_expression(source: &str) -> Result<ParameterExpression, EditError> {
+    if source.trim().is_empty() {
+        return Err(EditError::InvalidExpression {
+            line: 1,
+            column: 1,
+            message: "the expression is empty (use clear_animation to remove one)".into(),
+        });
+    }
+    let expression = ParameterExpression::new(source);
+    match expression.error() {
+        Some(error) => Err(EditError::InvalidExpression {
+            line: error.line,
+            column: error.column,
+            message: error.kind.to_string(),
+        }),
+        None => Ok(expression),
+    }
+}
+
 /// How a node-parameter channel is rewritten.
 pub(super) enum ChannelWrite {
     Keys(KeyframeCurve),
     Constant(f32),
+    /// An expression that compiled: the agent path never stores one that did
+    /// not (`EditError::InvalidExpression`).
+    Expression(ParameterExpression),
 }
 
 /// Rewrite component `component` of parameter `key` of `node_id`.
@@ -103,7 +132,7 @@ pub(super) fn write_param_channel(
         .clone();
     // A keyed identifier (a precomp's `comp_id`, a `layer.ref`'s `layer`)
     // stops resolving its target; the Properties keyframe toggle refuses it too.
-    if matches!(write, ChannelWrite::Keys(_))
+    if matches!(write, ChannelWrite::Keys(_) | ChannelWrite::Expression(_))
         && crate::composition::validate::is_identifier_parameter(&node.type_key, key)
     {
         return Err(EditError::InvalidKeyframes(format!(
@@ -111,13 +140,15 @@ pub(super) fn write_param_channel(
         )));
     }
     // A plain Float or Int is a constant that has not been keyed yet. Keying
-    // it gives it the channel spelling the Timeline edits, as the Properties
-    // keyframe toggle does; clearing one leaves it as it is.
+    // it (or giving it an expression) gives it the channel spelling the
+    // Timeline edits, as the Properties keyframe toggle does; clearing one
+    // leaves it as it is.
+    let animates = matches!(write, ChannelWrite::Keys(_) | ChannelWrite::Expression(_));
     match (&value, &write) {
-        (ParameterValue::Float(v), ChannelWrite::Keys(_)) => {
+        (ParameterValue::Float(v), _) if animates => {
             value = ParameterValue::Channel(AnimationChannel::constant(*v));
         }
-        (ParameterValue::Int(v), ChannelWrite::Keys(_)) => {
+        (ParameterValue::Int(v), _) if animates => {
             value = ParameterValue::IntChannel(AnimationChannel::constant(*v as f32));
         }
         (ParameterValue::Float(_) | ParameterValue::Int(_), ChannelWrite::Constant(v)) => {
@@ -154,7 +185,7 @@ pub(super) fn write_param_channel(
             })?;
     let permitted = match write {
         ChannelWrite::Keys(_) => !channel_is_driven(channel),
-        ChannelWrite::Constant(_) => removable(&channel.source),
+        ChannelWrite::Constant(_) | ChannelWrite::Expression(_) => removable(&channel.source),
     };
     if !permitted {
         return Err(EditError::DrivenParameter {
@@ -165,6 +196,7 @@ pub(super) fn write_param_channel(
     *channel = match write {
         ChannelWrite::Keys(curve) => AnimationChannel::keyframes(curve),
         ChannelWrite::Constant(v) => AnimationChannel::constant(v),
+        ChannelWrite::Expression(e) => AnimationChannel::new(ChannelSource::Expression(e)),
     };
     let changed = Parameter {
         key: key.to_string(),
@@ -193,7 +225,7 @@ pub(super) fn write_shell_channel(
         })?;
     let permitted = match write {
         ChannelWrite::Keys(_) => !channel_is_driven(channel),
-        ChannelWrite::Constant(_) => removable(&channel.source),
+        ChannelWrite::Constant(_) | ChannelWrite::Expression(_) => removable(&channel.source),
     };
     if !permitted {
         return Err(EditError::DrivenShellProperty {
@@ -204,6 +236,7 @@ pub(super) fn write_shell_channel(
     *channel = match write {
         ChannelWrite::Keys(curve) => AnimationChannel::keyframes(curve),
         ChannelWrite::Constant(v) => AnimationChannel::constant(v),
+        ChannelWrite::Expression(e) => AnimationChannel::new(ChannelSource::Expression(e)),
     };
     Ok(())
 }

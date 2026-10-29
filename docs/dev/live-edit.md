@@ -36,7 +36,8 @@ live_edit_enabled = true
 
 ## プロトコル
 
-改行区切りの JSON。1 行 1 要求 → 1 行 1 応答。1 行は 4 MiB まで。
+改行区切りの JSON。1 行 1 要求 → 1 行 1 応答。要求の 1 行は 4 MiB まで
+（読み取りの応答だけは読む側が 64 MiB まで許す。下の「読み取り」）。
 
 ```text
 -> {"id": 1, "ops": [<EditOp>, ...]}
@@ -51,6 +52,26 @@ live_edit_enabled = true
   Cmd+Z で戻る。何も変えない要求（空の `ops` を含む）は undo を積まない
 - 失敗は全体が適用されない。`code` は `EditError::code()`、`index` は失敗した操作
 - 壊れた JSON・形の違う要求は `{"id": null, "error": {"code": "bad-request", ...}}`
+
+## 読み取り（`read`）
+
+計画の `AI-7`。文書を変えない要求で、確認も undo の段も無い。
+
+```text
+-> {"id": 2, "read": "document"}
+<- {"id": 2, "ok": {"project_path": "/p/a.ravprj" | null, "document": "<RON>"}}
+```
+
+- `document` は `ravel_project::document_to_ron` の文字列（`.ravprj` の文書と同じ形式）。
+  JSON にしないのは、永続化形式が数値と id を正確に運べるため。受け取る側は
+  `document_from_ron`
+- `project_path` は素材の相対パスを解くため。未保存のプロジェクトは `null`
+- `read` が `"document"` 以外なら `bad-request`。`read` と `ops` を両方持つ要求は `read` が勝つ
+- 写しは構造共有のクローンを主スレッドで取り、RON への書き出しは
+  バックグラウンドで行う（`live_edit::read_document`）。要求は 1 つずつ処理するので、
+  確認待ちの削除があれば読み取りもその後ろに並ぶ
+- 応答は文書全体なので 4 MiB を超えうる。上限は読み取り側（CLI の `live::live_read`）が
+  64 MiB で持つ。要求の側は 4 MiB のまま（[`mcp-cli.md`](mcp-cli.md)）
 
 ## 削除は確認ダイアログで承認されるまで保留される
 
@@ -77,7 +98,7 @@ Ravel の画面で取る（クライアントの自動承認に左右されな�
   （条件は `protocol::first_removal`）
 - 「上書き」（既存ファイルへの上書き書き出し、保存先の変更）を確認する対象は、
   今の `EditOp` に**無い**。その操作ができたときに同じ経路へ足す
-- `set_keyframes` / `clear_animation` / `set_layer` も確認しない（undo で戻る）。駆動されたチャンネルへの
+- `set_keyframes` / `clear_animation` / `set_expression` / `set_layer` も確認しない（undo で戻る）。駆動されたチャンネルへの
   `set_keyframes` は `driven-parameter` で拒否する
 - 駆動されたパラメータへの書き込みは、従来どおり `driven-parameter` で拒否する
 

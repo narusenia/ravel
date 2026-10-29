@@ -53,7 +53,7 @@ undo 1 段**が操作ごとに実装し直さずに手に入る（計画:
       操作の JSON 例と注意（クランプ、置換、エラーになる条件）を足す
 - [ ] `mise run check`
 
-## 動きの操作（`set_keyframes` / `clear_animation` / `set_layer`）の足場
+## 動きの操作（`set_keyframes` / `clear_animation` / `set_expression` / `set_layer`）の足場
 
 - 対象は `ChannelTarget`（`Parameter {path, node, key}` / `Shell {comp, layer, property}`、
   JSON は操作のフィールドの隣に平らに書く）。UI の `PropertyRowId` の `Network` / `Shell` と同じ区別
@@ -68,6 +68,20 @@ undo 1 段**が操作ごとに実装し直さずに手に入る（計画:
 - `Document::validate` は親子の循環を見ない。`set_layer` の `parent` は `edit/mod.rs` で
   自分自身・循環を `invalid-layer-edit` として拒否する
 - 確認は出ない（`is_destructive` は `false`、ライブ口の `first_removal` に入れない）
+- `set_expression`（`AI-9`）は同じ対象・同じ `write_channel` を通る。チャンネルの種類ごとの
+  書き込みは `ChannelInput`（`Keys` / `Constant` / `Expression`）→ `ChannelWrite` で、**別の
+  経路を作らない**
+  - コンパイルは `ParameterExpression::new`（Properties パネルと評価器が使うものと同じ。語彙は
+    `Scope::parameter_context()`）。ここで別の `compile` / `compile_with` を呼ぶと、受け入れた式を
+    評価器が落とす（か、逆）ことになる。UI はコンパイルできない式も保存するが、**この経路は
+    `ParameterExpression::error()` を見て `expression-error`（`EditError::InvalidExpression`、
+    `line` / `column` 付き）で拒否する**。空・空白のみも拒否（`clear_animation` を使う）
+  - 置き換えてよいのは定数・キー・式（`clear_animation` と同じ `removable`）。ノード出力・ブレンドは
+    `driven-parameter`。`set_keyframes` は式を駆動扱いで拒否するが、`set_expression` は拒否しない
+    （この差を `set_expression_on_a_driven_channel_is_refused_and_changes_nothing` が対で固定している）
+  - 識別子のパラメータ（`layer.ref` の `layer` など）は `set_keyframes` と同じく拒否する
+  - 式を外す操作は足さない（`clear_animation`）。MCP の `edit` の説明と
+    [`mcp-cli.md`](mcp-cli.md) の「式」に操作を書く
 
 ## 忘れやすいもの
 

@@ -161,10 +161,15 @@ fn plan_loaded(
     plan::plan_render(args, &project.document, root, &available_encoders())
 }
 
-/// Plan a render of an in-memory draft (`args.project` is not read). A draft
-/// has no project root, so a relative asset path does not resolve.
-pub fn plan_from_draft(args: &RenderArgs, draft: &ProjectFile) -> Result<RenderPlan, CliError> {
-    plan_loaded(args, draft, None)
+/// Plan a render of an in-memory project (`args.project` is not read). A
+/// draft has no project root (`None`), so a relative asset path does not
+/// resolve; a copy of the app's document brings the root of its project.
+pub fn plan_from_draft(
+    args: &RenderArgs,
+    draft: &ProjectFile,
+    root: Option<&Path>,
+) -> Result<RenderPlan, CliError> {
+    plan_loaded(args, draft, root)
 }
 
 fn cache_budget_for_layers(project: &ProjectFile, global: &SettingsLayer) -> CacheBudgetConfig {
@@ -244,6 +249,7 @@ where
 pub fn render_draft_with_hooks<H, F>(
     args: &RenderArgs,
     draft: &ProjectFile,
+    root: Option<&Path>,
     global_settings: Option<&Path>,
     hooks: F,
     cancel: &CancelFlag,
@@ -253,7 +259,7 @@ where
     H: EvalWorkerHooks,
     F: FnOnce(&SharedCacheBudget) -> Result<H, CliError>,
 {
-    let plan = plan_from_draft(args, draft)?;
+    let plan = plan_from_draft(args, draft, root)?;
     render_planned(draft, plan, global_settings, hooks, cancel, reporter)
 }
 
@@ -324,16 +330,19 @@ pub fn render(
     )
 }
 
-/// [`render`] for an in-memory draft.
+/// [`render`] for an in-memory project (an MCP draft, or a copy of the app's
+/// document with its project `root`).
 pub fn render_draft(
     args: &RenderArgs,
     draft: &ProjectFile,
+    root: Option<&Path>,
     cancel: &CancelFlag,
     reporter: &mut dyn Reporter,
 ) -> Result<Summary, CliError> {
     render_draft_with_hooks(
         args,
         draft,
+        root,
         ravel_project::paths::global_settings_path().as_deref(),
         gpu_hooks,
         cancel,

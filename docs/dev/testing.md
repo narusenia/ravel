@@ -135,9 +135,14 @@ OS のスクリーンショットで見る。仕組みは [`live-edit.md`](live-
 3. **起動して口ができるのを待つ。** macOS の口は `~/Library/Caches/ravel/live-edit.sock`
 
    ```bash
-   (./target/debug/ravel > /tmp/ravel-app.log 2>&1 &)
+   ./target/debug/ravel > /tmp/ravel-app.log 2>&1 & P=$!
    for i in $(seq 1 40); do [ -S ~/Library/Caches/ravel/live-edit.sock ] && break; sleep 1; done
    ```
+
+   **起動した PID（`$!`）を控えて、以後はそれだけを操作する。** 利用者が別の Ravel を
+   開いていることがある。プロセス名はどれも `ravel` なので、`pgrep` やアプリ名で選ぶと
+   相手を取り違え、利用者のアプリを終了させてしまう。先に起動していた Ravel は口を
+   開けていない（設定は起動時にしか読まない）ので、つながる先は自分のアプリだけになる
 
 4. **`ravel-cli mcp --attach` に JSON-RPC を流す。** 1 行 1 メッセージ。`initialize` →
    `notifications/initialized` → `tools/call` の順
@@ -147,7 +152,7 @@ OS のスクリーンショットで見る。仕組みは [`live-edit.md`](live-
    {"jsonrpc":"2.0","method":"notifications/initialized"}
    {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"live_edit","arguments":{"ops":[{"op":"add_composition","settings":{"name":"Check","resolution":[640,360],"frame_rate":{"num":24,"den":1},"duration_frames":48,"background_color":{"r":0.2,"g":0.4,"b":0.8,"a":1}},"as":"c"},{"op":"add_layer","comp":"c","template":"solid"}]}}}
    {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"inspect_document","arguments":{"live":true}}}
-   {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"render_preview","arguments":{"live":true,"frame":0,"output":"/tmp/ravel-check/frame.png"}}}
+   {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"render_preview","arguments":{"live":true,"comp":"Check","frame":0,"output":"/tmp/ravel-check"}}}
    ```
 
    ```bash
@@ -157,28 +162,36 @@ OS のスクリーンショットで見る。仕組みは [`live-edit.md`](live-
    - `inspect_document` の `live: true` で、テンプレートが作ったノードの id と今の値を読む。
      次の編集はこの id で指す
    - `render_preview` の `live: true` は合成結果だけを PNG にする（CLI 側の GPU。UI は映らない）。
-     書き出し先は `--allow-dir` の中だけ
+     `output` は**ディレクトリ**で、中に `preview_<frame>.png` ができる。`--allow-dir` の中だけ。
+     `comp` を省くと root コンプ（新規プロジェクトでは空の `Comp 1`）になる
    - 削除を含む `live_edit` は、アプリの確認ダイアログで承認されるまで返らない。
      承認は Enter、拒否は Escape をアプリへ送る（`osascript -e 'tell application "System Events" to key code 36'`）
    - ソケットへ直接 `nc -U` で `{"id":1,"ops":[…]}` / `{"id":2,"read":"document"}` を送っても
      よい（MCP を挟まない分、プロトコルの確認向き）
 
-5. **画面を撮る。** アプリを前面に出してから撮る
+5. **画面を撮る。** アプリを前面に出し、**見たい範囲だけ**撮る。全画面で撮ると
+   ほかのアプリ（チャットやメール）の中身まで写る
 
    ```bash
-   P=$(pgrep -f 'target/debug/ravel$' | head -1)
    osascript -e "tell application \"System Events\" to set frontmost of (first process whose unix id is $P) to true"
-   screencapture -x -o /tmp/ravel-check/screen.png
+   osascript -e "tell application \"System Events\" to tell (first process whose unix id is $P) to get {position, size} of window 1"
+   screencapture -x -o -R<x>,<y>,<w>,<h> /tmp/ravel-check/viewer.png   # 上で得たウィンドウ内の範囲（ポイント単位）
    ```
 
-   Cmd+Z など特殊キーの送り方は `osascript` の `keystroke` / `key code`。undo は
-   1 呼び出し 1 段なので、`live_edit` 1 回の後の Cmd+Z 1 回で元に戻ることも確かめられる
+   `render_preview` の PNG と Viewer の絵が同じフレームで一致すれば、アプリに入った文書と
+   エージェントが読んだ文書が同じだと言える
 
-6. **後片付け。** 終了 → 口が消えたこと → 設定を戻して一致を確かめる
+   undo は 1 呼び出し 1 段なので、`live_edit` 1 回の後の Undo 1 回で元に戻ることも
+   確かめられる。キー入力（`keystroke`）は**最前面のアプリ**へ届くので、同名の Ravel が
+   ほかにあると取り違える。メニューを PID で指すほうが確実:
+   `osascript -e "tell application \"System Events\" to tell (first process whose unix id is $P) to click menu item \"Undo\" of menu \"Edit\" of menu bar 1"`
+
+6. **後片付け。** 終了 → 口が消えたこと → 設定を戻して一致を確かめる。終了は PID へ
+   送る（Cmd+Q のキー入力は最前面へ届くので、利用者のアプリを閉じうる）
 
    ```bash
-   osascript -e "tell application \"System Events\" to tell (first process whose unix id is $P) to keystroke \"q\" using command down"
-   [ -S ~/Library/Caches/ravel/live-edit.sock ] && rm ~/Library/Caches/ravel/live-edit.sock   # 強制終了で残った場合だけ
+   kill $P
+   [ -S ~/Library/Caches/ravel/live-edit.sock ] && rm ~/Library/Caches/ravel/live-edit.sock   # kill では口のファイルが残る
    cp /tmp/settings.toml.bak "$F" && cmp /tmp/settings.toml.bak "$F"
    ```
 

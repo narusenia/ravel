@@ -816,6 +816,11 @@ impl Composition {
     /// own (the rule [`track_matte_of`](Self::track_matte_of) applies).
     pub fn can_be_matte_of(&self, layer: LayerId, source: LayerId) -> bool {
         source != layer
+            // The target side of `track_matte_of`: a frameless or adjustment
+            // layer cannot be matted, so it is offered no source at all.
+            && self
+                .get_layer(layer)
+                .is_some_and(|l| l.has_frame_output() && !l.adjustment)
             && self
                 .get_layer(source)
                 .is_some_and(|s| s.has_frame_output() && !s.adjustment && s.track_matte.is_none())

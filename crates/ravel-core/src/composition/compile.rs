@@ -941,6 +941,20 @@ mod tests {
         assert!(chain.can_be_matte_of(LayerId::new(1), LayerId::new(3)));
     }
 
+    /// The picker follows the target side of the rule too: a frameless or
+    /// adjustment layer is offered no matte source.
+    #[test]
+    fn layers_that_cannot_be_matted_are_offered_no_source() {
+        let mut adj = frame_layer(3);
+        adj.adjustment = true;
+        let comp = test_comp()
+            .add_layer(frame_layer(1))
+            .add_layer(null_layer(2))
+            .add_layer(adj);
+        assert!(!comp.can_be_matte_of(LayerId::new(2), LayerId::new(1)));
+        assert!(!comp.can_be_matte_of(LayerId::new(3), LayerId::new(1)));
+    }
+
     #[test]
     fn matte_kind_tracks_into_the_type_key() {
         for (kind, key) in [

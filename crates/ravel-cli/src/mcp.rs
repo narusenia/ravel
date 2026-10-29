@@ -31,7 +31,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource};
 use ravel_core::composition::Document;
-use ravel_core::edit::{Applied, Created, EditContext, EditOp, apply_batch};
+use ravel_core::edit::{Applied, Created, EditContext, EditError, EditOp, apply_batch};
 use ravel_core::graph::ParameterValue;
 use ravel_core::id::DataTypeId;
 use ravel_core::registry::builtin::register_builtins;
@@ -539,8 +539,16 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 fn failure_json(error: &CliError) -> Value {
     match error {
         // The operation's stable code is the id; `index` says which one failed.
-        CliError::Edit { index, .. } => {
-            json!({ "id": error.id(), "index": index, "message": error.localized() })
+        CliError::Edit { index, source } => {
+            let mut failure =
+                json!({ "id": error.id(), "index": index, "message": error.localized() });
+            // Where the expression broke, as numbers an agent need not parse
+            // out of a sentence.
+            if let EditError::InvalidExpression { line, column, .. } = source {
+                failure["line"] = json!(line);
+                failure["column"] = json!(column);
+            }
+            failure
         }
         // The app's own code is the id, as for a draft edit.
         CliError::LiveEdit {
@@ -1013,10 +1021,10 @@ fn describe_node(template: &NodeTemplate) -> Value {
 /// What `edit` accepts. One tool takes the operations as they are (the same
 /// `EditOp` JSON the live-edit socket reads), so this text is the schema.
 const EDIT_DESCRIPTION: &str = r#"Apply a batch of edit operations to the draft, all or nothing. Returns `created` ([{kind, id}]) and `aliases`. On failure the draft is unchanged and the error is {id, index, message}: `id` is a stable code (e.g. unknown-alias, port-type-mismatch, unknown-parameter, driven-parameter) and `index` the failing operation.
-Operations ("op" tag): add_composition {settings, as?}; remove_composition {comp}; add_layer {comp, template, as?} (template: "solid" | "shape" | "media" | "audio" | "null" | "adjustment"); remove_layer {comp, layers: []}; add_node {path, type_key, position?: [x, y], params?: {key: value}, as?}; remove_node {path, node}; connect {path, from: {node, port}, to: {node, port}}; disconnect {path, edge}; set_parameter {path, node, key, value}; set_keyframes {<target>, component?: 0, keys: [{frame, value, interpolation}]}; clear_animation {<target>, component?: 0, value}; set_layer {comp, layer, name?, start_frame?, in_frame?, out_frame?, anchor_point?: [x, y], position?: [x, y], scale?: [x, y], rotation?, opacity?, blend_mode?: "Normal"|"Add"|"Multiply"|"Screen"|"Overlay", parent?: layer or null, solo?, muted?, locked?}.
+Operations ("op" tag): add_composition {settings, as?}; remove_composition {comp}; add_layer {comp, template, as?} (template: "solid" | "shape" | "media" | "audio" | "null" | "adjustment"); remove_layer {comp, layers: []}; add_node {path, type_key, position?: [x, y], params?: {key: value}, as?}; remove_node {path, node}; connect {path, from: {node, port}, to: {node, port}}; disconnect {path, edge}; set_parameter {path, node, key, value}; set_keyframes {<target>, component?: 0, keys: [{frame, value, interpolation}]}; clear_animation {<target>, component?: 0, value}; set_expression {<target>, component?: 0, expression}; set_layer {comp, layer, name?, start_frame?, in_frame?, out_frame?, anchor_point?: [x, y], position?: [x, y], scale?: [x, y], rotation?, opacity?, blend_mode?: "Normal"|"Add"|"Multiply"|"Screen"|"Overlay", parent?: layer or null, solo?, muted?, locked?}.
 `as` names what the operation creates; later operations of the same batch (not later calls) refer to it by that string. A number is an id: comp, layer and node take an id or an alias. `path` is {comp, layer, subnets?: []} (each part an id or alias) and names the layer's node network. A port is its name or zero-based number. A parameter value is {"type": "float"|"int"|"bool"|"string"|"color"|"vector"|"curve"|"ramp", "value": ...}: float 0.5; color {r,g,b,a} in linear light, not sRGB (convert a hex or sRGB colour first); vector [x, y, ...]. Numbers are clamped to the node type's range (describe_node); an unknown key is an error.
 `settings` of add_composition (every field required): {"name":"Main","resolution":[1920,1080],"frame_rate":{"num":30,"den":1},"duration_frames":300,"background_color":{"r":0,"g":0,"b":0,"a":1}} (a colour in linear light, as above).
-Animation: <target> is either a node parameter {path, node, key} or a layer shell property {comp, layer, property: "anchor_point"|"position"|"scale"|"rotation"|"opacity"|"audio_gain"|"time_remap" (accepted and saved, but not evaluated yet: keying it changes nothing on screen)}. set_keyframes replaces one channel's curve by the keys; `component` is the channel of a vector or colour (x/y/z/w, or r/g/b/a in linear light), one operation per component. `frame` is the COMPOSITION's frame (the timeline the user sees), not the layer's own; a frame before the layer's start_frame is an error (key-before-layer-start), and the key moves with the layer afterwards. interpolation is "bezier" (default handles), "linear" or "step" (hold). A channel driven by an expression, node output or blend is refused (driven-parameter); clear_animation drops keys or an expression and leaves the constant `value`. set_layer only sets what it is given; a constant opacity/transform on an animated channel is refused (animated-parameter), opacity is clamped to 0..1, `parent: null` clears the parent.
+Animation: <target> is either a node parameter {path, node, key} or a layer shell property {comp, layer, property: "anchor_point"|"position"|"scale"|"rotation"|"opacity"|"audio_gain"|"time_remap" (accepted and saved, but not evaluated yet: keying it changes nothing on screen)}. set_keyframes replaces one channel's curve by the keys; `component` is the channel of a vector or colour (x/y/z/w, or r/g/b/a in linear light), one operation per component. `frame` is the COMPOSITION's frame (the timeline the user sees), not the layer's own; a frame before the layer's start_frame is an error (key-before-layer-start), and the key moves with the layer afterwards. interpolation is "bezier" (default handles), "linear" or "step" (hold). A channel driven by an expression, node output or blend is refused (driven-parameter); clear_animation drops keys or an expression and leaves the constant `value`. set_expression sets a channel to an expression string such as "frame * 30" (`frame` is the layer's own frame; the variables and functions are listed in docs/dev/mcp-cli.md, "式"): it replaces a constant, keys or an expression, is refused on a node output or blend channel (driven-parameter), and an expression that does not compile is refused with expression-error, the position (line, column) in the message and nothing changed. Remove an expression with clear_animation. set_layer only sets what it is given; a constant opacity/transform on an animated channel is refused (animated-parameter), opacity is clamped to 0..1, `parent: null` clears the parent.
 Example: [{"op":"add_composition","settings":{...},"as":"c"},{"op":"add_layer","comp":"c","template":"solid","as":"l"},{"op":"add_node","path":{"comp":"c","layer":"l"},"type_key":"shape.rect","as":"r"},{"op":"set_parameter","path":{"comp":"c","layer":"l"},"node":"r","key":"width","value":{"type":"float","value":200}}]."#;
 
 fn tool_definitions() -> Value {

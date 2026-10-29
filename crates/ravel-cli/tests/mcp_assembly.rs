@@ -413,6 +413,37 @@ fn keyframes_and_the_layer_shell_are_edited_over_the_wire() {
     assert_eq!(failure(&reply)["index"], 0);
 }
 
+#[test]
+fn an_expression_is_set_over_the_wire_and_a_broken_one_is_refused_with_its_position() {
+    let server = server(&[]);
+    ok(&call(&server, "new_project", json!({})));
+    ok(&call(&server, "edit", json!({"ops": assemble()})));
+    let doc = call(&server, "inspect_document", json!({"draft": true}));
+    let comp_id = ok(&doc)["compositions"][0]["id"].clone();
+    let layer_id = ok(&doc)["compositions"][0]["layers"][0]["id"].clone();
+    let set = |expression: &str| {
+        call(
+            &server,
+            "edit",
+            json!({"ops": [{"op": "set_expression", "comp": comp_id, "layer": layer_id,
+                "property": "rotation", "expression": expression}]}),
+        )
+    };
+    ok(&set("frame * 30"));
+
+    let before = call(&server, "inspect_document", json!({"draft": true}));
+    let reply = set("frame *");
+    assert_eq!(failure(&reply)["id"], "expression-error");
+    assert_eq!(failure(&reply)["index"], 0);
+    assert_eq!(failure(&reply)["line"], 1);
+    assert!(failure(&reply)["column"].as_u64().unwrap() >= 1);
+    assert_eq!(
+        ok(&before),
+        ok(&call(&server, "inspect_document", json!({"draft": true}))),
+        "the draft is as it was"
+    );
+}
+
 /// `live: true` against a fake app: the read tools see a copy of the app's
 /// document through the very path `draft: true` takes.
 #[cfg(unix)]

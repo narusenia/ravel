@@ -656,6 +656,44 @@ mod tests {
         assert_eq!(result.synthetic_nodes.len(), 8);
     }
 
+    /// Every node (id, type key) and edge (source, port, target, port) of a
+    /// compilation as sorted text lines — the topology a snapshot pins.
+    fn topology(result: &CompilationResult) -> Vec<String> {
+        let mut lines: Vec<String> = result
+            .graph
+            .nodes()
+            .map(|n| format!("node {} {}", n.id.raw(), n.type_key))
+            .chain(result.graph.edges().map(|e| {
+                format!(
+                    "edge {}:{} -> {}:{}",
+                    e.source.raw(),
+                    e.source_port.0,
+                    e.target.raw(),
+                    e.target_port.0
+                )
+            }))
+            .collect();
+        lines.sort();
+        lines
+    }
+
+    #[test]
+    fn time_remap_does_not_change_the_compiled_topology() {
+        // The remap only changes the time the boundary node evaluates the
+        // layer's network at, so it needs no node of its own.
+        let plain = test_comp().add_layer(frame_layer(1));
+        let mut remapped_layer = frame_layer(1);
+        remapped_layer.time_remap =
+            Some(crate::animation::channel::AnimationChannel::constant(5.0));
+        let remapped = test_comp().add_layer(remapped_layer);
+
+        let plain = topology(&compile_composition(&plain, Graph::new()).unwrap());
+        let remapped = topology(&compile_composition(&remapped, Graph::new()).unwrap());
+        assert_eq!(plain, remapped);
+        // Background + network/transform/opacity/merge, and four edges.
+        assert_eq!(plain.len(), 5 + 4);
+    }
+
     #[test]
     fn blend_mode_produces_correct_type_key() {
         let mut layer = frame_layer(1);

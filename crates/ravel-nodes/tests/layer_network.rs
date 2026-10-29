@@ -189,6 +189,151 @@ fn outside_display_interval_is_transparent_without_evaluating() {
 }
 
 // ===========================================================================
+// Shell time remap
+// ===========================================================================
+
+fn linear_keys(keys: &[(u64, f32)]) -> AnimationChannel {
+    let mut curve = KeyframeCurve::new();
+    for &(frame, value) in keys {
+        curve.insert(frame, value, Interpolation::Linear);
+    }
+    AnimationChannel::keyframes(curve)
+}
+
+/// The network's `t` output (seconds) at `comp_frame`, for a layer placed at
+/// comp frame 10 showing `[0, 100)` with the given remap.
+fn probed_time(remap: Option<AnimationChannel>, comp_frame: u64) -> f32 {
+    let network = time_probe_network();
+    let mut layer = Layer::new(LayerId::new(1), "Probe", network.clone()).with_time(10, 0, 100);
+    layer.time_remap = remap;
+    let comp = Composition::new(CompId::new(1), "Remap", (16, 16), FPS, 300).add_layer(layer);
+    let doc = Document::default().with_composition(comp.clone());
+    let (mut evaluator, graph, _) = setup(&comp, &[&network]);
+    let output = deterministic_node_id(comp.id, LayerId::new(1), NodeRole::Network);
+    evaluator.set_document(Arc::new(doc));
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(comp_frame, FPS, (16, 16)))
+        .unwrap();
+    out.downcast_ref::<Scalar>().unwrap().0
+}
+
+#[test]
+fn identity_time_remap_matches_no_remap() {
+    let identity = linear_keys(&[(0, 0.0), (99, 99.0)]);
+    for frame in [10, 15, 40, 109] {
+        let plain = probed_time(None, frame);
+        let remapped = probed_time(Some(identity.clone()), frame);
+        assert!((plain - remapped).abs() < 1e-6, "frame {frame}");
+    }
+}
+
+#[test]
+fn double_speed_remap_reads_twice_as_far() {
+    // Local 5 (comp 15) → source 10.
+    let t = probed_time(Some(linear_keys(&[(0, 0.0), (49, 98.0)])), 15);
+    assert!((t - 10.0 / 30.0).abs() < 1e-5, "t = {t}");
+}
+
+#[test]
+fn half_speed_remap_reads_half_as_far() {
+    // Local 5 (comp 15) → source 2.5: the fraction survives into `time`.
+    let t = probed_time(Some(linear_keys(&[(0, 0.0), (99, 49.5)])), 15);
+    assert!((t - 2.5 / 30.0).abs() < 1e-5, "t = {t}");
+}
+
+#[test]
+fn remap_past_either_end_holds_the_first_and_last_visible_frame() {
+    // Below `in_frame` and above `out_frame - 1` (= 99) both clamp.
+    let below = probed_time(Some(AnimationChannel::constant(-20.0)), 15);
+    assert!(below.abs() < 1e-6, "below = {below}");
+    let above = probed_time(Some(AnimationChannel::constant(500.0)), 15);
+    assert!((above - 99.0 / 30.0).abs() < 1e-5, "above = {above}");
+}
+
+#[test]
+fn remap_does_not_change_the_display_interval() {
+    // Comp frame 5 is before start_frame 10: hidden whatever the remap says.
+    let network = time_probe_network();
+    let mut layer = Layer::new(LayerId::new(1), "Probe", network.clone()).with_time(10, 0, 100);
+    layer.time_remap = Some(AnimationChannel::constant(50.0));
+    let comp = Composition::new(CompId::new(1), "Remap", (16, 16), FPS, 300).add_layer(layer);
+    let doc = Document::default().with_composition(comp.clone());
+    let (mut evaluator, graph, _) = setup(&comp, &[&network]);
+    let output = deterministic_node_id(comp.id, LayerId::new(1), NodeRole::Network);
+    evaluator.set_document(Arc::new(doc));
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(5, FPS, (16, 16)))
+        .unwrap();
+    assert!(frame(&out).as_f32().iter().all(|v| v.abs() < 1e-6));
+}
+
+#[test]
+fn half_speed_remap_samples_network_animation_between_frames() {
+    // `amount` animates 0 → 10 over frames 0..10 (value == frame). At half
+    // speed, local frame 1 is source frame 0.5, so the parameter reads 0.5:
+    // the fraction reaches the animation instead of being rounded to 0 or 1.
+    let mut curve = KeyframeCurve::new();
+    curve.insert(0, 0.0, Interpolation::Linear);
+    curve.insert(10, 10.0, Interpolation::Linear);
+    let in_n = in_node(620)
+        .with_output("amount", DataTypeId::SCALAR)
+        .with_param(
+            "amount",
+            ParameterValue::Channel(AnimationChannel::keyframes(curve)),
+        );
+    let network = Graph::new()
+        .add_node(in_n)
+        .unwrap()
+        .add_node(out_node(621))
+        .unwrap()
+        .add_edge(
+            EdgeId::new(1),
+            NodeId::new(620),
+            OutputPortIndex(3),
+            NodeId::new(621),
+            InputPortIndex(0),
+        )
+        .unwrap();
+    let mut layer = Layer::new(LayerId::new(1), "Slow", network.clone()).with_time(0, 0, 100);
+    layer.time_remap = Some(linear_keys(&[(0, 0.0), (99, 49.5)]));
+    let comp = Composition::new(CompId::new(1), "Slow", (16, 16), FPS, 300).add_layer(layer);
+    let doc = Document::default().with_composition(comp.clone());
+    let (mut evaluator, graph, _) = setup(&comp, &[&network]);
+    let output = deterministic_node_id(comp.id, LayerId::new(1), NodeRole::Network);
+    evaluator.set_document(Arc::new(doc));
+
+    let v = evaluator
+        .evaluate(&graph, output, &EvalContext::new(1, FPS, (16, 16)))
+        .unwrap();
+    let amount = v.downcast_ref::<Scalar>().unwrap().0;
+    assert!((amount - 0.5).abs() < 1e-4, "amount = {amount}");
+}
+
+#[test]
+fn remap_retimes_the_network_but_not_the_shell_channels() {
+    // The remap holds source frame 0 for ever; opacity still fades on the
+    // output timeline: comp frame 10 (local 10) reads opacity 0.5.
+    let network = fb_source_network(740, 741);
+    let mut layer = Layer::new(LayerId::new(1), "Held", network.clone()).with_time(0, 0, 100);
+    layer.time_remap = Some(AnimationChannel::constant(0.0));
+    layer.opacity = linear_keys(&[(0, 1.0), (20, 0.0)]);
+    let mut comp = Composition::new(CompId::new(1), "Held", (8, 8), FPS, 300).add_layer(layer);
+    comp.background_color = ravel_core::types::Color::TRANSPARENT;
+    let doc = Document::default().with_composition(comp.clone());
+    let (mut evaluator, graph, output) = setup(&comp, &[&network]);
+    evaluator.register(
+        NodeId::new(740),
+        Arc::new(FbSource(solid_fb(8, 8, [1.0, 0.0, 0.0, 1.0]))),
+    );
+    evaluator.set_document(Arc::new(doc));
+    let out = evaluator
+        .evaluate(&graph, output, &EvalContext::new(10, FPS, (8, 8)))
+        .unwrap();
+    let alpha = frame(&out).as_f32()[3];
+    assert!((alpha - 0.5).abs() < 1e-3, "alpha = {alpha}");
+}
+
+// ===========================================================================
 // Custom parameters on the In node (REQ-LAYER-002/004)
 // ===========================================================================
 

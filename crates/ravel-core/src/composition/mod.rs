@@ -257,7 +257,11 @@ pub struct Layer {
     pub locked: bool,
     /// Parent layer for transform inheritance (P/R/S only; not opacity/blend).
     pub parent: Option<LayerId>,
-    /// Reserved for v2 time remapping (never evaluated yet).
+    /// Time remap: maps the layer's local output frame to the local source
+    /// frame its network is evaluated at (continuous, in frames; clamped to
+    /// `[in_frame, out_frame - 1]`). Only the network is retimed — transform,
+    /// opacity and blend keys stay on the output timeline. Audio is not
+    /// remapped (limitation).
     pub time_remap: Option<AnimationChannel>,
     /// Reserved for v2 track mattes (never evaluated yet).
     pub track_matte: Option<TrackMatte>,
@@ -314,7 +318,7 @@ impl Layer {
     }
 
     /// Every shell field that carries an [`AnimationChannel`] — the transform,
-    /// the opacity, the audio gain, the reserved time remap.
+    /// the opacity, the audio gain, the time remap.
     ///
     /// The shell is the half of a layer that is *not* the network, so this is
     /// the complete list of places a `ChannelSource::NodeOutput` binding

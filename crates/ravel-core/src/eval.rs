@@ -3796,6 +3796,7 @@ fn layer_shell_changed(new: &Layer, old: &Layer) -> bool {
         || new.blend_mode != old.blend_mode
         || new.adjustment != old.adjustment
         || new.parent != old.parent
+        || new.time_remap != old.time_remap
 }
 
 /// Node types that read shell fields straight off the `Document`, with no
@@ -8432,6 +8433,18 @@ mod tests {
             .evaluate_sub(segment, &inner2, NodeId::new(8), &ctx_at(0), Vec::new())
             .unwrap();
         assert!((v.downcast_ref::<Scalar>().unwrap().0 - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn time_remap_edit_counts_as_a_shell_change() {
+        use crate::animation::channel::AnimationChannel;
+        use crate::composition::Layer;
+
+        let before = Layer::new(LayerId::new(1), "L", Graph::new());
+        let mut after = before.clone();
+        assert!(!layer_shell_changed(&after, &before));
+        after.time_remap = Some(AnimationChannel::constant(3.0));
+        assert!(layer_shell_changed(&after, &before));
     }
 
     /// A layer's rendered frame folds in its ancestors' transforms, so a shell

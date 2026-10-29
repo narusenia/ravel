@@ -115,15 +115,63 @@ fn layer_network_context(
     resolution: (u32, u32),
 ) -> EvalContext {
     let sub_frame = ctx.sample_frame() - ctx.frame as f64;
+    network_context_at(
+        comp,
+        local_frame as u64,
+        local_frame as f64 + sub_frame,
+        ctx,
+        resolution,
+    )
+}
+
+/// A layer-network context that sits at the continuous local position
+/// `sample`, addressed by the integer index `frame`.
+fn network_context_at(
+    comp: &Composition,
+    frame: u64,
+    sample: f64,
+    ctx: &EvalContext,
+    resolution: (u32, u32),
+) -> EvalContext {
     EvalContext {
-        frame: local_frame as u64,
-        time: (local_frame as f64 + sub_frame) / comp.frame_rate.as_f64(),
+        frame,
+        time: sample / comp.frame_rate.as_f64(),
         fps: comp.frame_rate,
         resolution,
         comp_resolution: comp.resolution,
         min_precision: ctx.min_precision,
         quality: ctx.quality,
     }
+}
+
+/// The context the layer's network is evaluated in once the shell's time
+/// remap is applied (REQ-LAYER-001).
+///
+/// The remap channel maps the layer's local *output* frame (continuous, so a
+/// slow-motion layer is not stair-stepped) to the local *source* frame the
+/// network is evaluated at, both in frames. The result is clamped to
+/// `[in_frame, out_frame - 1]` — the layer's first and last visible frame —
+/// so a remap that runs past either end holds that frame instead of reading
+/// outside the layer. Only the **network** is retimed: transform, opacity and
+/// merge keys stay on the layer's output timeline (After Effects behaviour),
+/// and the `[in, out)` visibility test stays on the unremapped frame.
+///
+/// `frame` becomes `floor(remapped)` (keyframe addressing) and `time` keeps
+/// the fraction. Without a remap this is [`layer_network_context`].
+fn layer_network_context_remapped(
+    comp: &Composition,
+    layer: &Layer,
+    local_frame: i64,
+    ctx: &EvalContext,
+    resolution: (u32, u32),
+) -> EvalContext {
+    let Some(remap) = &layer.time_remap else {
+        return layer_network_context(comp, local_frame, ctx, resolution);
+    };
+    let last = (layer.out_frame as f64 - 1.0).max(layer.in_frame as f64);
+    let remapped = f64::from(remap.evaluate(layer_local_frame(layer, ctx), ctx))
+        .clamp(layer.in_frame as f64, last);
+    network_context_at(comp, remapped.floor() as u64, remapped, ctx, resolution)
 }
 
 // ===========================================================================
@@ -172,7 +220,7 @@ impl NodeProcessor for CompNetworkProcessor {
         let frame_index = net::frame_port_index(out_node)
             .ok_or_else(|| anyhow::anyhow!("comp.network: net.out has no frame port"))?;
 
-        let local = layer_network_context(&comp, local_frame, ctx, resolution);
+        let local = layer_network_context_remapped(&comp, layer, local_frame, ctx, resolution);
 
         let mut bindings: Vec<(String, Arc<dyn NodeData>)> = Vec::new();
         if layer.adjustment

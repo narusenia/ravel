@@ -41,8 +41,6 @@
 | KIT-3 | 最初の Ravel コンポーネントを `gpui-base` で作り、作り方を `docs/dev/` に残す | `gpui-kit-migration-plan.md` |
 | KIT-6 | 借りられる primitive の採否（`focus_trap` / `virtual_list` / `undo_history` / `tree` ほか） | `gpui-kit-migration-plan.md` |
 | TYPE-3 | テキストレイヤーテンプレートと Properties（`TYPE-2` ✅） | `typography-plan.md` |
-| SHELL-1 | `time_remap` の配線 | `layer-shell-wiring-plan.md` |
-| SHELL-2 | `track_matte` の配線 | `layer-shell-wiring-plan.md` |
 | SHELL-6 | レイヤー殻プロパティの式入力 UI（`EXPR-4` 完了で着手可能） | `layer-shell-wiring-plan.md` |
 | UX-1 | 情報の所在表と往復候補の列挙（計器の材料） | `refactor-plan-0808.md` |
 | NGR-4 | 型によるエッジ配色 | `node-graph-readability-plan.md` |
@@ -687,11 +685,11 @@ Timeline の `crates/ravel-widgets/src/curve_editor.rs` とは座標変換と
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| SHELL-1 | 🟡 | `time_remap` の配線 | （BLUR-1 完了済みなので分数時刻が正しく出る） |
-| SHELL-2 | 🟡 | `track_matte` の配線 | — |
-| SHELL-3 | ⬜ | UI 露出 | SHELL-1, SHELL-2 |
+| SHELL-1 | ✅ #629 | `time_remap` の配線 | （BLUR-1 完了済みなので分数時刻が正しく出る） |
+| SHELL-2 | ✅ #629 | `track_matte` の配線 | — |
+| SHELL-3 | ✅ #629 | UI 露出 | SHELL-1, SHELL-2 |
 | SHELL-5 | ✅ | `parent` の設定 UI（Properties の Parent ドロップダウン、循環候補を除外）（#303） | — |
-| SHELL-4 | ⬜ | 文書更新 | SHELL-3, SHELL-5 |
+| SHELL-4 | ✅ #629 | 文書更新 | SHELL-3, SHELL-5 |
 | SHELL-6 | 🟡 | レイヤー殻プロパティの式入力 UI | EXPR-4 ✅ |
 
 SHELL-6 は SHELL-5 と**同じ向きの取り残し**。殻のチャネル（位置・スケール・

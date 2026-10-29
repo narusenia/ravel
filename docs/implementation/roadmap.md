@@ -87,8 +87,8 @@
 得られる機能が最大**。
 
 該当: `NETIF-*`（カスタムポートと Subnet）、`PARAM-4`（ランプのエディタ。
-カーブ側の `PARAM-2` は済）、`SHELL-1/2`（`time_remap` /
-`track_matte` はデータモデルに存在して未配線）。
+カーブ側の `PARAM-2` は済）。`SHELL-1/2`（`time_remap` /
+`track_matte` の配線）は **済**（#629）。
 
 ## issues の扱い
 
@@ -1005,7 +1005,7 @@ issue 側に「単位が引き受けた」と記録して個別には着手し�
 
 | 単位 | 内容 |
 |---|---|
-| `SHELL-1〜4` | `time_remap` / `track_matte` の配線と UI 露出 |
+| `SHELL-1〜4` | `time_remap` / `track_matte` の配線と UI 露出 **済**（#629。残りは `SHELL-6` の式入力 UI） |
 | `BLUR-4〜5` | モーションブラー（`BLUR-2` は `CACHE-2`、`BLUR-3` はフェーズ C4 へ） |
 | `MEDIA-6` / `MEDIA-7` | メディア Properties と再リンク **済**（#469 — インスペクタ / パス種別 / Relink / `Save As` の参照付け替え。#470 — Outliner / Timeline のオフライン印。**計画書は `done/`**） |
 | `AUDIO-5〜7` | 波形表示と解析ノード |

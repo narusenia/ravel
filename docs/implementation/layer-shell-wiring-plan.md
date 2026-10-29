@@ -1,6 +1,6 @@
 # レイヤー殻の未配線フィールド 実装計画
 
-> **Status**: Planned — 2026-07-27
+> **Status**: In progress — 単位 1〜5 済（#629、#303）。残りは `SHELL-6`（2026-10-29）
 
 対象: `Layer` 殻に定義済みだが評価に繋がっていない `track_matte` と
 `time_remap` を配線する。関連要件: REQ-LAYER、REQ-CORE-001、REQ-CORE-007。

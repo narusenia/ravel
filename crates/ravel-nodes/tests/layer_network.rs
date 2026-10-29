@@ -334,6 +334,192 @@ fn remap_retimes_the_network_but_not_the_shell_channels() {
 }
 
 // ===========================================================================
+// Track matte
+// ===========================================================================
+
+use ravel_core::composition::{TrackMatte, TrackMatteKind};
+
+const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
+
+/// An 8x8 frame whose left four columns hold `left` and right four `right`.
+fn split_fb(left: [f32; 4], right: [f32; 4]) -> FrameBuffer {
+    let mut data = Vec::new();
+    for _y in 0..8 {
+        for x in 0..8 {
+            data.extend_from_slice(if x < 4 { &left } else { &right });
+        }
+    }
+    FrameBuffer::from_f32(8, 8, data)
+}
+
+fn matte_to(source: u64, kind: TrackMatteKind) -> Option<TrackMatte> {
+    Some(TrackMatte {
+        layer: LayerId::new(source),
+        kind,
+    })
+}
+
+/// Renders layer 1 (solid red, bottom) with `matte` as its track matte; layer 2
+/// (above it) is the source and paints `matte_pixels`. `edit` may change the
+/// layers before the second document, which is evaluated at the same frame on
+/// the same evaluator (so stale cache entries would show).
+fn render_matte_scene(
+    matte: Option<TrackMatte>,
+    matte_pixels: FrameBuffer,
+    layer_two_matte: Option<TrackMatte>,
+) -> (Evaluator, Composition, Graph, NodeId) {
+    let net_target = fb_source_network(750, 751);
+    let net_source = fb_source_network(752, 753);
+    let mut target = Layer::new(LayerId::new(1), "Target", net_target.clone()).with_time(0, 0, 300);
+    target.track_matte = matte;
+    let mut source = Layer::new(LayerId::new(2), "Matte", net_source.clone()).with_time(0, 0, 300);
+    source.track_matte = layer_two_matte;
+    let mut comp = Composition::new(CompId::new(1), "Matte", (8, 8), FPS, 300)
+        .add_layer(target)
+        .add_layer(source);
+    comp.background_color = ravel_core::types::Color::TRANSPARENT;
+    let doc = Document::default().with_composition(comp.clone());
+    let (mut evaluator, graph, output) = setup(&comp, &[&net_target, &net_source]);
+    evaluator.register(NodeId::new(750), Arc::new(FbSource(solid_fb(8, 8, RED))));
+    evaluator.register(NodeId::new(752), Arc::new(FbSource(matte_pixels)));
+    evaluator.set_document(Arc::new(doc));
+    (evaluator, comp, graph, output)
+}
+
+fn eval_matte_scene(
+    matte: Option<TrackMatte>,
+    matte_pixels: FrameBuffer,
+    layer_two_matte: Option<TrackMatte>,
+) -> FrameBuffer {
+    let (mut evaluator, _, graph, output) =
+        render_matte_scene(matte, matte_pixels, layer_two_matte);
+    frame(
+        &evaluator
+            .evaluate(&graph, output, &EvalContext::new(0, FPS, (8, 8)))
+            .unwrap(),
+    )
+}
+
+fn px(fb: &FrameBuffer, x: u32, y: u32) -> [f32; 4] {
+    let i = ((y * 8 + x) * 4) as usize;
+    fb.as_f32()[i..i + 4].try_into().unwrap()
+}
+
+const BLUE_OPAQUE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+const BLUE_CLEAR: [f32; 4] = [0.0, 0.0, 1.0, 0.0];
+
+#[test]
+fn alpha_matte_cuts_the_target_by_the_sources_alpha() {
+    let out = eval_matte_scene(
+        matte_to(2, TrackMatteKind::Alpha),
+        split_fb(BLUE_OPAQUE, BLUE_CLEAR),
+        None,
+    );
+    let kept = px(&out, 1, 4);
+    let cut = px(&out, 6, 4);
+    assert!(kept[3] > 0.99, "kept alpha {kept:?}");
+    assert!(cut[3] < 0.01, "cut alpha {cut:?}");
+}
+
+#[test]
+fn the_matte_source_does_not_composite_on_its_own() {
+    // The source is above the target and opaque blue on the left. Were it
+    // composited, the left half would read blue instead of the target's red,
+    // and the right half would not be transparent.
+    let out = eval_matte_scene(
+        matte_to(2, TrackMatteKind::Alpha),
+        split_fb(BLUE_OPAQUE, BLUE_OPAQUE),
+        None,
+    );
+    for x in 0..8 {
+        let p = px(&out, x, 3);
+        assert!(p[0] > 0.99 && p[2] < 0.01, "x={x}: source leaked: {p:?}");
+    }
+}
+
+#[test]
+fn without_a_matte_both_layers_composite() {
+    // The control for the test above: with no matte the source covers the target.
+    let out = eval_matte_scene(None, split_fb(BLUE_OPAQUE, BLUE_OPAQUE), None);
+    let p = px(&out, 1, 1);
+    assert!(p[2] > 0.99 && p[0] < 0.01, "{p:?}");
+}
+
+#[test]
+fn luma_matte_cuts_the_target_by_the_sources_brightness() {
+    let white = [1.0, 1.0, 1.0, 1.0];
+    let black = [0.0, 0.0, 0.0, 1.0];
+    let out = eval_matte_scene(
+        matte_to(2, TrackMatteKind::Luma),
+        split_fb(white, black),
+        None,
+    );
+    // Both halves are opaque, so alpha alone would keep everything.
+    assert!(px(&out, 1, 4)[3] > 0.99);
+    assert!(px(&out, 6, 4)[3] < 0.01);
+}
+
+#[test]
+fn inverted_mattes_keep_the_complement() {
+    let out = eval_matte_scene(
+        matte_to(2, TrackMatteKind::AlphaInverted),
+        split_fb(BLUE_OPAQUE, BLUE_CLEAR),
+        None,
+    );
+    assert!(px(&out, 1, 4)[3] < 0.01);
+    assert!(px(&out, 6, 4)[3] > 0.99);
+
+    let white = [1.0, 1.0, 1.0, 1.0];
+    let black = [0.0, 0.0, 0.0, 1.0];
+    let out = eval_matte_scene(
+        matte_to(2, TrackMatteKind::LumaInverted),
+        split_fb(white, black),
+        None,
+    );
+    assert!(px(&out, 1, 4)[3] < 0.01);
+    assert!(px(&out, 6, 4)[3] > 0.99);
+}
+
+#[test]
+fn a_matte_that_cannot_work_is_no_matte_not_an_error() {
+    // Missing source, the layer itself, and a two-layer cycle: the target is
+    // not cut, and no error comes back.
+    for (target_matte, source_matte, label) in [
+        (matte_to(99, TrackMatteKind::Alpha), None, "missing"),
+        (matte_to(1, TrackMatteKind::Alpha), None, "self"),
+        (
+            matte_to(2, TrackMatteKind::Alpha),
+            matte_to(1, TrackMatteKind::Alpha),
+            "cycle",
+        ),
+    ] {
+        // The source is transparent where the target would be cut if it applied.
+        let out = eval_matte_scene(target_matte, split_fb(BLUE_CLEAR, BLUE_CLEAR), source_matte);
+        let p = px(&out, 6, 4);
+        assert!(p[3] > 0.99, "{label}: target was cut: {p:?}");
+    }
+}
+
+#[test]
+fn matte_follows_an_edit_of_the_source_at_the_same_frame() {
+    let (mut evaluator, comp, graph, output) = render_matte_scene(
+        matte_to(2, TrackMatteKind::Alpha),
+        split_fb(BLUE_OPAQUE, BLUE_OPAQUE),
+        None,
+    );
+    let ctx = EvalContext::new(0, FPS, (8, 8));
+    let before = frame(&evaluator.evaluate(&graph, output, &ctx).unwrap());
+    assert!(px(&before, 1, 4)[3] > 0.99);
+
+    let mut edited = comp.clone();
+    edited.layers[1].opacity = AnimationChannel::constant(0.5);
+    evaluator.set_document(Arc::new(Document::default().with_composition(edited)));
+    let after = frame(&evaluator.evaluate(&graph, output, &ctx).unwrap());
+    let alpha = px(&after, 1, 4)[3];
+    assert!((alpha - 0.5).abs() < 1e-3, "alpha {alpha}");
+}
+
+// ===========================================================================
 // Custom parameters on the In node (REQ-LAYER-002/004)
 // ===========================================================================
 

@@ -26,6 +26,7 @@ mod generate;
 pub(crate) mod grade;
 mod key;
 mod mask;
+mod matte;
 mod merge;
 mod opacity;
 mod solid;
@@ -44,6 +45,7 @@ pub use generate::{
 pub use grade::{CompGradeProcessor, GradeKind};
 pub use key::{CompKeyProcessor, comp_key_mode_is_known};
 pub use mask::CompMaskProcessor;
+pub use matte::CompMatteProcessor;
 pub use merge::{CompMergeGpuProcessor, CompMergeProcessor};
 pub use opacity::{CompOpacityGpuProcessor, CompOpacityProcessor};
 pub use solid::CompSolidProcessor;

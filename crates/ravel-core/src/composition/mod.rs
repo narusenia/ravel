@@ -82,13 +82,19 @@ pub enum BlendMode {
 }
 
 // ===========================================================================
-// TrackMatte (reserved, v2)
+// TrackMatte
 // ===========================================================================
 
-/// Reserved for the v2 track-matte feature: use another layer's alpha or
-/// luminance as this layer's matte. Never evaluated yet; the field exists so
-/// the persistence format stays compatible (REQ-LAYER-001 cross-cutting
-/// reserved-field policy).
+/// Track matte: the **target** layer carrying this field is cut out by
+/// another layer's alpha or luminance. `layer` names the **source** (matte)
+/// layer by id, so the link survives reordering.
+///
+/// A source that some composited layer uses as a matte does not composite
+/// itself. A matte that cannot work — the source is missing, is the layer
+/// itself, produces no frame, is an adjustment layer, is not composited
+/// (muted / un-soloed), or names this layer as its own matte (a cycle) — is
+/// evaluated as **no matte**, never as an error. See
+/// [`Composition::track_matte_of`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrackMatte {
     /// Layer providing the matte.
@@ -97,11 +103,27 @@ pub struct TrackMatte {
     pub kind: TrackMatteKind,
 }
 
-/// How the matte layer's pixels are interpreted (reserved, v2).
+/// How the matte layer's pixels are interpreted.
+///
+/// `Alpha` keeps the target where the source is opaque; `Luma` where it is
+/// bright (Rec.709 luma of the straight colour times the source alpha). The
+/// `*Inverted` kinds keep the complement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrackMatteKind {
     Alpha,
     Luma,
+    AlphaInverted,
+    LumaInverted,
+}
+
+impl TrackMatteKind {
+    /// Every kind, in the order a picker lists them.
+    pub const ALL: [TrackMatteKind; 4] = [
+        TrackMatteKind::Alpha,
+        TrackMatteKind::AlphaInverted,
+        TrackMatteKind::Luma,
+        TrackMatteKind::LumaInverted,
+    ];
 }
 
 // ===========================================================================
@@ -752,6 +774,49 @@ impl Composition {
     /// composites, and the shell decides what that contributes.
     pub fn composites(&self, layer: &Layer) -> bool {
         !layer.muted && (layer.solo || !self.layers.iter().any(|l| l.solo))
+    }
+
+    /// The matte that really applies to `layer`: the source layer and the
+    /// kind, or `None` when the layer has no matte or the one it has cannot
+    /// work (see [`TrackMatte`]). The one authority on that rule: the
+    /// compiler wires the matte stage from it and the UI offers candidates by
+    /// it, so what is drawn and what is offered cannot disagree.
+    pub fn track_matte_of(&self, layer: &Layer) -> Option<(&Layer, TrackMatteKind)> {
+        let matte = layer.track_matte?;
+        let source = self.get_layer(matte.layer)?;
+        let usable = source.id != layer.id
+            && layer.has_frame_output()
+            && source.has_frame_output()
+            && !layer.adjustment
+            && !source.adjustment
+            && self.composites(layer)
+            && self.composites(source)
+            // A↔B: neither is used as the other's matte.
+            && source.track_matte.is_none_or(|back| back.layer != layer.id);
+        usable.then_some((source, matte.kind))
+    }
+
+    /// The ids of the layers some layer really uses as its matte; these
+    /// take no part in the composite themselves.
+    pub fn matte_sources(&self) -> std::collections::HashSet<LayerId> {
+        self.layers
+            .iter()
+            .filter_map(|l| self.track_matte_of(l))
+            .map(|(source, _)| source.id)
+            .collect()
+    }
+
+    /// Whether choosing `source` as `layer`'s matte would work, i.e. whether
+    /// a picker should list it: another layer of this composition that
+    /// produces a frame, is not an adjustment layer, and is not already
+    /// matted by `layer` (which would form a cycle).
+    pub fn can_be_matte_of(&self, layer: LayerId, source: LayerId) -> bool {
+        source != layer
+            && self.get_layer(source).is_some_and(|s| {
+                s.has_frame_output()
+                    && !s.adjustment
+                    && s.track_matte.is_none_or(|back| back.layer != layer)
+            })
     }
 
     /// The Timeline row number of the layer with `id`, or `None` when the

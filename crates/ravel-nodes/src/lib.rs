@@ -519,6 +519,10 @@ pub fn processor_for_node(
             pool.clone(),
             node,
         ))),
+        // Track-matte stage (CPU only; the kind is in the type key).
+        t if t.starts_with("comp.matte.") => {
+            comp::CompMatteProcessor::from_node(node).map(|p| Arc::new(p) as _)
+        }
         // One pipeline serves every blend mode; `comp::CompMergeProcessor`
         // stays public as the CPU reference tests register explicitly.
         t if t.starts_with("comp.merge.") => Some(Arc::new(comp::CompMergeGpuProcessor::new(

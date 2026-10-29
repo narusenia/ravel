@@ -11,7 +11,13 @@
 //! normal layer:     [Network boundary] → Transform → Opacity → Merge
 //! adjustment layer: [Network boundary] → Transform → Merge(adjustment)
 //!                        ▲ source                ▲ background
+//! matted layer:     [Network boundary] → Transform → Opacity → Matte → Merge
+//!                                                              ▲ matte: the source layer's Opacity
 //! ```
+//!
+//! A layer used as a track matte ([`Composition::track_matte_of`]) keeps its
+//! chain up to Opacity — the Matte stage reads it there — but gets no Merge,
+//! so it does not also composite on its own.
 //!
 //! The boundary node evaluates the layer's owned network under a
 //! layer-local [`crate::eval::EvalContext`]; `Transform` / `Opacity` /
@@ -23,7 +29,7 @@
 //! Role)` and are marked `synthetic = true` so they are excluded from
 //! persistence and hidden in the node editor UI.
 
-use crate::composition::{BlendMode, Composition, Layer};
+use crate::composition::{BlendMode, Composition, Layer, TrackMatteKind};
 use crate::graph::{Graph, GraphError, InputPort, Node, NodeMetadata, OutputPort};
 use crate::id::{CompId, DataTypeId, EdgeId, InputPortIndex, LayerId, NodeId, OutputPortIndex};
 use thiserror::Error;
@@ -42,6 +48,9 @@ pub enum NodeRole {
     Merge = 3,
     /// Composition-wide background source. Encoded with layer id zero.
     Background = 4,
+    /// Track-matte stage: cuts the layer out by its matte source's alpha or
+    /// luminance, between Opacity and Merge.
+    Matte = 5,
 }
 
 // ===========================================================================
@@ -68,6 +77,7 @@ pub fn decode_deterministic_node_id(id: NodeId) -> Option<(CompId, LayerId, Node
         2 => NodeRole::Opacity,
         3 => NodeRole::Merge,
         4 => NodeRole::Background,
+        5 => NodeRole::Matte,
         _ => return None,
     };
     Some((
@@ -191,6 +201,25 @@ fn make_opacity_node(comp_id: CompId, layer: &Layer) -> Node {
     node
 }
 
+fn matte_type_key(kind: TrackMatteKind) -> &'static str {
+    match kind {
+        TrackMatteKind::Alpha => "comp.matte.alpha",
+        TrackMatteKind::AlphaInverted => "comp.matte.alpha_inverted",
+        TrackMatteKind::Luma => "comp.matte.luma",
+        TrackMatteKind::LumaInverted => "comp.matte.luma_inverted",
+    }
+}
+
+fn make_matte_node(comp_id: CompId, layer: &Layer, kind: TrackMatteKind) -> Node {
+    let id = deterministic_node_id(comp_id, layer.id, NodeRole::Matte);
+    let label = format!("{} [Matte]", layer.name);
+    let mut node = synthetic_node(id, matte_type_key(kind), &label);
+    node.inputs.push(fb_input("input"));
+    node.inputs.push(fb_input("matte"));
+    node.outputs.push(fb_output());
+    node
+}
+
 fn make_merge_node(comp_id: CompId, layer: &Layer) -> Node {
     let id = deterministic_node_id(comp_id, layer.id, NodeRole::Merge);
     let label = format!("{} [Merge]", layer.name);
@@ -244,6 +273,8 @@ pub fn compile_composition(
     let mut synthetic_nodes = vec![background_id];
     g = g.add_node(background)?;
     let mut prev_merge_id = background_id;
+    let matte_sources = comp.matte_sources();
+    let mut matte_edges: Vec<(NodeId, NodeId)> = Vec::new();
 
     // Process layers bottom-to-top (index 0 = bottom).
     for layer in &active {
@@ -316,15 +347,11 @@ pub fn compile_composition(
             continue;
         }
 
-        // 3. Merge node. Adjustment layers skip the Opacity node: their
+        // 3. Opacity, then the Matte stage when the layer has a working
+        //    matte, then Merge. Adjustment layers skip Opacity: their
         //    opacity acts as the effect strength inside the adjustment merge
         //    (REQ-LAYER-010).
-        let merge = make_merge_node(comp.id, layer);
-        let merge_id = merge.id;
-        synthetic_nodes.push(merge_id);
-        g = g.add_node(merge)?;
-
-        let foreground_tip = if layer.adjustment {
+        let mut foreground_tip = if layer.adjustment {
             transform_id
         } else {
             let opacity = make_opacity_node(comp.id, layer);
@@ -341,6 +368,38 @@ pub fn compile_composition(
             )?;
             opacity_id
         };
+
+        // A matte source stops at Opacity: the Matte stage of its target reads
+        // it there, and it must not composite on its own.
+        if matte_sources.contains(&layer.id) {
+            continue;
+        }
+
+        if let Some((source, kind)) = comp.track_matte_of(layer) {
+            let matte = make_matte_node(comp.id, layer, kind);
+            let matte_id = matte.id;
+            synthetic_nodes.push(matte_id);
+            g = g.add_node(matte)?;
+            g = g.add_edge(
+                deterministic_edge_id(foreground_tip, matte_id),
+                foreground_tip,
+                OutputPortIndex(0),
+                matte_id,
+                InputPortIndex(0),
+            )?;
+            // The source's chain may come later in the stack, so its edge is
+            // wired once every node exists.
+            matte_edges.push((
+                deterministic_node_id(comp.id, source.id, NodeRole::Opacity),
+                matte_id,
+            ));
+            foreground_tip = matte_id;
+        }
+
+        let merge = make_merge_node(comp.id, layer);
+        let merge_id = merge.id;
+        synthetic_nodes.push(merge_id);
+        g = g.add_node(merge)?;
 
         // Background input: previous merge output (if any).
         g = g.add_edge(
@@ -361,6 +420,16 @@ pub fn compile_composition(
         )?;
 
         prev_merge_id = merge_id;
+    }
+
+    for (source_tip, matte_id) in matte_edges {
+        g = g.add_edge(
+            deterministic_edge_id(source_tip, matte_id),
+            source_tip,
+            OutputPortIndex(0),
+            matte_id,
+            InputPortIndex(1),
+        )?;
     }
 
     Ok(CompilationResult {
@@ -692,6 +761,168 @@ mod tests {
         assert_eq!(plain, remapped);
         // Background + network/transform/opacity/merge, and four edges.
         assert_eq!(plain.len(), 5 + 4);
+    }
+
+    fn matted(mut layer: Layer, source: u64, kind: TrackMatteKind) -> Layer {
+        layer.track_matte = Some(crate::composition::TrackMatte {
+            layer: LayerId::new(source),
+            kind,
+        });
+        layer
+    }
+
+    fn node_of(layer: u64, role: NodeRole) -> NodeId {
+        deterministic_node_id(CompId::new(1), LayerId::new(layer), role)
+    }
+
+    fn merge_count(result: &CompilationResult) -> usize {
+        result
+            .graph
+            .nodes()
+            .filter(|n| n.type_key.starts_with("comp.merge."))
+            .count()
+    }
+
+    #[test]
+    fn track_matte_topology_has_no_merge_for_the_source() {
+        // Layer 1 (target, bottom) is matted by layer 2 (source, above it).
+        let comp = test_comp()
+            .add_layer(matted(frame_layer(1), 2, TrackMatteKind::Luma))
+            .add_layer(frame_layer(2));
+        let result = compile_composition(&comp, Graph::new()).unwrap();
+
+        let edge = |from: NodeId, to: NodeId, port: u32| {
+            result.graph.edges().any(|e| {
+                e.source == from && e.target == to && e.target_port == InputPortIndex(port)
+            })
+        };
+        let matte = node_of(1, NodeRole::Matte);
+        assert_eq!(
+            result.graph.node(matte).unwrap().type_key,
+            "comp.matte.luma"
+        );
+        assert!(edge(node_of(1, NodeRole::Opacity), matte, 0));
+        assert!(edge(node_of(2, NodeRole::Opacity), matte, 1));
+        assert!(edge(matte, node_of(1, NodeRole::Merge), 1));
+
+        // The source keeps its chain up to Opacity but never merges.
+        assert!(result.graph.node(node_of(2, NodeRole::Opacity)).is_some());
+        assert!(result.graph.node(node_of(2, NodeRole::Merge)).is_none());
+        assert_eq!(merge_count(&result), 1);
+        assert_eq!(result.output_node, node_of(1, NodeRole::Merge));
+        // background + 4 (target) + matte + 3 (source: network/transform/opacity).
+        assert_eq!(result.synthetic_nodes.len(), 1 + 4 + 1 + 3);
+        assert_eq!(
+            result.graph.topological_sort().unwrap().len(),
+            result.graph.node_count()
+        );
+    }
+
+    #[test]
+    fn track_matte_source_below_the_target_compiles_too() {
+        let comp = test_comp().add_layer(frame_layer(1)).add_layer(matted(
+            frame_layer(2),
+            1,
+            TrackMatteKind::AlphaInverted,
+        ));
+        let result = compile_composition(&comp, Graph::new()).unwrap();
+        let matte = node_of(2, NodeRole::Matte);
+        assert_eq!(
+            result.graph.node(matte).unwrap().type_key,
+            "comp.matte.alpha_inverted"
+        );
+        assert!(result.graph.node(node_of(1, NodeRole::Merge)).is_none());
+        assert_eq!(result.output_node, node_of(2, NodeRole::Merge));
+        assert!(result.graph.topological_sort().is_ok());
+    }
+
+    #[test]
+    fn a_track_matte_that_cannot_work_compiles_as_no_matte() {
+        let mut adjustment = frame_layer(2);
+        adjustment.adjustment = true;
+        let mut muted = frame_layer(2);
+        muted.muted = true;
+        let cases: Vec<(&str, Composition)> = vec![
+            (
+                "missing source",
+                test_comp().add_layer(matted(frame_layer(1), 9, TrackMatteKind::Alpha)),
+            ),
+            (
+                "the layer itself",
+                test_comp().add_layer(matted(frame_layer(1), 1, TrackMatteKind::Alpha)),
+            ),
+            (
+                "no frame output",
+                test_comp()
+                    .add_layer(matted(frame_layer(1), 2, TrackMatteKind::Alpha))
+                    .add_layer(null_layer(2)),
+            ),
+            (
+                "cycle",
+                test_comp()
+                    .add_layer(matted(frame_layer(1), 2, TrackMatteKind::Alpha))
+                    .add_layer(matted(frame_layer(2), 1, TrackMatteKind::Luma)),
+            ),
+            (
+                "adjustment source",
+                test_comp()
+                    .add_layer(matted(frame_layer(1), 2, TrackMatteKind::Alpha))
+                    .add_layer(adjustment),
+            ),
+            (
+                "muted source",
+                test_comp()
+                    .add_layer(matted(frame_layer(1), 2, TrackMatteKind::Alpha))
+                    .add_layer(muted),
+            ),
+        ];
+        for (name, comp) in cases {
+            let result =
+                compile_composition(&comp, Graph::new()).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(
+                result
+                    .graph
+                    .nodes()
+                    .all(|n| !n.type_key.starts_with("comp.matte.")),
+                "{name}: a matte stage was compiled"
+            );
+            // Every composited layer still merges: nothing is dropped.
+            let expected = comp.layers.iter().filter(|l| comp.composites(l)).count()
+                - usize::from(name == "no frame output");
+            assert_eq!(merge_count(&result), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn matte_kind_tracks_into_the_type_key() {
+        for (kind, key) in [
+            (TrackMatteKind::Alpha, "comp.matte.alpha"),
+            (TrackMatteKind::AlphaInverted, "comp.matte.alpha_inverted"),
+            (TrackMatteKind::Luma, "comp.matte.luma"),
+            (TrackMatteKind::LumaInverted, "comp.matte.luma_inverted"),
+        ] {
+            let comp = test_comp()
+                .add_layer(matted(frame_layer(1), 2, kind))
+                .add_layer(frame_layer(2));
+            let result = compile_composition(&comp, Graph::new()).unwrap();
+            assert_eq!(
+                result
+                    .graph
+                    .node(node_of(1, NodeRole::Matte))
+                    .unwrap()
+                    .type_key,
+                key
+            );
+        }
+    }
+
+    #[test]
+    fn matte_role_roundtrips_through_the_node_id() {
+        let id = deterministic_node_id(CompId::new(3), LayerId::new(4), NodeRole::Matte);
+        assert_eq!(
+            decode_deterministic_node_id(id),
+            Some((CompId::new(3), LayerId::new(4), NodeRole::Matte))
+        );
     }
 
     #[test]

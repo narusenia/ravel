@@ -1204,6 +1204,60 @@ mod tests {
     use ravel_project::ProjectFile;
     use tempfile::TempDir;
 
+    /// The expression vocabulary in `EDIT_DESCRIPTION` is hand-written; this
+    /// compares it with the core's parameter vocabulary in both directions so
+    /// a new built-in or variable cannot be added without fixing the text.
+    #[test]
+    fn edit_description_vocabulary_matches_the_core() {
+        use ravel_core::expression::{Scope, vocabulary};
+        use std::collections::BTreeSet;
+
+        let section = |from: &str, to: &str| -> String {
+            let start = EDIT_DESCRIPTION.find(from).expect(from) + from.len();
+            let end = start + EDIT_DESCRIPTION[start..].find(to).expect(to);
+            EDIT_DESCRIPTION[start..end].to_string()
+        };
+
+        // `variables: frame, time (seconds), res.width/height/aspect (output),
+        // comp.width/height/aspect, constants pi and e`. A dotted group
+        // `res.a/b` stands for `res.a`, `res.b`; the parentheticals are prose.
+        let mut documented_names = BTreeSet::new();
+        let mut prose = section("variables: ", "; functions:");
+        while let Some(open) = prose.find('(') {
+            let close = open + prose[open..].find(')').expect("balanced prose");
+            prose.replace_range(open..=close, "");
+        }
+        for item in prose.split(',').map(str::trim) {
+            if let Some(constants) = item.strip_prefix("constants ") {
+                documented_names.extend(constants.split(" and ").map(str::to_string));
+            } else if let Some((namespace, parts)) = item.split_once('.') {
+                documented_names.extend(parts.split('/').map(|part| format!("{namespace}.{part}")));
+            } else {
+                documented_names.insert(item.to_string());
+            }
+        }
+        let documented_functions: BTreeSet<String> = section("functions: ", "; operators")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+
+        let vocab = vocabulary(&Scope::parameter_context());
+        let names: BTreeSet<String> = vocab
+            .variables
+            .iter()
+            .map(|name| name.to_string())
+            .chain(vocab.constants.iter().map(|name| name.to_string()))
+            .collect();
+        let functions: BTreeSet<String> =
+            vocab.functions.iter().map(|f| f.name.to_string()).collect();
+
+        assert_eq!(documented_names, names, "variables/constants drifted");
+        assert_eq!(documented_functions, functions, "functions drifted");
+        // A parameter has no geometry; the text says so and the scope agrees.
+        assert!(vocab.attributes.is_empty());
+        assert!(EDIT_DESCRIPTION.contains("no `@` attributes"));
+    }
+
     /// Hooks the GPU-less factory never gets to build.
     struct NoHooks;
     impl EvalWorkerHooks for NoHooks {

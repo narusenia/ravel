@@ -147,6 +147,9 @@ Small fixes and single-panel features do not need a plan.
   anti-patterns from `.agents/rules/`. Never weaken it to pass; add a
   justified entry to `scripts/lint-patterns.allow` only when the rule file
   documents the exception.
+- To check behaviour in the running app, drive it through `ravel-cli mcp
+  --attach` and screenshots; `docs/dev/testing.md` has the steps, including
+  restoring the global settings it changes.
 - Run the `ravel-review` skill on the diff before opening a pull request. It
   walks the context-dependent invariants (render purity, focus ownership,
   command-path singularity) that the lint cannot see.

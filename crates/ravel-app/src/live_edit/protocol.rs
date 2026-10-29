@@ -10,6 +10,13 @@
 //! <- {"id": 1, "ok": {"created": [{"kind": "composition", "id": 3}]}}
 //! <- {"id": 1, "error": {"code": "layer-not-found", "index": 0, "message": "..."}}
 //! ```
+//!
+//! A read asks for the document instead of changing it:
+//!
+//! ```text
+//! -> {"id": 2, "read": "document"}
+//! <- {"id": 2, "ok": {"project_path": "/p/a.ravprj" | null, "document": "<RON text>"}}
+//! ```
 
 use ravel_core::edit::{Applied, BatchError, Created, EditOp};
 use serde_json::{Value, json};
@@ -18,12 +25,30 @@ use serde_json::{Value, json};
 /// connection can make the process buffer.
 pub const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
+/// What a request asks for.
+#[derive(Debug)]
+pub enum Action {
+    Edit(Vec<EditOp>),
+    /// A copy of the open document; changes nothing.
+    ReadDocument,
+}
+
 /// A well-formed request.
 #[derive(Debug)]
 pub struct Request {
     /// Echoed back untouched; any JSON.
     pub id: Value,
-    pub ops: Vec<EditOp>,
+    pub action: Action,
+}
+
+impl Request {
+    /// The operations an edit carries; none for a read.
+    pub fn ops(&self) -> &[EditOp] {
+        match &self.action {
+            Action::Edit(ops) => ops,
+            Action::ReadDocument => &[],
+        }
+    }
 }
 
 /// One response line (without the newline).
@@ -43,14 +68,37 @@ pub fn parse_request(line: &str) -> Result<Request, String> {
     let object = value
         .as_object_mut()
         .ok_or_else(|| bad("the request must be a JSON object".into()))?;
+    let id = object.remove("id").unwrap_or(Value::Null);
+    if let Some(read) = object.remove("read") {
+        return match read.as_str() {
+            Some("document") => Ok(Request {
+                id,
+                action: Action::ReadDocument,
+            }),
+            _ => Err(bad("`read` must be \"document\"".into())),
+        };
+    }
     let ops = object
         .remove("ops")
         .ok_or_else(|| bad("missing field `ops`".into()))?;
     let ops = serde_json::from_value(ops).map_err(|e| bad(format!("ops: {e}")))?;
     Ok(Request {
-        id: object.remove("id").unwrap_or(Value::Null),
-        ops,
+        id,
+        action: Action::Edit(ops),
     })
+}
+
+/// The response to a read: the document as RON text (the persistence format,
+/// so numbers and ids survive where JSON would not) and where the project
+/// lives, which the reader needs to resolve relative asset paths.
+pub fn read_response(id: &Value, project_path: Option<&std::path::Path>, document: &str) -> String {
+    let project_path = project_path.map(|p| p.to_string_lossy());
+    json!({"id": id, "ok": {"project_path": project_path, "document": document}}).to_string()
+}
+
+/// The response when the document could not be written out.
+pub fn read_failed(id: &Value, message: &str) -> String {
+    error_line(id, "read-failed", None, message)
 }
 
 /// The index of the first operation that removes something, if any.
@@ -134,7 +182,17 @@ mod tests {
             Err(line) => panic!("refused: {line}"),
         };
         assert_eq!(req.id, json!({"n": 7}));
-        assert_eq!(req.ops.len(), 1);
+        assert_eq!(req.ops().len(), 1);
+    }
+
+    #[test]
+    fn a_read_request_has_no_ops_and_only_one_kind() {
+        let req = parse_request(r#"{"id": 3, "read": "document"}"#).unwrap();
+        assert!(matches!(req.action, Action::ReadDocument));
+        assert!(req.ops().is_empty());
+        // Anything else under `read` is refused rather than read as an edit.
+        let refused = parsed(&parse_request(r#"{"id": 3, "read": "all"}"#).unwrap_err());
+        assert_eq!(refused["error"]["code"], "bad-request");
     }
 
     #[test]

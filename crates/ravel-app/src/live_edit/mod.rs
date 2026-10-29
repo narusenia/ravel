@@ -151,7 +151,10 @@ async fn handle(
     request: &protocol::Request,
     cx: &mut AsyncApp,
 ) -> Option<String> {
-    let Some(index) = protocol::first_removal(&request.ops) else {
+    if matches!(request.action, protocol::Action::ReadDocument) {
+        return Some(read_document(project, &request.id, cx).await);
+    }
+    let Some(index) = protocol::first_removal(request.ops()) else {
         return Some(cx.update(|cx| project.update(cx, |p, cx| apply(p, request, cx))));
     };
     // What the user is shown is this document; the batch is applied to this
@@ -162,7 +165,7 @@ async fn handle(
         // when the two documents are equal.
         let doc = (p.generation(), p.document().clone());
         let (ask, verdict) =
-            confirm::RemovalRequest::new(confirm::describe_removals(&doc.1, &request.ops));
+            confirm::RemovalRequest::new(confirm::describe_removals(&doc.1, request.ops()));
         // With nobody subscribed the event is dropped with `ask`, which reads
         // as a denial.
         door.update(cx, |_, cx| cx.emit(LiveEditEvent::ConfirmRemoval(ask)))
@@ -183,6 +186,28 @@ async fn handle(
     }))
 }
 
+/// A read: a copy of the document, written out off the main thread. Changes
+/// nothing, asks nothing and adds no undo step. The clone is structural
+/// sharing, so the main thread pays for a pointer copy, not for the RON text.
+async fn read_document(
+    project: &Entity<ProjectState>,
+    id: &serde_json::Value,
+    cx: &mut AsyncApp,
+) -> String {
+    let (document, path) = cx.update(|cx| {
+        let p = project.read(cx);
+        (p.document().clone(), p.project_path().map(PathBuf::from))
+    });
+    let text = cx
+        .background_executor()
+        .spawn(async move { ravel_project::document_to_ron(&document) })
+        .await;
+    match text {
+        Ok(text) => protocol::read_response(id, path.as_deref(), &text),
+        Err(error) => protocol::read_failed(id, &error.to_string()),
+    }
+}
+
 #[cfg(unix)]
 impl Drop for LiveEdit {
     fn drop(&mut self) {
@@ -198,7 +223,7 @@ fn apply(
     request: &protocol::Request,
     cx: &mut Context<ProjectState>,
 ) -> String {
-    match project.commit_edit_ops(&request.ops, cx) {
+    match project.commit_edit_ops(request.ops(), cx) {
         Ok(applied) => protocol::ok_response(&request.id, &applied),
         Err(err) => protocol::batch_error_response(&request.id, &err),
     }
@@ -443,8 +468,11 @@ mod tests {
         }
 
         fn send(&self, id: i64, ops: &[EditOp]) -> mpsc::Receiver<String> {
-            let line = serde_json::json!({"id": id, "ops": ops}).to_string();
-            let request = protocol::parse_request(&line).unwrap();
+            self.send_line(&serde_json::json!({"id": id, "ops": ops}).to_string())
+        }
+
+        fn send_line(&self, line: &str) -> mpsc::Receiver<String> {
+            let request = protocol::parse_request(line).unwrap();
             let (reply, answer) = mpsc::sync_channel(1);
             self.tx.unbounded_send(Job { request, reply }).unwrap();
             answer
@@ -506,6 +534,33 @@ mod tests {
         assert_ne!(h.document(cx), before);
         // The setup commit plus the approved removal: two steps, not three.
         assert_eq!(h.undo_steps(cx), 2);
+    }
+
+    /// A read hands back the document as text the CLI can parse, and leaves
+    /// the document, the undo history and the user alone.
+    #[gpui::test]
+    fn a_read_returns_the_document_and_changes_nothing(cx: &mut TestAppContext) {
+        let h = Harness::new(cx);
+        let add = [EditOp::AddComposition {
+            settings: CompositionSettings::fallback("Second"),
+            alias: None,
+        }];
+        h.project
+            .update(cx, |p, cx| p.commit_edit_ops(&add, cx))
+            .unwrap();
+        let before = h.document(cx);
+        let answer = h.send_line(r#"{"id": 5, "read": "document"}"#);
+        cx.run_until_parked();
+        let reply = reply_of(&answer);
+        assert_eq!(reply["id"], 5);
+        assert!(reply["ok"]["project_path"].is_null(), "{reply}");
+        let copy = ravel_project::document_from_ron(reply["ok"]["document"].as_str().unwrap())
+            .expect("the text parses");
+        assert_eq!(copy, before, "the copy is not the open document");
+        assert!(h.asked.borrow().is_empty(), "a read asked the user");
+        assert_eq!(h.document(cx), before);
+        // Exactly the setup commit is on the stack: the read added no step.
+        assert_eq!(h.undo_steps(cx), 1);
     }
 
     #[gpui::test]

@@ -715,12 +715,25 @@ fn ron_options() -> ron::Options {
 /// project on Windows and on macOS produces different bytes. It also removes a
 /// whole class of test bug: a fixture that rewrites serializer output matched
 /// nothing on Windows and only the Windows CI job could say so.
-fn document_to_ron(document: &Document) -> Result<String, ProjectError> {
+pub fn document_to_ron(document: &Document) -> Result<String, ProjectError> {
     let config = ron::ser::PrettyConfig::new()
         .struct_names(true)
         .new_line("\n")
         .indentor("  ".to_string());
     ron::ser::to_string_pretty(document, config).map_err(ProjectError::DocumentSerialize)
+}
+
+/// Parse the text [`document_to_ron`] wrote, with the recursion budget and the
+/// structural checks a load applies. For a document handed over in memory (the
+/// live-edit read), which a running app already holds normalized; a file goes
+/// through [`ProjectFile::load`] instead.
+pub fn document_from_ron(text: &str) -> Result<Document, ProjectError> {
+    let document: Document = ron_options()
+        .from_str(text)
+        .map_err(ProjectError::DocumentParse)?;
+    document.validate_subnet_depth()?;
+    document.validate()?;
+    Ok(document)
 }
 
 /// The project root for an archive stored at `path`: the directory that

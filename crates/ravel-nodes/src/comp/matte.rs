@@ -31,6 +31,7 @@ use ravel_core::graph::Node;
 use ravel_core::types::{FrameBuffer, NodeData};
 use std::sync::Arc;
 
+use super::merge::pixel_at;
 use super::transparent;
 use crate::gpu_util::ensure_cpu;
 
@@ -93,24 +94,23 @@ impl NodeProcessor for CompMatteProcessor {
 
         let source = ensure_cpu(input.as_ref())?;
         let matte = ensure_cpu(matte.as_ref())?;
-        anyhow::ensure!(
-            (source.width, source.height) == (matte.width, matte.height),
-            "comp.matte: the matte is {}x{} but the layer is {}x{}",
-            matte.width,
-            matte.height,
-            source.width,
-            source.height
-        );
-        let mut pixels = source.as_rgba_f32()?.into_owned();
+        // Either side may carry media at its native size (identity transform
+        // and opacity pass frames through), so both are padded/cropped onto
+        // the composition raster the way `comp.merge` does.
+        let (width, height) = ctx.resolution;
+        let source_px = source.as_rgba_f32()?;
         let matte_px = matte.as_rgba_f32()?;
-        for (px, m) in pixels.chunks_exact_mut(4).zip(matte_px.chunks_exact(4)) {
-            px[3] *= matte_value(self.mode, self.inverted, m);
+        let mut pixels = vec![0.0f32; width as usize * height as usize * 4];
+        for y in 0..height {
+            for x in 0..width {
+                let mut px = pixel_at(&source_px, source.width, source.height, x, y);
+                let m = pixel_at(&matte_px, matte.width, matte.height, x, y);
+                px[3] *= matte_value(self.mode, self.inverted, &m);
+                let idx = ((y * width + x) * 4) as usize;
+                pixels[idx..idx + 4].copy_from_slice(&px);
+            }
         }
-        Ok(Arc::new(FrameBuffer::from_f32(
-            source.width,
-            source.height,
-            pixels,
-        )))
+        Ok(Arc::new(FrameBuffer::from_f32(width, height, pixels)))
     }
 
     fn is_time_dependent(&self) -> bool {
@@ -155,5 +155,34 @@ mod tests {
         let green = matte_value(MatteMode::Luma, false, &[0.0, 1.0, 0.0, 1.0]);
         let blue = matte_value(MatteMode::Luma, false, &[0.0, 0.0, 1.0, 1.0]);
         assert!(green > 0.7 && blue < 0.1);
+    }
+
+    /// A matte (or layer) at media-native size is fitted onto the composition
+    /// raster like `comp.merge` does, instead of failing the composite.
+    #[test]
+    fn mismatched_sizes_are_fitted_to_the_composition() {
+        let node = Node::new(ravel_core::id::NodeId::new(1), "comp.matte.alpha");
+        let processor = CompMatteProcessor::from_node(&node).expect("matte kind");
+        let ctx = EvalContext::new(0, ravel_core::types::FrameRate::new(30, 1), (4, 4));
+        // 4x4 opaque white layer, 2x2 opaque matte: the matte covers the
+        // top-left quarter and the padded rest reads as transparent.
+        let layer: Arc<dyn NodeData> = Arc::new(FrameBuffer::from_f32(4, 4, vec![1.0; 64]));
+        let matte: Arc<dyn NodeData> = Arc::new(FrameBuffer::from_f32(2, 2, vec![1.0; 16]));
+        let mut scope = ravel_core::eval::Evaluator::new();
+        let out = processor
+            .process(
+                &node,
+                &ctx,
+                &[Some(layer), Some(matte)],
+                &ResolvedParams::default(),
+                &mut scope,
+            )
+            .expect("a size mismatch is not an error");
+        let out = ensure_cpu(out.as_ref()).unwrap();
+        assert_eq!((out.width, out.height), (4, 4));
+        let px = out.as_rgba_f32().unwrap();
+        let alpha = |x: usize, y: usize| px[(y * 4 + x) * 4 + 3];
+        assert_eq!(alpha(1, 1), 1.0);
+        assert_eq!(alpha(3, 3), 0.0);
     }
 }

@@ -2242,14 +2242,13 @@ mod animation {
             ParameterValue::Channel(expression_channel("frame")),
         );
         let target = || param_target(&path, node, "width");
-        assert!(
-            apply(
-                &expr,
-                &set_keys(target(), 0, vec![linear(10, 1.0)]),
-                &cx(&reg)
-            )
-            .is_err()
-        );
+        let err = apply(
+            &expr,
+            &set_keys(target(), 0, vec![linear(10, 1.0)]),
+            &cx(&reg),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "driven-parameter");
         assert!(apply(&expr, &set_expr(target(), 0, "frame + 1"), &cx(&reg)).is_ok());
     }
 

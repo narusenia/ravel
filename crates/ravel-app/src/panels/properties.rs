@@ -4215,6 +4215,7 @@ impl PropertiesGpuiPanel {
                         let (val, commit) = match event {
                             ScrubEvent::Change(v) => (*v, false),
                             ScrubEvent::Commit(v) => (*v, true),
+                            ScrubEvent::EditStarted => return,
                         };
                         let value = if integer {
                             PropertyValue::Int(val.round() as i32)
@@ -4269,6 +4270,7 @@ impl PropertiesGpuiPanel {
                                 let (val, commit) = match event {
                                     ScrubEvent::Change(v) => (*v, false),
                                     ScrubEvent::Commit(v) => (*v, true),
+                                    ScrubEvent::EditStarted => return,
                                 };
                                 // The other components keep their current
                                 // section values.

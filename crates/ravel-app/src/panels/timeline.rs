@@ -3228,6 +3228,7 @@ impl TimelineGpuiPanel {
             let (value, commit) = match event {
                 ScrubEvent::Change(value) => (*value, false),
                 ScrubEvent::Commit(value) => (*value, true),
+                ScrubEvent::EditStarted => return,
             };
             this.write_channel_value(comp_id, &target, value, commit, cx);
         });

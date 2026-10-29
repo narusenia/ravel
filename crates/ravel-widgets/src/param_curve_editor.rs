@@ -674,6 +674,7 @@ impl ParamCurveEditorState {
             let (value, commit) = match event {
                 ScrubEvent::Change(value) => (*value, false),
                 ScrubEvent::Commit(value) => (*value, true),
+                ScrubEvent::EditStarted => return,
             };
             this.set_selected_component(axis, value, commit, cx);
         })
@@ -689,6 +690,7 @@ impl ParamCurveEditorState {
         cx.subscribe(entity, move |this, _state, event: &ScrubEvent, cx| {
             let value = match event {
                 ScrubEvent::Change(value) | ScrubEvent::Commit(value) => *value,
+                ScrubEvent::EditStarted => return,
             };
             this.set_range_bound(bound, value, cx);
         })

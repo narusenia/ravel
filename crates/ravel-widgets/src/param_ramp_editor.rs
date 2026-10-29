@@ -123,6 +123,7 @@ impl ParamRampEditorState {
                     let (value, commit) = match event {
                         ScrubEvent::Change(value) => (*value, false),
                         ScrubEvent::Commit(value) => (*value, true),
+                        ScrubEvent::EditStarted => return,
                     };
                     this.set_selected_position(value, commit, cx);
                 }),

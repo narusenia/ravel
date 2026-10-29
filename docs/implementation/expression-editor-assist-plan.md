@@ -147,7 +147,7 @@ kit フォークの改造は要らない。検証は kit（rev `7eafdc2`）の�
 
 - `highlight_tokens(source) -> Vec<(Span, TokenClass)>`: 壊れた入力でも止まらず、
   未知の文字は `TokenClass::Error` で 1 文字ずつ進む。`TokenClass` は
-  数値・識別子（関数 / 定数 / 変数 / 属性）・演算子・括弧・コメントなど、
+  数値・識別子（関数 / 定数 / 変数 / 属性）・演算子・括弧・空白・エラーなど（式言語にコメント構文は無いので持たない）、
   色を分ける粒度だけ持つ（字句解析器 `pub(crate)` の `TokenKind` は出さず、
   公開型を別に切る）
 - `vocabulary(scope) -> Vocabulary`: `Builtin::ALL`（名前・`Arity::describe`）、

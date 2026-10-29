@@ -243,6 +243,7 @@ impl MenuBar {
                 MenuItem::action(CommandId::LayerAddVideo),
                 MenuItem::action(CommandId::LayerAddAudio),
                 MenuItem::action(CommandId::LayerAddNull),
+                MenuItem::action(CommandId::LayerAddAdjustment),
             ],
         );
 

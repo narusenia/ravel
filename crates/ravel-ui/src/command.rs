@@ -167,6 +167,7 @@ pub enum CommandId {
     LayerAddVideo,
     LayerAddAudio,
     LayerAddNull,
+    LayerAddAdjustment,
     // Workspace presets
     WorkspaceEdit,
     WorkspaceNode,
@@ -430,6 +431,7 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
     (CommandId::LayerAddVideo, "layer.add_video"),
     (CommandId::LayerAddAudio, "layer.add_audio"),
     (CommandId::LayerAddNull, "layer.add_null"),
+    (CommandId::LayerAddAdjustment, "layer.add_adjustment"),
     (CommandId::WorkspaceEdit, "workspace.edit"),
     (CommandId::WorkspaceNode, "workspace.node"),
     (CommandId::WorkspaceColor, "workspace.color"),
@@ -553,6 +555,7 @@ impl CommandId {
             CommandId::LayerAddVideo => "menu.layer.add_video",
             CommandId::LayerAddAudio => "menu.layer.add_audio",
             CommandId::LayerAddNull => "menu.layer.add_null",
+            CommandId::LayerAddAdjustment => "menu.layer.add_adjustment",
             CommandId::WorkspaceEdit => "menu.workspace.edit",
             CommandId::WorkspaceNode => "menu.workspace.node",
             CommandId::WorkspaceColor => "menu.workspace.color",
@@ -593,6 +596,7 @@ impl CommandId {
             CommandId::LayerAddVideo => Some("media"),
             CommandId::LayerAddAudio => Some("audio"),
             CommandId::LayerAddNull => Some("null"),
+            CommandId::LayerAddAdjustment => Some("adjustment"),
             _ => None,
         }
     }

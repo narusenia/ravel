@@ -75,6 +75,7 @@ add_shape = "シェイプレイヤーを追加"
 add_video = "ビデオレイヤーを追加"
 add_audio = "オーディオレイヤーを追加"
 add_null = "ヌルレイヤーを追加"
+add_adjustment = "調整レイヤーを追加"
 
 [menu.playback]
 _self = "再生"

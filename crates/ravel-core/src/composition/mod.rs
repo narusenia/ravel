@@ -266,10 +266,15 @@ pub struct Layer {
 impl Layer {
     /// Turn the adjustment flag on or off. Turning it on gives the network's
     /// In node the `source` port the lower stack arrives on; turning it off
-    /// leaves the port, which then reads transparent.
+    /// leaves the port, which then reads transparent. Turning it on also wires
+    /// `source` into an Out `frame` that nothing feeds, so the layer passes
+    /// the stack through instead of replacing it with a transparent frame.
     pub fn set_adjustment(&mut self, adjustment: bool) {
         self.adjustment = adjustment;
         self.network = append_missing_in_ports(&self.network, adjustment);
+        if adjustment {
+            self.network = wire_source_to_unfed_frame(&self.network);
+        }
     }
 
     pub fn new(id: LayerId, name: impl Into<String>, network: Graph) -> Self {
@@ -1209,6 +1214,34 @@ fn append_missing_in_ports(graph: &Graph, adjustment: bool) -> Graph {
         return graph.clone();
     }
     graph.clone().replace_node(std::sync::Arc::new(updated))
+}
+
+/// Connect In `source` to Out `frame` when the Out node has a `frame` input
+/// with no edge into it. A fed `frame` is the user's network and is left alone;
+/// an Out without `frame` (a Null) is frameless by design and stays that way.
+fn wire_source_to_unfed_frame(graph: &Graph) -> Graph {
+    use crate::id::{EdgeId, InputPortIndex};
+    use crate::network as net;
+    let (Some(in_node), Some(out_node)) = (net::find_in_node(graph), net::find_out_node(graph))
+    else {
+        return graph.clone();
+    };
+    let (Some(source), Some(frame)) = (
+        net::output_port_index(in_node, net::PORT_SOURCE),
+        net::frame_port_index(out_node).map(|i| InputPortIndex(i as u32)),
+    ) else {
+        return graph.clone();
+    };
+    if graph
+        .edges()
+        .any(|e| e.target == out_node.id && e.target_port == frame)
+    {
+        return graph.clone();
+    }
+    graph
+        .clone()
+        .add_edge(EdgeId::next(), in_node.id, source, out_node.id, frame)
+        .unwrap_or_else(|_| graph.clone())
 }
 
 /// Upgrade nodes whose templates declare a variadic input group. Existing
@@ -3086,6 +3119,65 @@ mod tests {
         layer.set_adjustment(false);
         assert!(!layer.adjustment);
         assert_eq!(names(&layer), ["base_geometry", "t", "f", "source"]);
+    }
+
+    /// Turning a layer into an adjustment layer feeds an unfed Out `frame`
+    /// from `source` (pass-through), and leaves a fed one alone.
+    #[test]
+    fn set_adjustment_wires_source_only_into_an_unfed_frame() {
+        use crate::graph::Node;
+        use crate::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+        use crate::network as net;
+
+        let network = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(10), net::NET_IN_TYPE_KEY)
+                    .with_output(net::PORT_FRAME_INDEX, DataTypeId::SCALAR),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(11), net::NET_OUT_TYPE_KEY)
+                    .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+            )
+            .unwrap();
+        let into_frame = |graph: &Graph| -> Vec<(NodeId, OutputPortIndex)> {
+            graph
+                .edges()
+                .filter(|e| e.target == NodeId::new(11))
+                .map(|e| (e.source, e.source_port))
+                .collect()
+        };
+
+        let mut unfed = Layer::new(LayerId::new(1), "Unfed", network.clone());
+        unfed.set_adjustment(true);
+        // `source` is appended after `f`.
+        assert_eq!(
+            into_frame(&unfed.network),
+            [(NodeId::new(10), OutputPortIndex(1))]
+        );
+        // Idempotent: the frame is fed now.
+        unfed.set_adjustment(true);
+        assert_eq!(into_frame(&unfed.network).len(), 1);
+
+        let content =
+            Node::new(NodeId::new(12), "test").with_output("out", DataTypeId::FRAME_BUFFER);
+        let fed = network
+            .add_node(content)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(12),
+                OutputPortIndex(0),
+                NodeId::new(11),
+                InputPortIndex(0),
+            )
+            .unwrap();
+        let mut fed = Layer::new(LayerId::new(2), "Fed", fed);
+        fed.set_adjustment(true);
+        assert_eq!(
+            into_frame(&fed.network),
+            [(NodeId::new(12), OutputPortIndex(0))]
+        );
     }
 
     /// A project saved with an adjustment layer whose In node lacks `source`

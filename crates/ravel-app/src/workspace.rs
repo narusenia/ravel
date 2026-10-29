@@ -136,6 +136,7 @@ macro_rules! for_each_command {
             LayerAddVideo,
             LayerAddAudio,
             LayerAddNull,
+            LayerAddAdjustment,
             WorkspaceEdit,
             WorkspaceNode,
             WorkspaceColor,
@@ -1812,7 +1813,8 @@ impl RavelWorkspace {
                 | CommandId::LayerAddShape
                 | CommandId::LayerAddVideo
                 | CommandId::LayerAddAudio
-                | CommandId::LayerAddNull => {
+                | CommandId::LayerAddNull
+                | CommandId::LayerAddAdjustment => {
                     if let Some(key) = cmd.layer_template_key() {
                         let layer = self
                             .project

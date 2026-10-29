@@ -5910,6 +5910,7 @@ impl Render for TimelineGpuiPanel {
                                                 CommandId::LayerAddVideo,
                                                 CommandId::LayerAddAudio,
                                                 CommandId::LayerAddNull,
+                                                CommandId::LayerAddAdjustment,
                                             ]
                                             .into_iter()
                                             .fold(

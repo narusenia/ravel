@@ -1,0 +1,33 @@
+// Adjustment layer: the composited lower stack arrives on `source` and passes
+// straight to Out, so effect nodes are inserted between the two
+// (REQ-LAYER-010). Instantiating it also sets the layer's adjustment flag.
+LayerTemplate(
+    key: "adjustment",
+    display_name: "Adjustment",
+    nodes: [
+        TemplateNode(
+            key: "in",
+            type_key: "net.in",
+            label: Some("In"),
+            position: (-360.0, 0.0),
+            outputs: [
+                OutputPort(name: "base_geometry", data_type: DataTypeId(50)),
+                OutputPort(name: "t", data_type: DataTypeId(10)),
+                OutputPort(name: "f", data_type: DataTypeId(10)),
+                OutputPort(name: "source", data_type: DataTypeId(1)),
+            ],
+        ),
+        TemplateNode(
+            key: "out",
+            type_key: "net.out",
+            label: Some("Out"),
+            position: (120.0, 0.0),
+            inputs: [
+                InputPort(name: "frame", accepted_types: [DataTypeId(1)]),
+            ],
+        ),
+    ],
+    edges: [
+        TemplateEdge(from: ("in", "source"), to: ("out", "frame")),
+    ],
+)

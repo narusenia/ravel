@@ -44,12 +44,13 @@ const DISCLOSURE_SIZE: f32 = 14.0;
 
 /// Builtin layer templates offered by the composition row's Add Layer
 /// submenu, in the Layer menu's order.
-const LAYER_ADD_COMMANDS: [CommandId; 5] = [
+const LAYER_ADD_COMMANDS: [CommandId; 6] = [
     CommandId::LayerAddSolid,
     CommandId::LayerAddShape,
     CommandId::LayerAddVideo,
     CommandId::LayerAddAudio,
     CommandId::LayerAddNull,
+    CommandId::LayerAddAdjustment,
 ];
 
 /// A layer row being dragged to a new position in its composition's stack.

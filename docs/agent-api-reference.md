@@ -1147,7 +1147,7 @@ templates::LayerTemplate { key, display_name, nodes, edges }  // RON data
     // registry seeds ports/params; template extends/overrides; fresh
     // NodeId::next per instantiation
 templates::{builtin_layer_templates(), builtin_layer_template(key)}
-    // "solid" | "shape" | "media" | "audio" | "null" from assets/layer-templates/
+    // "solid" | "shape" | "media" | "audio" | "null" | "adjustment" from assets/layer-templates/
 ```
 
 ### `network` — In/Out interface conventions (REQ-LAYER-002)
@@ -2674,7 +2674,7 @@ Unknown type keys are skipped silently (plugin space).
   re-export, so there is one definition.
 - `CommandId` (command.rs): every user command; string ids like
   `panel.reattach`, menu label keys via `menu_label_key()`.
-  `LayerAdd{Solid,Shape,Video,Audio,Null}` map to builtin layer templates via
+  `LayerAdd{Solid,Shape,Video,Audio,Null,Adjustment}` map to builtin layer templates via
   `layer_template_key()` (REQ-LAYER-008; a test ties the two sets together).
 - Keybindings (keybindings/): `KeyChord { modifiers, key }` (`FromStr` /
   `Display` round-trip `"Cmd+Shift+Z"`) and `KeyBindings { bind ->

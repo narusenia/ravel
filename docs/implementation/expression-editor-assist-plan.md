@@ -1,6 +1,6 @@
 # 式エディタの補完とハイライト 実装計画
 
-> **Status**: Planned — 2026-10-29
+> **Status**: In progress — `EXED-1` / `EXED-2` 済（#631）。次は `EXED-3`（2026-10-30）
 
 対象: `ravel-core` の式言語の語彙の公開（`expression/`）、`ravel-widgets` の
 式エディタウィジェット、`ravel-app` の Properties（パラメータ式）、

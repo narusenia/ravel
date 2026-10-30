@@ -47,8 +47,7 @@
 | NGR-6 | Reroute ノード | `node-graph-readability-plan.md` |
 | NGR-7 | エッジへのドロップでノードを挟む | `node-graph-readability-plan.md` |
 | WRG-1 | 式言語の複数文とローカル変数 | `wrangle-plan.md` |
-| EXED-1 | 式の欄を `EditorState` に載せられるかのスパイク（補完・ハイライトの前提） | `expression-editor-assist-plan.md` |
-| EXED-2 | 式の語彙とエラー許容のトークン分類（コア） | `expression-editor-assist-plan.md` |
+| EXED-3 | `ravel-widgets` の式エディタとハイライト（`EXED-1/2` ✅、`lsp-types` 直接依存は承認済み） | `expression-editor-assist-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
 | GPUBK-13 | 文書更新（`GPUBK-14` の判定を要件・仕様へ反映） | `gpu-backend-plan.md` |
 | GPUBK-15 | ディスパッチを 1 コンピュートパスに畳む | `gpu-backend-plan.md` |
@@ -1009,9 +1008,9 @@ Solid の bbox がコンプ解像度分あるのは bbox の計算のせいで�
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| EXED-1 | 🟡 | スパイク: `EditorState` を 1 行の式の欄にできるか・補完のキーを取れるか（失敗時の退路は利用者判断） | — |
-| EXED-2 | 🟡 | コア: エラー許容のトークン分類 `highlight_tokens` と `vocabulary(scope)`、MCP 語彙のドリフトテスト | — |
-| EXED-3 | ⬜ | `ravel-widgets` の式エディタとハイライト（gallery 登録） | EXED-1, EXED-2 |
+| EXED-1 | ✅ #631 | スパイク: `EditorState` を 1 行の式の欄にできるか・補完のキーを取れるか（失敗時の退路は利用者判断） | — |
+| EXED-2 | ✅ #631 | コア: エラー許容のトークン分類 `highlight_tokens` と `vocabulary(scope)`、MCP 語彙のドリフトテスト | — |
+| EXED-3 | 🟡 | `ravel-widgets` の式エディタとハイライト（gallery 登録） | EXED-1, EXED-2 |
 | EXED-4 | ⬜ | 補完ポップアップとキー処理 | EXED-3 |
 | EXED-5 | ⬜ | `Span` によるエラー位置の下線 | EXED-3 |
 | EXED-6 | ⬜ | Properties と `field.expression` への展開、文書（`SHELL-6` が再利用） | EXED-4, EXED-5 |

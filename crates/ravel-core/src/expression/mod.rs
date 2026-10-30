@@ -61,11 +61,13 @@ mod ast;
 pub mod builtin;
 mod context;
 mod error;
+mod highlight;
 mod lexer;
 mod noise;
 mod parser;
 mod program;
 mod scope;
+mod vocabulary;
 
 #[cfg(test)]
 mod tests;
@@ -76,6 +78,7 @@ pub use context::{
     FIELD_VALUE_COUNT, FieldContext, PARAMETER_VALUE_COUNT, field_values, parameter_values,
 };
 pub use error::{ExpressionError, ExpressionErrorKind, Span};
+pub use highlight::{TokenClass, highlight_tokens};
 pub use lexer::MAX_TOKENS;
 pub use parser::{MAX_NESTING_DEPTH, parse};
 #[cfg(test)]
@@ -84,6 +87,7 @@ pub use program::{CompileOptions, Dependencies, MAX_STACK_SLOTS, Program};
 pub use scope::{
     AttributeDecl, FIELD_VARIABLES, PARAMETER_VARIABLES, STANDARD_ATTRIBUTES, Scope, VarSlot,
 };
+pub use vocabulary::{FunctionEntry, Vocabulary, vocabulary};
 
 /// Compile `source` against the names `scope` declares.
 ///

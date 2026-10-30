@@ -114,11 +114,40 @@ ravel-app::panels::properties（パラメータ式）  →  field.expression  �
   **利用者へ戻す**（EXED-2 以降は止める。EXED-2 は経路に依らないので
   並行して進めてよい）
 
+#### EXED-1 結果（2026-10-29）
+
+**結論: 経路 (a) は成立する（go）。ただし前提 2 点が違い、EXED-3 以降の設計に反映する。**
+kit フォークの改造は要らない。検証は kit（rev `7eafdc2`）のソース読みと、
+使い捨ての `#[gpui::test]`（`ravel-widgets` に置いて削除。マージしない）で行った。
+
+| 項目 | 結果 |
+|---|---|
+| 1 行の見た目 | **`auto_grow` は使えない（できない）**。`auto_grow` は `TextareaState` にだけ在り、`EditorState` には無い（呼ぶとコンパイルエラー）。仮に在っても `LayoutMode::AutoGrow` へ差し替わり、ハイライタ・行番号は `CodeEditor` モードにしか無い。**こう差し込む**: `EditorState::new(..).line_number(false)`（`#[doc(hidden)]` だが `pub`。行番号欄が消える）のまま、高さは呼び出し側の親要素で決める。`CodeEditor` の要素は親の高さを `relative(1.)` で埋め、最小は 1 行。1 行の欄は親を 1 行高に固定し、`WRG-1` で行数を増やすときは親の高さを折り返し行数から計算する。折り返し行数の取得口は未確認 |
+| Up / Down / Escape / Enter を取る | **できる**。補完メニューが開いている間、`MoveUp` / `MoveDown` / `Enter` / `Escape` は kit が `set_overlay_action_handler` のハンドラへ先に渡す（`true` を返すと消費）。メニューが閉じていれば呼ばれず従来どおり（Enter は `PressEnter`、Escape は伝播）。`present_completion_items`（開く）、`insert_completion`（確定）、`dismiss_completion_overlay`（閉じる）はいずれも `pub` |
+| Tab を取る | **ハンドラ経由では取れない**（`IndentInline` は補完メニューを見ず、空白 2 個を挿入する）。**こう差し込む**: Ravel の action を `"Input"` コンテキストへ**後から** `tab` で束縛し、ラッパ要素の `on_action` で受ける。ポップアップが開いていれば消費して確定、閉じていれば `cx.propagate()` で kit の挙動へ落とせる（テストで確認）。ラッパ側の浅いコンテキストへ束縛しても負ける。束縛は全 `Input` に効くため、他の入力欄への副作用（ハンドラが無いときの扱い）は EXED-4 で確認する。キー割り当ては `assets/keybindings` と `CommandId` の経路に乗せる |
+| フォーカスを残したままポップアップ | **できる**。ハンドラ経由の操作ではフォーカスは動かず、メニューが開いている間 `on_blur` は何もしない。`FocusHandle` を持たない兄弟 `div` をクリックしてもエディタのフォーカスは外れなかった（テスト）。ポップアップ内のマウス操作の挙動は未確認（実機） |
+| 単一行の期待動作 | **一部できる**。`submit_on_enter(true)` で Enter は改行を入れず `PressEnter` だけを出す。ただし **Shift+Enter は改行を入れ、貼り付けも改行を取り込む**（テスト）。`WRG-1` 前は `Change` で改行を除くか、`shift-enter` / `paste` を同じ「後から束縛」で受ける必要がある。前者は undo 履歴に残る点に注意 |
+| `InputHighlighter` に渡るもの | **全文 + 差分**。`update(Some(InputEdit), &Rope 全文, ..)` が打鍵ごとに 1 回、`styles(range)` は描画ごとに複数回（可視範囲）呼ばれる。`styles` は範囲を**隙間なく**覆う列を返す契約で、`highlight_tokens` が空白も含めて全バイトを覆うので合う。**こう差し込む**: `update` で `highlight_tokens` を 1 回計算して保持し、`styles` は保持した結果を範囲で切る。コストは 456 文字で 1 回あたり約 4 µs（デバッグビルド、負荷あり）で、毎打鍵の再計算は問題にならない |
+| 補完の確定と undo | **できる**。`insert_completion` は 1 回の undo で戻る（`sin(a` → 確定 → `sin(abs` → undo 1 回 → `sin(a`）。`ux.md` の undo 粒度に合う |
+| Properties の行でのレイアウト | **未確認（実機）**。幅・フォント・`mono` は描画が要るので headless では言えない。親要素の `text_style` を継承するかも未確認 |
+
+**EXED-3 以降へ持ち越す判断**
+
+- **`ravel-widgets` に `lsp-types` の直接依存が要る**（本番依存の追加）。`CompletionProvider` /
+  `present_completion_items` は `lsp_types::CompletionItem` を型に持ち、`gpui-base` は `Position`
+  以外を再公開しない。`Cargo.lock` には `gpui-base` 経由ですでに在り（`0.97.0`、`proposed`
+  feature）、新しい crate は増えないが、`rust.md` の「本番依存の追加は先に聞く」に当たる。
+  避ける手は無い（メニューを開く `open` フラグが `present_completion_items` でしか立たず、
+  ハンドラはメニューが開いている間しか呼ばれないため）
+- 1 行の高さは親が決める（上表）。`auto_grow` を前提にした `EXED-3` の記述は
+  「親の高さを折り返し行数から出す」に読み替える
+- Tab と Shift+Enter・貼り付けの横取りは同じ仕組み（後から束縛した action）に揃える
+
 ### EXED-2 コア: 語彙とエラー許容のトークン分類
 
 - `highlight_tokens(source) -> Vec<(Span, TokenClass)>`: 壊れた入力でも止まらず、
   未知の文字は `TokenClass::Error` で 1 文字ずつ進む。`TokenClass` は
-  数値・識別子（関数 / 定数 / 変数 / 属性）・演算子・括弧・コメントなど、
+  数値・識別子（関数 / 定数 / 変数 / 属性）・演算子・括弧・空白・エラーなど（式言語にコメント構文は無いので持たない）、
   色を分ける粒度だけ持つ（字句解析器 `pub(crate)` の `TokenKind` は出さず、
   公開型を別に切る）
 - `vocabulary(scope) -> Vocabulary`: `Builtin::ALL`（名前・`Arity::describe`）、
@@ -142,6 +171,9 @@ ravel-app::panels::properties（パラメータ式）  →  field.expression  �
 
 依存: EXED-1（採用した経路）、EXED-2
 
+- `ravel-widgets` の直接依存に `lsp-types` を足す（利用者承認済み、2026-10-30）。
+  kit の補完 API が `lsp_types::CompletionItem` を取るため。gpui-base 経由で
+  既にロックに入っている版（0.97.0）に合わせ、新しい crate は増やさない
 - `ravel-widgets` に式エディタウィジェットを足す（`docs/dev/add-widget.md` の
   チェックリストに従う）。`EditorState` を EXED-1 で決めた見た目で包み、
   `InputHighlighter` が `highlight_tokens` の結果を `TokenClass → トークン色`

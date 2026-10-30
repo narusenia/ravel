@@ -602,6 +602,15 @@ program.dependencies().references_time_axis()
     // moving picture under TimeKey::TIMELESS.
 ExpressionError { kind, span, line, column }   // Display already says where.
     // Editor text, not a locale key: it quotes what the author typed.
+expression::highlight_tokens(source) -> Vec<(Span, TokenClass)>
+    // Editor colouring. Never stops on a broken source; every byte is in
+    // exactly one run (whitespace included); an unknown char or bad number is
+    // TokenClass::Error. Same scanning rules as the compiler's lexer. No
+    // comment class: the language has no comments.
+expression::vocabulary(&Scope) -> Vocabulary
+    // { functions (name + Arity), constants, variables, attributes } for
+    // completion. Dotted variables (`res.width`) stay whole. The MCP edit text
+    // is checked against vocabulary(&Scope::parameter_context()) by a test.
 ```
 
 Editing helpers, in `ravel-ui` so the Properties panel stays testable headless

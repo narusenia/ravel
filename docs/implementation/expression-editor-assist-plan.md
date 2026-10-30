@@ -171,6 +171,9 @@ kit フォークの改造は要らない。検証は kit（rev `7eafdc2`）の�
 
 依存: EXED-1（採用した経路）、EXED-2
 
+- `ravel-widgets` の直接依存に `lsp-types` を足す（利用者承認済み、2026-10-30）。
+  kit の補完 API が `lsp_types::CompletionItem` を取るため。gpui-base 経由で
+  既にロックに入っている版（0.97.0）に合わせ、新しい crate は増やさない
 - `ravel-widgets` に式エディタウィジェットを足す（`docs/dev/add-widget.md` の
   チェックリストに従う）。`EditorState` を EXED-1 で決めた見た目で包み、
   `InputHighlighter` が `highlight_tokens` の結果を `TokenClass → トークン色`

@@ -640,6 +640,9 @@ fn spawn_viewer_eval_service<H: EvalWorkerHooks>(
         budget: Some(budget),
         read_ahead: Some(ReadAhead::default()),
         generation,
+        // Off until `ViewerUpdate` honours `EvalUpdate::provisional`: the
+        // generation fence would drop the final update that follows one.
+        sim_jump_frames: None,
     };
     EvalService::spawn_with_config(hooks, config, move |update| {
         let _ = updates.unbounded_send(ViewerUpdate::from_eval(update));
@@ -3592,6 +3595,7 @@ mod tests {
                     results: vec![(NodeId::next(), Ok(blank_display_frame(size, size)))],
                     scoped: Vec::new(),
                     timings: Vec::new(),
+                    provisional: false,
                 }),
                 cx,
             );
@@ -3693,6 +3697,7 @@ mod tests {
                     results: vec![(NodeId::next(), Ok(display_frame_leasing(lease)))],
                     scoped: Vec::new(),
                     timings: Vec::new(),
+                    provisional: false,
                 }),
                 cx,
             );
@@ -3756,6 +3761,7 @@ mod tests {
                     results: vec![(NodeId::next(), Ok(blank_display_frame(size, size)))],
                     scoped: Vec::new(),
                     timings: Vec::new(),
+                    provisional: false,
                 }),
                 cx,
             );
@@ -3843,6 +3849,7 @@ mod tests {
                     results: vec![(NodeId::next(), Ok(display_frame_leasing(lease)))],
                     scoped: Vec::new(),
                     timings: Vec::new(),
+                    provisional: false,
                 }),
                 cx,
             );
@@ -4129,6 +4136,7 @@ mod tests {
                 budget: Some(budget),
                 read_ahead: None,
                 generation: 0,
+                sim_jump_frames: None,
             };
             project.eval = Some(EvalService::spawn_with_config(
                 FrameHooks,
@@ -5269,6 +5277,7 @@ mod tests {
                         node,
                         output: Ok(geometry_value(7.0)),
                     }],
+                    provisional: false,
                 }),
                 cx,
             );
@@ -5345,6 +5354,7 @@ mod tests {
                         node,
                         output: Ok(geometry_value(7.0)),
                     }],
+                    provisional: false,
                 }),
                 cx,
             );
@@ -5371,6 +5381,7 @@ mod tests {
                     results: vec![(output, Ok(blank_display_frame(4, 4)))],
                     timings: Vec::new(),
                     scoped: Vec::new(),
+                    provisional: false,
                 }),
                 cx,
             );
@@ -5644,6 +5655,7 @@ mod tests {
                         node,
                         output: Err(ravel_core::eval::EvalError::MissingProcessor(node)),
                     }],
+                    provisional: false,
                 }),
                 cx,
             );
@@ -6509,6 +6521,7 @@ mod tests {
                         results: vec![(NodeId::new(1), Ok(blank_display_frame(4, 4)))],
                         timings: Vec::new(),
                         scoped: Vec::new(),
+                        provisional: false,
                     }),
                     cx,
                 );
@@ -6798,6 +6811,7 @@ mod tests {
                 results: vec![(node, Ok(blank_display_frame(4, 4)))],
                 timings: vec![(node, std::time::Duration::from_micros(micros))],
                 scoped: Vec::new(),
+                provisional: false,
             })
         };
 
@@ -6874,6 +6888,7 @@ mod tests {
                         results: vec![(first, Ok(blank_display_frame(4, 4)))],
                         scoped: Vec::new(),
                         timings,
+                        provisional: false,
                     }),
                     cx,
                 )
@@ -6974,6 +6989,7 @@ mod tests {
                     results: vec![(first, Ok(blank_display_frame(4, 4)))],
                     timings: vec![(first, std::time::Duration::from_micros(500))],
                     scoped: Vec::new(),
+                    provisional: false,
                 }),
                 cx,
             )
@@ -7026,6 +7042,7 @@ mod tests {
                     results: vec![(first, Ok(blank_display_frame(4, 4)))],
                     timings: vec![(first, std::time::Duration::from_micros(500))],
                     scoped: Vec::new(),
+                    provisional: false,
                 }),
                 cx,
             )
@@ -7761,6 +7778,7 @@ mod tests {
                 results: vec![(NodeId::new(1), Ok(value))],
                 timings: Vec::new(),
                 scoped: Vec::new(),
+                provisional: false,
             })
         };
 
@@ -7804,6 +7822,7 @@ mod tests {
                 results: vec![(NodeId::new(1), Ok(blank_display_frame(4, 4)))],
                 timings: Vec::new(),
                 scoped: Vec::new(),
+                provisional: false,
             })
         };
         let err_update = |generation| {
@@ -7816,6 +7835,7 @@ mod tests {
                 )],
                 timings: Vec::new(),
                 scoped: Vec::new(),
+                provisional: false,
             })
         };
 
@@ -7877,6 +7897,7 @@ mod tests {
                     results: vec![(NodeId::new(1), Ok(Arc::new(ravel_core::types::Scalar(1.0))))],
                     timings: Vec::new(),
                     scoped: Vec::new(),
+                    provisional: false,
                 }),
                 cx,
             );
@@ -7911,6 +7932,7 @@ mod tests {
                 results: vec![(NodeId::new(1), Ok(blank_display_frame(size, size)))],
                 timings: Vec::new(),
                 scoped: Vec::new(),
+                provisional: false,
             })
         };
         let shown_size = |cx: &mut TestAppContext| {
@@ -7998,6 +8020,7 @@ mod tests {
                     NodeId::new(9000 + u64::from(size)),
                     Ok(scalar.clone()),
                 )],
+                provisional: false,
             })
         };
         let shown = |cx: &mut TestAppContext| {
@@ -8413,6 +8436,7 @@ mod tests {
                     results: vec![(NodeId::new(1), Ok(frame.clone()))],
                     timings: Vec::new(),
                     scoped: vec![scoped_result(overlay_node, Ok(scalar.clone()))],
+                    provisional: false,
                 }),
                 cx,
             );
@@ -8431,6 +8455,7 @@ mod tests {
                     results: vec![(NodeId::new(1), Ok(frame.clone()))],
                     timings: Vec::new(),
                     scoped: vec![scoped_result(NodeId::new(9002), Ok(scalar.clone()))],
+                    provisional: false,
                 }),
                 cx,
             );
@@ -8452,6 +8477,7 @@ mod tests {
                         overlay_node,
                         Err(ravel_core::eval::EvalError::MissingProcessor(overlay_node)),
                     )],
+                    provisional: false,
                 }),
                 cx,
             );
@@ -8493,6 +8519,7 @@ mod tests {
                     ],
                     timings: Vec::new(),
                     scoped: Vec::new(),
+                    provisional: false,
                 }),
                 cx,
             );
@@ -8523,6 +8550,7 @@ mod tests {
                     ],
                     timings: Vec::new(),
                     scoped: Vec::new(),
+                    provisional: false,
                 }),
                 cx,
             );

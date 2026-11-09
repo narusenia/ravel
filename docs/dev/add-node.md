@@ -207,7 +207,9 @@ impl NodeProcessor for NoiseFieldProcessor {
   `NodeProcessor` ではなく `StatefulProcessor`（`initial` / `step` / `output`）
   で書き、`processor_for_node` では `stateful_processor(p)` で包んで返す。
   `step` は決定的な純関数にする（乱数は `seed` パラメータと `id` 属性のハッシュ
-  だけ。時計・`rand`・解像度・品質は読まない）。入力とパラメータは**各 step の
+  だけ。時計・`rand`・解像度・品質は読まない）。実例は `ravel-nodes/src/particle.rs`
+  （状態を Point ドメインの `Geometry` で持つ。可変入力グループのフィールドを
+  毎フレーム生存要素の位置でバッチサンプルする形もそこにある）。入力とパラメータは**各 step の
   フレームの値**で渡るので、`process` のように要求フレームの値を当てにしない。
   下流にステートフルノードを繋ぐことはできない（評価エラー）。仕様は
   `procedural-geometry.md` の「ステートフル評価」

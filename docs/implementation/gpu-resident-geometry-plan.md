@@ -212,6 +212,54 @@ Phase 0 の結果しだいで縮小・中止する。以下は「実施」判断
   （`GpuFrameBuffer` の先例と同じ検証形）。
 - バッファプールの再利用テスト。
 
+**実装メモ**
+
+- **`BufferPool`**（`ravel-gpu/src/buffer_pool.rs`）。キーは
+  `BufferKey { capacity, usage }`。`capacity` は **2 の冪のサイズクラス**
+  （下限 256 B）で、バイト数そのままではない。散布の個数はパラメータで
+  変わるので、完全一致キーだと編集のたびに再確保になる。代償は最大 2 倍の
+  余白で、**論理長は列側（`GpuColumn::len`）が持つ**。アイドル台帳は
+  `TexturePool` / staging と同じ `LruBudget`、`with_shared_budget` で VRAM
+  tier に載る。`TexturePool` との共通化は `LruBudget` までに留めた —
+  `TexturePool` は pending-use 判定と bind group 退避を持つ別物で、
+  共通の `Pool<K, T>` に畳むとその 2 つが型引数に漏れる。
+- **長寿命の再利用**: 借りた `PooledBuffer` を保持し続ければ、それが
+  そのまま「同一性による再利用」（静的メッシュの頂点バッファ等）。プールは
+  保持者のいるバッファを回収しない。3D（`3d-scene-plan.md`）が静的メッシュに
+  使う場合も同じ型。
+- **レイアウト表**（`ravel-gpu/src/geometry.rs`、`column_stride` /
+  `column_wgsl_type`）: `F32`→`f32`(4) / `Vec2`→`vec2<f32>`(8) /
+  `Vec3`→`vec3<f32>`(**16**、WGSL の配列 stride。`w`=0 で書き、読み戻しで
+  捨てる) / `Vec4`・`Color`→`vec4<f32>`(16、`Color` は `r g b a` 順) /
+  `I32`→`i32`(4) / `Bool`→`u32`(4、読み戻しは非 0 を `true`) /
+  `Str`→**GPU 非対応**。今ある `AttributeType` は 8 種で計画時と同じ。
+- **CPU 残留は `Str` に加えて `Detail` ドメイン全体**。1 属性 1 値の
+  ために 256 B のバッファを持つのは無駄で、シェーダは uniform で受ける。
+  常駐するのは点・プリミティブ・インスタンスの数値列。
+- **`GpuGeometry` の構成**: `columns: HashMap<(Domain, AttrName), GpuColumn>`
+  と、常駐列を抜いた CPU `Geometry`（`host`）。計画の
+  `primitives` / `instance_sources` / `counts` を個別フィールドにせず
+  `host` に任せたのは、メッシュの index blob と画像ソースも同じく CPU 残留で、
+  別フィールドにすると `Geometry` の分割ロジックを二重に持つため。
+  `Domain` に `Hash` を足した（`ravel-core`、挙動変更なし）。
+- **評価器での流れ**: `GpuFrameBuffer` と同じく `DataTypeId::GEOMETRY` を
+  共有し、`is_gpu_resident() == true`、`byte_size` は VRAM（バッファ容量 +
+  host）。**永続形式・DataType は増やしていない**。消費側は `GpuGeometry` を
+  先に downcast し、無ければ `Geometry` へ落とす
+  （`gpu_util::ensure_gpu_geometry` / `ensure_cpu_geometry`）。
+  今 `Geometry` だけを downcast している既存ノードは、常駐値が流れ始めた時点で
+  `ensure_cpu_geometry` を通す必要がある — **まだ何も `GpuGeometry` を
+  生成しないので、現時点で挙動は変わらない**。
+- **アップロード回数のカウンタ**: 既存の `GpuContext::transfer_stats()`
+  （`uploads` / `readbacks`）に列ごとに 1 回ずつ計上する。借用で増えないことは
+  `ravel-nodes` の `a_cpu_geometry_uploads_once_and_a_resident_one_is_only_borrowed`
+  が固定している。
+- **範囲外のまま残したもの**: 池のバッファを `dispatch_compute` /
+  ラスタライザへバインドする経路と、dispatch バッチの pending-use による
+  バッファ再利用の抑止（テクスチャにある `acquire` のスキップ）は、最初に
+  バインドする単位 2 / 5 が足す。アプリ側での `BufferPool` 生成
+  （`TexturePool` と同じ共有予算に載せる）も同じ。
+
 ### 単位 2: フィールドの WGSL 評価
 
 REQ-GPU-003 の「フィールドの WGSL 評価」に相当。

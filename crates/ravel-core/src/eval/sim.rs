@@ -729,9 +729,21 @@ fn hash_node(node: &Node, hasher: &mut impl Hasher) {
         (&port.name, port.is_param, port.is_variadic).hash(hasher);
     }
     node.outputs.len().hash(hasher);
-    // `Parameter` is not `Hash` (it holds floats); its `Debug` form prints a
-    // float by its shortest round-trip digits, so equal text is equal value.
-    format!("{:?}", node.parameters).hash(hasher);
+    // `Parameter` is not `Hash` (it holds floats). Its serde form is a
+    // structural walk of the whole value — keyframes, tangents, expression
+    // sources, curves and ramps — with every float as its raw bits, and the
+    // journal already relies on it being stable and positional.
+    match bincode::serialize(&node.parameters) {
+        Ok(bytes) => bytes.hash(hasher),
+        // Unreachable for plain data; if it ever happens, a value that equals
+        // nothing is the safe answer (the track is dropped, not reused).
+        Err(_) => {
+            static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            UNIQUE
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                .hash(hasher);
+        }
+    }
     if let Some(subnet) = &node.subnet {
         hash_graph(subnet, hasher);
     }
@@ -1614,5 +1626,30 @@ mod tests {
             ev.cache_stats().entries < 10,
             "the node results were not under pressure, so the test proves nothing"
         );
+    }
+
+    #[test]
+    fn a_keyframe_edit_upstream_discards_the_track() {
+        use crate::animation::channel::AnimationChannel;
+        use crate::animation::curve::KeyframeCurve;
+        use crate::animation::interpolation::Interpolation::Linear;
+        let keyed = |end: f32| {
+            let mut curve = KeyframeCurve::new();
+            curve.insert(0, 1.0, Linear);
+            curve.insert(10, end, Linear);
+            ParameterValue::Channel(AnimationChannel::keyframes(curve))
+        };
+        let counter = Counter::default();
+        let graph = set(fed_graph(), 1, "k", keyed(1.0));
+        let mut ev = fed_evaluator(&counter);
+        ev.evaluate(&graph, NodeId::new(2), &ctx_at(6)).unwrap();
+
+        // Same shape, one key's value moved: only the structural walk of the
+        // parameter tree can see it.
+        let edited = set(graph, 1, "k", keyed(2.0));
+        ev.mark_dirty(&edited, NodeId::new(1));
+        ev.evaluate(&edited, NodeId::new(2), &ctx_at(6)).unwrap();
+
+        assert_eq!(counter.initials.load(Ordering::Relaxed), 2);
     }
 }

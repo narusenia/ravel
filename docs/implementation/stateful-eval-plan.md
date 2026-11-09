@@ -278,7 +278,9 @@ spec の制約どおり。sim の下流に sim を繋いだ場合は評価エラ
 
 ### 単位 5（追補: チェックポイント・鍵・ハッシュ・アプリ配線）
 
-- `SimTrack` はフレームごとのスロット（`Option<Held>`）と `stride` を持つ。
+- `SimTrack` は保持フレームだけの疎な列（`Vec<(frame, Held)>`、覆う範囲は
+  `end` で持つ）と `stride` を持つ。1 件の課金は状態のバイト数 + 記帳分
+  （`ENTRY_OVERHEAD`）で、記帳のコストも保護枠に入り、間引きで返る。
   `push` が前の最新フレームをチェックポイントでなければ捨て、`thin_to(cap)`
   が `stride` を倍にしながら間引く。`cap` はトラック 1 本あたり
   `CacheBudget` の sim 保護枠（`sim_reserved`）。予算の無い評価器は間引かない。

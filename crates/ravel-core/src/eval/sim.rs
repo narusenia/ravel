@@ -223,17 +223,24 @@ impl Premise {
     }
 }
 
-/// A stored state and what it was charged.
+/// A stored state and what it was charged: its own bytes **plus the
+/// bookkeeping the track keeps for it** ([`ENTRY_OVERHEAD`]), so the budget
+/// sees the memory a long track really holds, not just the states.
 struct Held {
     state: SimState,
     bytes: u64,
 }
 
+/// What one stored entry costs beyond the state: the `(frame, Held)` slot and
+/// the `Arc` handle. Charged per entry, so the overhead is proportional to
+/// the states kept and thinning gives it back.
+const ENTRY_OVERHEAD: u64 = std::mem::size_of::<(u64, Held)>() as u64;
+
 /// One node's states over a contiguous run of frames, `start_frame` first.
 ///
 /// # Checkpoints
 ///
-/// The track **covers** `start_frame..end_frame()` but need not **store** every
+/// The track **covers** `start_frame..end` but need not **store** every
 /// frame. When it outgrows its share of the budget it thins itself to the
 /// start frame, the latest frame, and every `stride`-th frame between, and
 /// doubles `stride` until it fits (the start frame is always kept, and so is
@@ -245,8 +252,12 @@ struct Held {
 /// use for its own tier.
 struct SimTrack {
     start_frame: u64,
-    /// One slot per covered frame; `None` where thinned.
-    states: Vec<Option<Held>>,
+    /// The stored frames, ascending, as `(frame, state)` — **sparse**: its
+    /// size is the retained states, not the frames covered. The first entry
+    /// is `start_frame` and the last is `end - 1`.
+    stored: Vec<(u64, Held)>,
+    /// One past the latest frame covered.
+    end: u64,
     /// Spacing of the stored frames between the start and the latest.
     stride: u64,
     /// What the states were made from (see [`Evaluator::sim_premise_hash`]).
@@ -269,7 +280,7 @@ pub(super) enum Lookup {
 
 impl SimTrack {
     fn end_frame(&self) -> u64 {
-        self.start_frame + self.states.len() as u64
+        self.end
     }
 
     /// Whether `frame` is kept when only checkpoints are.
@@ -279,13 +290,11 @@ impl SimTrack {
 
     /// Drop the frame before the latest if it is not a checkpoint.
     fn thin_previous_latest(&mut self) {
-        let Some(index) = self.states.len().checked_sub(2) else {
+        let Some(index) = self.stored.len().checked_sub(2) else {
             return;
         };
-        if !self.is_checkpoint(self.start_frame + index as u64)
-            && let Some(held) = self.states[index].take()
-        {
-            self.bytes -= held.bytes;
+        if !self.is_checkpoint(self.stored[index].0) {
+            self.bytes -= self.stored.remove(index).1.bytes;
         }
     }
 
@@ -293,18 +302,21 @@ impl SimTrack {
     /// `cap` or nothing but the start and latest frames can be dropped.
     fn thin_to(&mut self, cap: u64) {
         while self.bytes > cap {
-            let latest = self.states.len().saturating_sub(1);
-            if self.stride > latest as u64 {
+            let latest = self.end - 1 - self.start_frame;
+            if self.stride > latest {
                 return;
             }
             self.stride *= 2;
-            for index in 1..latest {
-                if !self.is_checkpoint(self.start_frame + index as u64)
-                    && let Some(held) = self.states[index].take()
-                {
-                    self.bytes -= held.bytes;
+            let (start, stride, last) = (self.start_frame, self.stride, self.end - 1);
+            let mut freed = 0;
+            self.stored.retain(|(frame, held)| {
+                let keep = *frame == start || *frame == last || frame.is_multiple_of(stride);
+                if !keep {
+                    freed += held.bytes;
                 }
-            }
+                keep
+            });
+            self.bytes -= freed;
         }
     }
 }
@@ -327,7 +339,7 @@ impl SimCache {
     /// thinned).
     pub(super) fn stored(&self, key: &NodeKey) -> Option<usize> {
         let track = self.tracks.get(key)?;
-        Some(track.states.iter().flatten().count())
+        Some(track.stored.len())
     }
 
     #[cfg(test)]
@@ -345,39 +357,27 @@ impl SimCache {
         let Some(track) = self.tracks.get(key) else {
             return Lookup::Beyond;
         };
-        let index = frame
-            .checked_sub(track.start_frame)
-            .and_then(|offset| usize::try_from(offset).ok())
-            .filter(|index| *index < track.states.len());
-        let Some(index) = index else {
+        if frame < track.start_frame || frame >= track.end {
             return Lookup::Beyond;
-        };
+        }
         if let (Some(budget), Some(reservation)) = (budget, &track.reservation) {
             budget.touch(reservation.id());
         }
-        match &track.states[index] {
-            Some(held) => Lookup::Hit(held.state.clone()),
-            None => {
-                // The start frame is always stored, so this finds something.
-                let (back, held) = track.states[..index]
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find_map(|(i, slot)| slot.as_ref().map(|held| (i, held)))
-                    .expect("the start frame is always stored");
-                Lookup::Thinned {
-                    from: track.start_frame + back as u64,
-                    state: held.state.clone(),
-                }
-            }
+        match track.stored.binary_search_by_key(&frame, |(f, _)| *f) {
+            Ok(i) => Lookup::Hit(track.stored[i].1.state.clone()),
+            // The start frame is always stored, so `i >= 1`.
+            Err(i) => Lookup::Thinned {
+                from: track.stored[i - 1].0,
+                state: track.stored[i - 1].1.state.clone(),
+            },
         }
     }
 
     /// The last state the track holds and its frame.
     pub(super) fn last(&self, key: &NodeKey) -> Option<(u64, SimState)> {
         let track = self.tracks.get(key)?;
-        let held = track.states.last()?.as_ref()?;
-        Some((track.end_frame() - 1, held.state.clone()))
+        let (frame, held) = track.stored.last()?;
+        Some((*frame, held.state.clone()))
     }
 
     /// The digest of `key`'s track when it was made from this very graph and
@@ -422,13 +422,16 @@ impl SimCache {
     ) -> Vec<Evicted> {
         let track = self.tracks.entry(key).or_insert_with(|| SimTrack {
             start_frame: SIM_START_FRAME,
-            states: Vec::new(),
+            stored: Vec::new(),
+            end: SIM_START_FRAME,
             stride: 1,
             premise: premise.clone(),
             bytes: 0,
             reservation: None,
         });
-        track.states.push(Some(Held { state, bytes }));
+        let bytes = bytes + ENTRY_OVERHEAD;
+        track.stored.push((track.end, Held { state, bytes }));
+        track.end += 1;
         track.bytes += bytes;
         let Some(budget) = budget else {
             return Vec::new();
@@ -1283,7 +1286,10 @@ mod tests {
         ev.register(node, stateful_processor(counter));
 
         ev.evaluate(&graph, node, &ctx_at(4)).unwrap();
-        assert_eq!(budget.stats().sim_used[Tier::Ram as usize], 500);
+        assert_eq!(
+            budget.stats().sim_used[Tier::Ram as usize],
+            5 * (100 + ENTRY_OVERHEAD)
+        );
 
         ev.invalidate_node(node);
         assert_eq!(ev.sim_track_count(), 0);
@@ -1980,5 +1986,36 @@ mod tests {
 
         assert_eq!(ev.sim_stored_states(&[], node), Some(31));
         assert_eq!(counter.steps.load(Ordering::Relaxed), before);
+    }
+
+    #[test]
+    fn a_long_track_over_budget_accounts_its_bookkeeping_inside_the_share() {
+        // 2000 one-byte states: the states alone would be 2 KB, the per-entry
+        // bookkeeping several times that. The share is 1000 bytes, and what
+        // the track holds — entries included — must be charged inside it.
+        let counter = Counter {
+            state_bytes: 1,
+            ..Counter::default()
+        };
+        let budget = budgeted(4000, 0.25);
+        let mut ev = Evaluator::with_budget(budget.clone());
+        ev.register(NodeId::new(2), stateful_processor(counter));
+        let graph = Graph::new().add_node(sim_node(2)).unwrap();
+        let node = NodeId::new(2);
+
+        ev.evaluate(&graph, node, &ctx_at(1999)).unwrap();
+
+        let stored = ev.sim_stored_states(&[], node).unwrap() as u64;
+        let charged = budget.stats().sim_used[Tier::Ram as usize];
+        assert!(
+            charged <= 1000,
+            "charged {charged} against a 1000-byte share"
+        );
+        assert!(
+            stored * (1 + ENTRY_OVERHEAD) == charged,
+            "the charge is not the retained entries: {stored} entries, {charged} bytes"
+        );
+        assert!(stored < 40, "the track kept {stored} entries");
+        assert_eq!(ev.sim_cached_frames(&[], node), Some(0..2000));
     }
 }

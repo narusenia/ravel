@@ -400,7 +400,7 @@ impl Evaluator {
     /// The frames the simulation of `node` at scope `path` currently holds,
     /// or `None` when it has no track. Read-only, and not a use.
     pub fn sim_cached_frames(&self, path: &[PathSegment], node: NodeId) -> Option<Range<u64>> {
-        let path = self.paths.id_of(path)?;
+        let path = self.paths.id_of(&sim_scope(path))?;
         self.sim.frames(&NodeKey { path, node })
     }
 
@@ -565,8 +565,12 @@ impl Evaluator {
                 ),
             });
         }
+        // Keyed by the scope *without* its time shifts: a state is a function
+        // of the node, the frame and the upstream premise, none of which a
+        // shifted view changes, so every shifted view reads one track.
+        let scope = sim_scope(&self.path);
         let key = NodeKey {
-            path: self.path_id,
+            path: self.paths.intern(&scope),
             node: node.id,
         };
         let hash = match self.sim.known_hash(&key, &graph, ctx) {
@@ -718,6 +722,17 @@ impl Evaluator {
         }
         Ok((inputs, params))
     }
+}
+
+/// The scope a simulation track is keyed by: `path` with every `TimeShift`
+/// removed. `Layer`, `Subnet`, `Comp` and `Iteration` stay — those change what
+/// the node's upstream *is* (another network, another piece), a shift only
+/// changes which frame of it is looked at.
+fn sim_scope(path: &[PathSegment]) -> Vec<PathSegment> {
+    path.iter()
+        .copied()
+        .filter(|segment| !matches!(segment, PathSegment::TimeShift(..)))
+        .collect()
 }
 
 /// Everything about `node` that decides what it computes — and nothing about
@@ -1650,6 +1665,59 @@ mod tests {
         ev.mark_dirty(&edited, NodeId::new(1));
         ev.evaluate(&edited, NodeId::new(2), &ctx_at(6)).unwrap();
 
+        assert_eq!(counter.initials.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn time_shifted_views_share_one_track() {
+        let counter = Counter::default();
+        let (graph, node) = lone();
+        let mut ev = counter_evaluator(&counter, 2);
+        let shifted = |ev: &mut Evaluator, owner: u64, frame: u64| {
+            let out = ev
+                .evaluate_sub(
+                    PathSegment::TimeShift(NodeId::new(owner), frame),
+                    &graph,
+                    node,
+                    &ctx_at(frame),
+                    Vec::new(),
+                )
+                .unwrap();
+            value_of(&out)
+        };
+
+        assert_eq!(shifted(&mut ev, 99, 5), 5.0);
+        assert_eq!(shifted(&mut ev, 99, 8), 8.0);
+        // Another owner's shift, and the unshifted scope, read the same track.
+        assert_eq!(shifted(&mut ev, 98, 3), 3.0);
+        assert_eq!(
+            value_of(&ev.evaluate(&graph, node, &ctx_at(8)).unwrap()),
+            8.0
+        );
+
+        assert_eq!(counter.initials.load(Ordering::Relaxed), 1);
+        assert_eq!(counter.steps.load(Ordering::Relaxed), 8);
+        assert_eq!(ev.sim_track_count(), 1);
+        assert_eq!(ev.sim_cached_frames(&[], node), Some(0..9));
+    }
+
+    #[test]
+    fn iteration_scopes_keep_separate_tracks() {
+        let counter = Counter::default();
+        let (graph, node) = lone();
+        let mut ev = counter_evaluator(&counter, 2);
+        for piece in 0..2 {
+            ev.evaluate_sub(
+                PathSegment::Iteration(NodeId::new(99), piece),
+                &graph,
+                node,
+                &ctx_at(4),
+                Vec::new(),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(ev.sim_track_count(), 2, "pieces are different upstreams");
         assert_eq!(counter.initials.load(Ordering::Relaxed), 2);
     }
 }

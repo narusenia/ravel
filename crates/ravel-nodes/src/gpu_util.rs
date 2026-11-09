@@ -237,13 +237,6 @@ pub fn ensure_gpu_geometry<'a>(
 
 /// Adapt a geometry input into CPU memory. Reads back (blocking) only when the
 /// input is GPU-resident.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "no node reads resident geometry yet; the expectation fails the build once one does"
-    )
-)]
 pub fn ensure_cpu_geometry(input: &dyn NodeData) -> anyhow::Result<Cow<'_, Geometry>> {
     if let Some(geometry) = input.downcast_ref::<Geometry>() {
         return Ok(Cow::Borrowed(geometry));

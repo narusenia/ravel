@@ -26,6 +26,8 @@ pub enum BindingKind {
     UniformBuffer,
     /// A read-only storage buffer.
     ReadOnlyStorageBuffer,
+    /// A storage buffer the shader reads and writes.
+    StorageBuffer,
 }
 
 /// The pipeline stages a binding is visible from.
@@ -103,6 +105,11 @@ impl BindingDesc {
             },
             BindingKind::ReadOnlyStorageBuffer => wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            BindingKind::StorageBuffer => wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
                 has_dynamic_offset: false,
                 min_binding_size: None,
             },

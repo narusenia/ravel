@@ -130,6 +130,43 @@ pub struct ComputeDispatch<'a> {
     pub height: u32,
 }
 
+/// A pooled buffer bound to a [`BufferDispatch`], and whether the pass writes it.
+#[derive(Clone, Copy)]
+pub struct BufferBinding<'a> {
+    pub buffer: &'a crate::PooledBuffer,
+    /// Whether the pass writes the buffer. It decides what the batch must do
+    /// before a readback of it (flush) — a read-only binding only keeps the
+    /// buffer out of the pool until the batch is submitted.
+    pub written: bool,
+}
+
+/// One declaratively-described compute dispatch over buffers only.
+///
+/// The buffer counterpart of [`ComputeDispatch`] — no textures, any number of
+/// pooled storage buffers — for passes whose data are attribute columns
+/// ([`GpuGeometry`](crate::GpuGeometry)) rather than images. Binding order is
+/// the contract: the uniform block binds at `@binding(0)` and `buffers[0..N]`
+/// bind at `@binding(1..N + 1)`, whole buffers each, so the shader is told its
+/// element count through the uniform and never asks `arrayLength` (a pooled
+/// buffer is its size class, larger than its data).
+///
+/// Recording **marks every bound buffer in flight itself**
+/// ([`GpuContext::mark_buffer_in_flight`](crate::GpuContext::mark_buffer_in_flight)),
+/// so a caller may return a scratch buffer to its pool right after recording:
+/// the pool will not hand it out again before the batch is submitted.
+pub struct BufferDispatch<'a> {
+    /// Debug label for the bind group and pass.
+    pub label: &'a str,
+    pub pipeline: &'a Arc<ComputePipeline>,
+    /// Serialized uniform block at `@binding(0)`. Non-empty.
+    pub uniform: &'a [u8],
+    pub buffers: &'a [BufferBinding<'a>],
+    /// Dispatch grid width in threads.
+    pub width: u32,
+    /// Dispatch grid height in threads.
+    pub height: u32,
+}
+
 /// One contiguous group of quads that share a sampled texture.
 ///
 /// Splitting a draw into runs is how a caller draws from more than one texture
@@ -424,6 +461,56 @@ impl DispatchState {
         }
         self.used.insert(texture_ptr(&dispatch.output.texture));
         self.written.insert(texture_ptr(&dispatch.output.texture));
+        self.pending_dispatches += 1;
+        self.dispatches += 1;
+    }
+
+    /// Record `dispatch` into the shared encoder, flushing first if the batch
+    /// is full.
+    ///
+    /// The bind group is not cached, for the reason [`QuadDraw::storage`]
+    /// states: it references buffers whose identity changes with the data, and
+    /// an entry keyed by them would only pin their VRAM. The command buffer
+    /// keeps its own reference to everything the pass touches, so dropping the
+    /// handle here is safe.
+    pub(crate) fn record_buffers(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        dispatch: &BufferDispatch<'_>,
+    ) {
+        if self.pending_dispatches >= MAX_PENDING_DISPATCHES {
+            let _ = self.flush(queue);
+        }
+        let uniform = self.uniform_buffer(device, dispatch.label, dispatch.uniform);
+        let mut entries = Vec::with_capacity(dispatch.buffers.len() + 1);
+        entries.push(wgpu::BindGroupEntry {
+            binding: 0,
+            resource: uniform.as_entire_binding(),
+        });
+        for (index, binding) in dispatch.buffers.iter().enumerate() {
+            entries.push(wgpu::BindGroupEntry {
+                binding: index as u32 + 1,
+                resource: binding.buffer.raw().as_entire_binding(),
+            });
+        }
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(dispatch.label),
+            layout: dispatch.pipeline.bind_group_layout(),
+            entries: &entries,
+        });
+        self.bind_groups_created += 1;
+        let encoder = self.encoder.get_or_insert_with(|| {
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("ravel dispatch batch"),
+            })
+        });
+        dispatch
+            .pipeline
+            .dispatch(encoder, &group, dispatch.width, dispatch.height);
+        for binding in dispatch.buffers {
+            self.mark_buffer_use(binding.buffer.id(), binding.written);
+        }
         self.pending_dispatches += 1;
         self.dispatches += 1;
     }
@@ -1045,5 +1132,108 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 .all(|px| px[..3].iter().all(|&v| (v - 2.0).abs() < 1e-6)),
             "1.0 scaled by 2.0 must read back as 2.0"
         );
+    }
+
+    const DOUBLE_SRC: &str = r#"
+struct Params {
+    count: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
+};
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> source: array<f32>;
+@group(0) @binding(2) var<storage, read_write> output: array<f32>;
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x < params.count) {
+        output[gid.x] = source[gid.x] * 2.0;
+    }
+}
+"#;
+
+    fn double_pipeline(ctx: &GpuContext) -> Arc<ComputePipeline> {
+        let layout = [
+            BindingDesc::new(0, BindingKind::UniformBuffer, ShaderVisibility::COMPUTE),
+            BindingDesc::new(
+                1,
+                BindingKind::ReadOnlyStorageBuffer,
+                ShaderVisibility::COMPUTE,
+            ),
+            BindingDesc::new(2, BindingKind::StorageBuffer, ShaderVisibility::COMPUTE),
+        ];
+        ShaderManager::new(ctx.clone())
+            .compute_pipeline("double_test", DOUBLE_SRC, "main", &layout, [64, 1])
+            .expect("double shader compiles")
+    }
+
+    /// A buffers-only dispatch runs, a readback of what it wrote flushes the
+    /// batch, and a buffer the batch still uses is not handed to a new owner
+    /// until the flush — without the caller marking anything.
+    #[test]
+    fn a_buffer_dispatch_marks_its_buffers_in_flight() {
+        use crate::buffer_pool::{BufferPool, BufferUsage};
+        let Some(ctx) = try_context() else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        let pipeline = double_pipeline(&ctx);
+        let mut pool = BufferPool::new(ctx.clone(), 1 << 20);
+        let source = pool.acquire(16, BufferUsage::COLUMN);
+        crate::upload_buffer(
+            &ctx,
+            &source,
+            bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0]),
+        );
+        let output = pool.acquire(16, BufferUsage::COLUMN);
+
+        let before = ctx.dispatch_stats();
+        ctx.dispatch_buffers(&BufferDispatch {
+            label: "double_test",
+            pipeline: &pipeline,
+            uniform: bytemuck::bytes_of(&[4u32, 0, 0, 0]),
+            buffers: &[
+                BufferBinding {
+                    buffer: &source,
+                    written: false,
+                },
+                BufferBinding {
+                    buffer: &output,
+                    written: true,
+                },
+            ],
+            width: 64,
+            height: 1,
+        });
+        let stats = before.delta(&ctx.dispatch_stats());
+        assert_eq!(stats.dispatches, 1);
+        assert_eq!(stats.submits, 0, "the dispatch joins the batch");
+
+        // Returned while the batch is pending: the pool must skip both.
+        let created = pool.total_created();
+        pool.release(source);
+        let other = pool.acquire(16, BufferUsage::COLUMN);
+        assert_eq!(
+            pool.total_created(),
+            created + 1,
+            "a buffer the pending batch reads is not reused"
+        );
+
+        // The readback flushes the batch that writes `output` and sees its result.
+        let bytes = crate::begin_read_buffer(&ctx, &output, 16)
+            .unwrap()
+            .wait_into_vec()
+            .unwrap();
+        assert_eq!(
+            bytemuck::pod_collect_to_vec::<u8, f32>(&bytes),
+            vec![2.0, 4.0, 6.0, 8.0]
+        );
+        assert_eq!(before.delta(&ctx.dispatch_stats()).submits, 1);
+
+        // After the flush the released buffer circulates again.
+        pool.release(other);
+        let _ = pool.acquire(16, BufferUsage::COLUMN);
+        assert_eq!(pool.total_created(), created + 1);
     }
 }

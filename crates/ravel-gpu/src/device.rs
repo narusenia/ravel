@@ -492,6 +492,17 @@ impl GpuContext {
             .record(self.device(), self.queue(), dispatch);
     }
 
+    /// Record a buffers-only compute dispatch into the frame's shared command
+    /// encoder, batched like [`Self::dispatch_compute`]. Every bound buffer is
+    /// marked in flight (see [`BufferDispatch`](crate::BufferDispatch)).
+    pub fn dispatch_buffers(&self, dispatch: &crate::dispatch::BufferDispatch<'_>) {
+        self.inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .record_buffers(self.device(), self.queue(), dispatch);
+    }
+
     /// Record a declaratively-described instanced quad draw into the frame's
     /// shared command encoder.
     ///

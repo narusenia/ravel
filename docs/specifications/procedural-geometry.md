@@ -694,8 +694,12 @@ PolyExtrude、group の AND / OR / NOT 合成、`shape.box`。
   ソースの解像度が揃うことを要求し、アトラスは詰め替えのコストと上限を
   負うため）、順序は分割の構造として保たれる。パスと点だけの run は
   読まないプレースホルダ 1 px を束ねる。
-- フィールドの WGSL 評価（GPU パーティクル）は REQ-GPU-003 拡張として
-  将来対応。`Field` の trait 境界はバッチ評価なので GPU 移行に閉じている。
+- フィールドは WGSL でも評価できる。`Field::wgsl` が 1 フィールド = 1 関数を
+  返し、`field.apply` は木全体と combine を 1 カーネルで走らせる（常駐入力は
+  読み戻さない）。WGSL 版が無いフィールド（`field.expression`）や CPU が警告して
+  既定値に落ちる構成は CPU が答える。GPU パーティクルの力はこの `FieldProgram`
+  を呼ぶ（担当は `particle-plan.md`）。詳細は
+  `implementation/gpu-resident-geometry-plan.md` 単位 2。
 - **Mesh は既存のラスタライザで描けない。** 現在の `rasterize.wgsl` は
   フラグメントごとにパスセグメントへの最短距離を評価する解析的方式で、
   頂点バッファを使わず `depth_stencil: None`。Mesh の描画は

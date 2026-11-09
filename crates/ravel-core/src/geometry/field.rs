@@ -9,12 +9,14 @@ use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 
 use super::absent::{Absent, absent, absent_column};
+use super::field_wgsl::{FieldWgsl, WgslFn, arity, is_field_type, lanes};
 use super::{AttributeArray, AttributeSet, AttributeType, Domain, Geometry, GeometryError, names};
+use crate::animation::interpolation::Interpolation;
 use crate::eval::EvalContext;
 use crate::expression::{self, Component, ExpressionError, Program, Scope};
 use crate::id::DataTypeId;
 use crate::param_curve::CurveParam;
-use crate::param_ramp::RampParam;
+use crate::param_ramp::{RampInterpolation, RampParam};
 use crate::types::{Color, NodeData, Vec2, Vec3, Vec4, magnitude};
 
 /// Everything a [`Field`] may read when it is evaluated.
@@ -82,6 +84,23 @@ pub trait Field: Send + Sync {
     /// wraps another field is not free. Combinators recurse into their
     /// operands.
     fn byte_size(&self) -> u64;
+
+    /// This field as WGSL, or `None` when it has no WGSL version and must be
+    /// sampled on the CPU (`gpu-resident-geometry-plan.md`, unit 2).
+    ///
+    /// **A field is one function**: emit it with [`FieldWgsl::function`], after
+    /// emitting the operands it wraps (their `wgsl` is called on the same
+    /// builder), and return it. Parameters go through [`FieldWgsl::f32`] /
+    /// [`FieldWgsl::u32`] / [`FieldWgsl::block`] rather than into the text, so
+    /// the source depends on structure only.
+    ///
+    /// Decline (`None`) wherever [`Field::sample`] would warn and fall back —
+    /// the CPU path is the reference and already says the right thing. The
+    /// default is `None`: a field added without a WGSL version is correct, just
+    /// not accelerated.
+    fn wgsl(&self, _builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        None
+    }
 }
 
 /// A lazily evaluated field that can flow through node graph ports.
@@ -95,6 +114,11 @@ impl FieldValue {
 
     pub fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
         self.0.sample(input)
+    }
+
+    /// The field behind this handle as WGSL; see [`Field::wgsl`].
+    pub fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        self.0.wgsl(builder)
     }
 
     /// Approximate footprint of the field behind this handle.
@@ -152,6 +176,11 @@ impl Field for ConstantField {
 
     fn byte_size(&self) -> u64 {
         size_of::<Self>() as u64
+    }
+
+    fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        let value = builder.f32(self.0);
+        Some(builder.constant(AttributeType::F32, &value))
     }
 }
 
@@ -275,6 +304,14 @@ impl Field for TimeField {
     fn byte_size(&self) -> u64 {
         size_of::<Self>() as u64
     }
+
+    fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        // The clock is read here, on the CPU, so the shader sees the exact
+        // value `sample` would have used.
+        let reading = self.value(builder.ctx());
+        let value = builder.f32(reading);
+        Some(builder.constant(AttributeType::F32, &value))
+    }
 }
 
 /// Deterministic two-dimensional simplex fractal noise.
@@ -325,6 +362,24 @@ impl Field for NoiseField {
             .collect();
         AttributeArray::F32(values)
     }
+
+    fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        let arguments = self.wgsl_arguments(builder);
+        Some(builder.function(
+            AttributeType::F32,
+            &format!("    return fbm_noise(p, {arguments});"),
+        ))
+    }
+}
+
+impl NoiseField {
+    /// The `fbm_noise` arguments after the position, as parameter reads.
+    fn wgsl_arguments(&self, builder: &mut FieldWgsl<'_>) -> String {
+        let seed = builder.u32(self.seed);
+        let frequency = builder.f32(self.frequency);
+        let octaves = builder.u32(self.octaves.max(1));
+        format!("{seed}, {frequency}, {octaves}")
+    }
 }
 
 /// A unit vector from each sample position toward a fixed target.
@@ -348,6 +403,15 @@ impl Field for DirectionToField {
                 })
                 .collect(),
         )
+    }
+
+    fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        let x = builder.f32(self.target.0);
+        let y = builder.f32(self.target.1);
+        Some(builder.function(
+            AttributeType::Vec2,
+            &format!("    return unit_vector(vec2<f32>({x}, {y}) - p);"),
+        ))
     }
 }
 
@@ -399,6 +463,22 @@ impl Field for CurlNoiseField {
             })
             .collect();
         AttributeArray::Vec2(values)
+    }
+
+    fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        let arguments = self.noise.wgsl_arguments(builder);
+        let step = builder.f32(finite_difference_step(self.step));
+        Some(builder.function(
+            AttributeType::Vec2,
+            &format!(
+                "    let s = {step};
+    let n0 = fbm_noise(vec2<f32>(p.x, p.y + s), {arguments});
+    let n1 = fbm_noise(vec2<f32>(p.x, p.y - s), {arguments});
+    let n2 = fbm_noise(vec2<f32>(p.x + s, p.y), {arguments});
+    let n3 = fbm_noise(vec2<f32>(p.x - s, p.y), {arguments});
+    return vec2<f32>((n0 - n1) / (2.0 * s), -(n2 - n3) / (2.0 * s));"
+            ),
+        ))
     }
 }
 
@@ -473,6 +553,31 @@ impl Field for GradientField {
                 .collect(),
         )
     }
+
+    fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        let source = self.source.wgsl(builder)?;
+        // `sample` reads a non-scalar source as zero; the CPU path says so.
+        if source.ty() != AttributeType::F32 {
+            return None;
+        }
+        let step = builder.f32(finite_difference_step(self.step));
+        let at = |offset: &str| source.call(&format!("p + {offset}"), "i");
+        Some(builder.function(
+            AttributeType::Vec2,
+            &format!(
+                "    let s = {step};
+    let xp = {};
+    let xm = {};
+    let yp = {};
+    let ym = {};
+    return vec2<f32>((xp - xm) / (2.0 * s), (yp - ym) / (2.0 * s));",
+                at("vec2<f32>(s, 0.0)"),
+                at("vec2<f32>(-s, 0.0)"),
+                at("vec2<f32>(0.0, s)"),
+                at("vec2<f32>(0.0, -s)"),
+            ),
+        ))
+    }
 }
 
 /// A normalized vector from a center, either outward or tangent to it.
@@ -503,6 +608,23 @@ impl Field for RadialField {
                 })
                 .collect(),
         )
+    }
+
+    fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        let x = builder.f32(self.center.0);
+        let y = builder.f32(self.center.1);
+        let result = if self.tangent {
+            "vec2<f32>(-r.y, r.x)"
+        } else {
+            "r"
+        };
+        Some(builder.function(
+            AttributeType::Vec2,
+            &format!(
+                "    let r = unit_vector(p - vec2<f32>({x}, {y}));
+    return {result};"
+            ),
+        ))
     }
 }
 
@@ -551,6 +673,36 @@ impl Field for FalloffField {
             .collect();
         AttributeArray::F32(values)
     }
+
+    fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        let cx = builder.f32(self.center.0);
+        let cy = builder.f32(self.center.1);
+        let inner = builder.f32(self.inner_radius);
+        let outer = builder.f32(self.outer_radius);
+        let distance = match self.shape {
+            FalloffShape::Sphere => "    let dist = length(delta);".to_string(),
+            FalloffShape::Linear { direction } => {
+                let dx = builder.f32(direction.0);
+                let dy = builder.f32(direction.1);
+                format!(
+                    "    let direction = vec2<f32>({dx}, {dy});
+    let direction_length = length(direction);
+    var dist = 0.0;
+    if (direction_length > 1.1920929e-7) {{
+        dist = abs(dot(delta, direction)) / direction_length;
+    }}"
+                )
+            }
+        };
+        Some(builder.function(
+            AttributeType::F32,
+            &format!(
+                "    let delta = p - vec2<f32>({cx}, {cy});
+{distance}
+    return smooth_falloff(dist, {inner}, {outer});"
+            ),
+        ))
+    }
 }
 
 /// Scalar remapping of another field through a [`CurveParam`].
@@ -585,6 +737,35 @@ impl Field for CurveRemapField {
             .map(|value| self.curve.evaluate(value))
             .collect();
         AttributeArray::F32(values)
+    }
+
+    fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        let source = self.source.wgsl(builder)?;
+        if source.ty() != AttributeType::F32 {
+            return None;
+        }
+        let points = self.curve.points();
+        let mut words = vec![points.len() as u32];
+        for point in points {
+            words.extend([
+                point.x.to_bits(),
+                point.y.to_bits(),
+                match point.interpolation {
+                    Interpolation::Bezier => 0,
+                    Interpolation::Linear => 1,
+                    Interpolation::Step => 2,
+                },
+                point.tangent_out.0.to_bits(),
+                point.tangent_out.1.to_bits(),
+                point.tangent_in.0.to_bits(),
+                point.tangent_in.1.to_bits(),
+            ]);
+        }
+        let base = builder.block(&words);
+        Some(builder.function(
+            AttributeType::F32,
+            &format!("    return curve_eval({base}u, {});", source.call("p", "i")),
+        ))
     }
 }
 
@@ -663,6 +844,53 @@ impl Field for RampField {
             .map(|value| self.ramp.evaluate(self.normalized(value)))
             .collect();
         AttributeArray::Color(colors)
+    }
+
+    fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        let source = self.source.wgsl(builder)?;
+        if source.ty() != AttributeType::F32 {
+            return None;
+        }
+        let stops = self.ramp.stops();
+        let mut words = vec![stops.len() as u32];
+        for stop in stops {
+            words.extend([
+                stop.position.to_bits(),
+                stop.color.r.to_bits(),
+                stop.color.g.to_bits(),
+                stop.color.b.to_bits(),
+                stop.color.a.to_bits(),
+            ]);
+        }
+        let base = builder.block(&words);
+        let mode = builder.u32(match self.ramp.interpolation() {
+            RampInterpolation::Linear => 0,
+            RampInterpolation::Smooth => 1,
+            RampInterpolation::Constant => 2,
+        });
+        // `normalized`'s two branches are decided here: a span that is not a
+        // finite positive width is a hard step, so only its two outcomes and
+        // the divisor reach the shader.
+        let span = self.in_max - self.in_min;
+        let degenerate = builder.u32(u32::from(!span.is_finite() || span == 0.0));
+        let in_min = builder.f32(self.in_min);
+        let width = builder.f32(span);
+        Some(builder.function(
+            AttributeType::Color,
+            &format!(
+                "    let value = {};
+    var position = 1.0;
+    if ({degenerate} != 0u) {{
+        if (value < {in_min}) {{
+            position = 0.0;
+        }}
+    }} else {{
+        position = (value - {in_min}) / {width};
+    }}
+    return ramp_eval({base}u, {mode}, position);",
+                source.call("p", "i")
+            ),
+        ))
     }
 }
 
@@ -1134,6 +1362,28 @@ impl Field for AttributeField {
         }
         AttributeArray::F32(values)
     }
+
+    fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        // Every branch that would warn and answer the default on the CPU, and
+        // normalizing (a reduction over the whole column), decline: the CPU
+        // path is the reference for both.
+        if self.normalize {
+            return None;
+        }
+        let (ty, length) = builder.lookup(&self.name)?;
+        let arity = readable_arity(ty)?;
+        if length != builder.length() || self.component >= arity {
+            return None;
+        }
+        let binding = builder.attribute(&self.name, ty)?;
+        let read = match ty {
+            AttributeType::F32 => format!("{binding}[i]"),
+            AttributeType::I32 => format!("f32({binding}[i])"),
+            AttributeType::Bool => format!("f32({binding}[i] != 0u)"),
+            _ => format!("{binding}[i].{}", ["x", "y", "z", "w"][self.component]),
+        };
+        Some(builder.function(AttributeType::F32, &format!("    return {read};")))
+    }
 }
 
 /// Number of components [`AttributeField`] can read from a column, or `None`
@@ -1302,6 +1552,15 @@ impl Field for LengthField {
                 .collect(),
         )
     }
+
+    fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        let source = self.source.wgsl(builder)?;
+        if !is_field_type(source.ty()) {
+            return None;
+        }
+        let value = lanes(source.ty(), &source.call("p", "i"), false);
+        Some(builder.function(AttributeType::F32, &format!("    return length({value});")))
+    }
 }
 
 /// `field.component`: one component of a vector field, as a scalar field.
@@ -1347,6 +1606,22 @@ impl Field for ComponentField {
                 .map(|index| sampled_component(&sampled, index, self.component))
                 .collect(),
         )
+    }
+
+    fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        let source = self.source.wgsl(builder)?;
+        // A component the source lacks is a CPU warning and a zero.
+        if !is_field_type(source.ty()) || self.component >= arity(source.ty()) {
+            return None;
+        }
+        let value = lanes(source.ty(), &source.call("p", "i"), false);
+        Some(builder.function(
+            AttributeType::F32,
+            &format!(
+                "    return ({value}).{};",
+                ["x", "y", "z", "w"][self.component]
+            ),
+        ))
     }
 }
 
@@ -1418,6 +1693,43 @@ impl Field for ComposeField {
             ),
         }
     }
+
+    fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        let mut lets = String::new();
+        let mut names = Vec::new();
+        for (slot, source) in self.sources.iter().enumerate() {
+            let source = source.wgsl(builder)?;
+            if !is_field_type(source.ty()) {
+                return None;
+            }
+            let value = lanes(source.ty(), &source.call("p", "i"), false);
+            lets.push_str(&format!("    let c{slot} = ({value}).x;\n"));
+            names.push(format!("c{slot}"));
+        }
+        // A slot with no source reads zero, as `value` does.
+        let slot = |index: usize| names.get(index).map_or("0.0", String::as_str);
+        let (ty, constructor) = match self.sources.len() {
+            3 => (
+                AttributeType::Vec3,
+                format!("vec3<f32>({}, {}, {})", slot(0), slot(1), slot(2)),
+            ),
+            4 => (
+                AttributeType::Vec4,
+                format!(
+                    "vec4<f32>({}, {}, {}, {})",
+                    slot(0),
+                    slot(1),
+                    slot(2),
+                    slot(3)
+                ),
+            ),
+            _ => (
+                AttributeType::Vec2,
+                format!("vec2<f32>({}, {})", slot(0), slot(1)),
+            ),
+        };
+        Some(builder.function(ty, &format!("{lets}    return {constructor};")))
+    }
 }
 
 /// `field.angle`: the direction of a vector field, as a scalar field of
@@ -1462,6 +1774,21 @@ impl Field for AngleField {
                 .collect(),
         )
     }
+
+    fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        let source = self.source.wgsl(builder)?;
+        if !is_field_type(source.ty()) {
+            return None;
+        }
+        let value = lanes(source.ty(), &source.call("p", "i"), false);
+        Some(builder.function(
+            AttributeType::F32,
+            &format!(
+                "    let v = {value};
+    return atan2_ieee(v.y, v.x);"
+            ),
+        ))
+    }
 }
 
 /// Deferred image-sampling field marker.
@@ -1472,7 +1799,7 @@ impl Field for AngleField {
 pub struct ImageSamplerField;
 
 macro_rules! binary_field {
-    ($name:ident, $operation:expr) => {
+    ($name:ident, $operation:expr, $wgsl:expr) => {
         #[derive(Clone, Debug)]
         pub struct $name {
             pub left: FieldValue,
@@ -1487,13 +1814,19 @@ macro_rules! binary_field {
             fn sample(&self, input: &FieldSample<'_>) -> AttributeArray {
                 combine_binary(&self.left, &self.right, input, $operation)
             }
+
+            fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+                let left = self.left.wgsl(builder)?;
+                let right = self.right.wgsl(builder)?;
+                builder.binary(&left, &right, $wgsl)
+            }
         }
     };
 }
 
-binary_field!(AddField, |left, right| left + right);
-binary_field!(MultiplyField, |left, right| left * right);
-binary_field!(MaxField, |left, right| left.max(right));
+binary_field!(AddField, |left, right| left + right, "l + r");
+binary_field!(MultiplyField, |left, right| left * right, "l * r");
+binary_field!(MaxField, |left, right| left.max(right), "max(l, r)");
 
 /// Linear interpolation between two fields.
 #[derive(Clone, Debug)]
@@ -1513,6 +1846,13 @@ impl Field for BlendField {
         combine_binary(&self.left, &self.right, input, move |left, right| {
             left + (right - left) * amount
         })
+    }
+
+    fn wgsl(&self, builder: &mut FieldWgsl<'_>) -> Option<WgslFn> {
+        let left = self.left.wgsl(builder)?;
+        let right = self.right.wgsl(builder)?;
+        let amount = builder.f32(self.amount.clamp(0.0, 1.0));
+        builder.binary(&left, &right, &format!("l + (r - l) * {amount}"))
     }
 }
 
@@ -1723,6 +2063,11 @@ impl ComponentMask {
         Self(bits)
     }
 
+    /// The selected components as a bit set, bit `k` for component `k`.
+    pub fn bits(self) -> u8 {
+        self.0
+    }
+
     /// Whether component `index` is selected.
     pub fn contains(self, index: usize) -> bool {
         index < 4 && self.0 & (1 << index) != 0
@@ -1734,7 +2079,7 @@ impl ComponentMask {
     /// `"z"` on a `Vec2`, say — would otherwise select nothing and silently
     /// turn the node into a no-op. Treat it the same way as an unusable group
     /// name: warn and fall back to every component.
-    fn resolved_for(self, arity: usize, target: &str) -> Self {
+    pub fn resolved_for(self, arity: usize, target: &str) -> Self {
         let available = Self((1u8 << arity.min(4)) - 1);
         if self == Self::UNSPECIFIED {
             // Arity 4 is Color or Vec4; see [`ComponentMask::UNSPECIFIED`].
@@ -1842,13 +2187,26 @@ impl<'a> FieldApply<'a> {
 /// The declared type wins only for the colour / style names and for reserved
 /// names whose absent reading is a float, vector or colour; a reserved `I32`
 /// or `Bool` reading keeps the sampled type and a typed-zero fill, as before.
-fn created_column(
+pub fn created_column(
     geometry: &Geometry,
     domain: Domain,
     target: &str,
     sampled: AttributeType,
     length: usize,
 ) -> AttributeArray {
+    absent_column(
+        geometry,
+        domain,
+        target,
+        created_column_type(domain, target, sampled),
+        length,
+    )
+}
+
+/// The type [`created_column`] gives the column it invents for `target`, when
+/// the field samples as `sampled`. Public so the GPU path takes the same rule
+/// instead of restating it.
+pub fn created_column_type(domain: Domain, target: &str, sampled: AttributeType) -> AttributeType {
     // A reserved colour or style attribute takes its declared type even when
     // that makes the combine fail: `combine_arrays` then reports the same
     // unsupported-type error a geometry that already had a `fill` column would
@@ -1857,7 +2215,7 @@ fn created_column(
     // ignoring it. `I32` / `Bool` / `Str` are not modulatable: created here so
     // `combine_arrays` reports the type it always reported, rather than this
     // function inventing a second error for the same case.
-    let attr_type = match target {
+    match target {
         names::CD | names::STROKE_COLOR => AttributeType::Color,
         names::STROKE_WIDTH => AttributeType::F32,
         names::FILL => AttributeType::Bool,
@@ -1875,8 +2233,7 @@ fn created_column(
             }
             _ => sampled,
         },
-    };
-    absent_column(geometry, domain, target, attr_type, length)
+    }
 }
 
 /// Returns a geometry clone with a field combined into one numeric attribute.

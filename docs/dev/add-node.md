@@ -271,6 +271,14 @@ CPU 実装を先に置き、GPU はその**同一結果の高速経路**とし�
   未 flush のバッチが使うテクスチャはプールが再利用を差し止める
 - **アルファ規約を揃える**（既存シェーダは straight alpha。混ぜると合成結果が
   変わる）
+- **フィールド（`Field`）を足すなら `Field::wgsl` を実装する**（既定は `None` =
+  CPU 評価。正しいが加速されない）。1 フィールド = 1 関数
+  `field_fn_N(p, i)`、オペランドは先に出す。パラメータは `FieldWgsl::f32` /
+  `u32` / `block` で**データとして**渡し、生成テキストに数値を埋めない（動かす
+  たびにパイプラインが増える）。CPU が警告して既定値に落ちる構成は `None` を
+  返す。CPU 版との一致テストを `ravel-nodes/tests/gpu_field_parity.rs` の
+  `every_field` に足す（許容誤差を明記）。式フィールドのように WGSL 版を
+  持たないものは足さなくてよい（木全体が CPU で評価される）
 - **WGSL を 1 本足したら変換テストが増える。** `gpu_util` の
   `shader_translation` テストが `crates/ravel-nodes/src/shaders/` と
   `crates/ravel-gpu/src/shaders/` を走査し、全ファイルが MSL / HLSL / SPIR-V へ

@@ -73,6 +73,9 @@ pub(crate) fn scaled_resolution(ctx: &EvalContext, comp_resolution: (u32, u32)) 
 /// Takes any [`ProcessorRegistry`] — an
 /// [`Evaluator`](ravel_core::eval::Evaluator) directly, or the restricted
 /// view an evaluation worker hook is given.
+///
+/// `field.apply` is CPU-only here; [`register_all_processors_with_fields`] is
+/// the form that hands it a GPU field backend.
 pub fn register_all_processors<R: ProcessorRegistry + ?Sized>(
     evaluator: &mut R,
     graph: &Graph,
@@ -81,14 +84,39 @@ pub fn register_all_processors<R: ProcessorRegistry + ?Sized>(
     pool: &Arc<Mutex<TexturePool>>,
     media_frames: &MediaFrameCache,
 ) {
+    register_all_processors_with_fields(evaluator, graph, ctx, shaders, pool, None, media_frames);
+}
+
+/// [`register_all_processors`] with a [`field::GpuFieldBackend`] for the
+/// `field.apply` processors, which evaluate fields on the GPU where they can.
+/// `None` keeps them on the CPU.
+pub fn register_all_processors_with_fields<R: ProcessorRegistry + ?Sized>(
+    evaluator: &mut R,
+    graph: &Graph,
+    ctx: &GpuContext,
+    shaders: &mut ShaderManager,
+    pool: &Arc<Mutex<TexturePool>>,
+    fields: Option<&Arc<field::GpuFieldBackend>>,
+    media_frames: &MediaFrameCache,
+) {
     let span = tracing::debug_span!("register_processors", nodes = graph.nodes().count());
     let _guard = span.enter();
     for node in graph.nodes() {
-        if let Some(proc) = processor_for_node(node, ctx, shaders, pool, media_frames) {
+        if let Some(proc) =
+            processor_for_node_with_fields(node, ctx, shaders, pool, fields, media_frames)
+        {
             evaluator.register(node.id, proc);
         }
         if let Some(inner) = node.subnet.as_deref() {
-            register_all_processors(evaluator, inner, ctx, shaders, pool, media_frames);
+            register_all_processors_with_fields(
+                evaluator,
+                inner,
+                ctx,
+                shaders,
+                pool,
+                fields,
+                media_frames,
+            );
         }
     }
 }
@@ -114,9 +142,38 @@ pub fn shared_texture_pool_with_budget(
     ctx: &GpuContext,
     budget: ravel_core::cache_budget::SharedCacheBudget,
 ) -> Arc<Mutex<TexturePool>> {
-    Arc::new(Mutex::new(TexturePool::with_shared_budget(
+    shared_pools_with_budget(ctx, budget).0
+}
+
+/// The eval-worker texture pool **and** buffer pool, both subordinate to the
+/// process cache budget through one [`VramAllowance`], so the idle textures and
+/// idle buffers together stay inside the VRAM headroom (built independently,
+/// each would hold up to the whole headroom and the pair twice that).
+///
+/// The production entry point: [`GpuEvalHooks`] builds its pools here.
+pub fn shared_pools_with_budget(
+    ctx: &GpuContext,
+    budget: ravel_core::cache_budget::SharedCacheBudget,
+) -> (Arc<Mutex<TexturePool>>, Arc<Mutex<ravel_gpu::BufferPool>>) {
+    let allowance = ravel_gpu::VramAllowance::new(budget);
+    (
+        Arc::new(Mutex::new(TexturePool::with_vram_allowance(
+            ctx.clone(),
+            allowance.clone(),
+        ))),
+        Arc::new(Mutex::new(ravel_gpu::BufferPool::with_vram_allowance(
+            ctx.clone(),
+            allowance,
+        ))),
+    )
+}
+
+/// A standalone buffer pool with a fixed 256 MiB idle budget, for tests,
+/// examples and benchmarks (the counterpart of [`shared_texture_pool`]).
+pub fn shared_buffer_pool(ctx: &GpuContext) -> Arc<Mutex<ravel_gpu::BufferPool>> {
+    Arc::new(Mutex::new(ravel_gpu::BufferPool::new(
         ctx.clone(),
-        budget,
+        256 * 1024 * 1024,
     )))
 }
 
@@ -135,6 +192,19 @@ pub fn processor_for_node(
     ctx: &GpuContext,
     shaders: &mut ShaderManager,
     pool: &Arc<Mutex<TexturePool>>,
+    media_frames: &MediaFrameCache,
+) -> Option<Arc<dyn ravel_core::eval::NodeProcessor>> {
+    processor_for_node_with_fields(node, ctx, shaders, pool, None, media_frames)
+}
+
+/// [`processor_for_node`] with the GPU field backend `field.apply` evaluates
+/// on (`None`: the CPU).
+pub fn processor_for_node_with_fields(
+    node: &Node,
+    ctx: &GpuContext,
+    shaders: &mut ShaderManager,
+    pool: &Arc<Mutex<TexturePool>>,
+    fields: Option<&Arc<field::GpuFieldBackend>>,
     media_frames: &MediaFrameCache,
 ) -> Option<Arc<dyn ravel_core::eval::NodeProcessor>> {
     let processor: Option<Arc<dyn ravel_core::eval::NodeProcessor>> = match node.type_key.as_str() {
@@ -309,7 +379,10 @@ pub fn processor_for_node(
         "field.attribute" => Some(Arc::new(field::AttributeFieldProcessor::from_node(node))),
         "field.time" => Some(Arc::new(field::TimeFieldProcessor)),
         "field.constant" => Some(Arc::new(field::ConstantFieldProcessor)),
-        "field.apply" => Some(Arc::new(field::ApplyFieldProcessor::from_node(node))),
+        "field.apply" => match fields {
+            Some(fields) => Some(Arc::new(field::GpuApplyFieldProcessor::new(fields.clone()))),
+            None => Some(Arc::new(field::ApplyFieldProcessor::from_node(node))),
+        },
         // Shape generators
         "shape.rect" => Some(Arc::new(shape::RectProcessor::from_node(node))),
         "shape.ellipse" => Some(Arc::new(shape::EllipseProcessor::from_node(node))),
@@ -1439,6 +1512,56 @@ mod tests {
             assert!(comp::comp_alpha_mode_is_known(mode), "{mode}");
         }
         assert!(!comp::comp_alpha_mode_is_known("no_such_mode"));
+    }
+
+    /// Idle textures and idle buffers are charged to one allowance: with a
+    /// megabyte of VRAM headroom, 512 KiB of idle texture leaves room for 512
+    /// KiB of idle buffer and no more. Pools built independently would each
+    /// keep the whole megabyte.
+    #[test]
+    fn the_workers_texture_and_buffer_pools_share_one_vram_allowance() {
+        use ravel_core::cache_budget::{CacheBudgetConfig, SharedCacheBudget};
+        use ravel_gpu::BufferUsage;
+
+        let Ok(gpu) = GpuContext::new_blocking() else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        let budget = SharedCacheBudget::new(CacheBudgetConfig {
+            vram_bytes: 1 << 20,
+            ram_bytes: 0,
+            disk_bytes: 0,
+            sim_reserve_ratio: 0.0,
+        });
+        let (textures, buffers) = shared_pools_with_budget(&gpu, budget);
+
+        // 256 x 128 x 16 bytes (`Rgba32Float`) = 512 KiB.
+        let texture = textures
+            .lock()
+            .unwrap()
+            .acquire(gpu_util::tex_key_rw(256, 128));
+        textures.lock().unwrap().release(texture);
+        let first = buffers
+            .lock()
+            .unwrap()
+            .acquire(512 * 1024, BufferUsage::COLUMN);
+        let second = buffers
+            .lock()
+            .unwrap()
+            .acquire(512 * 1024, BufferUsage::COLUMN);
+        buffers.lock().unwrap().release(first);
+        buffers.lock().unwrap().release(second);
+
+        let idle = textures.lock().unwrap().idle_bytes() + buffers.lock().unwrap().idle_bytes();
+        assert!(
+            idle <= 1 << 20,
+            "idle textures and buffers hold {idle} bytes against a 1 MiB headroom"
+        );
+        assert_eq!(
+            buffers.lock().unwrap().idle_count(),
+            1,
+            "one buffer was evicted"
+        );
     }
 
     #[test]

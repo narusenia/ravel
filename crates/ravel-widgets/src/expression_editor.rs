@@ -176,6 +176,11 @@ pub fn expression_editor_state(
         let mut state = EditorState::new(window, cx)
             .line_number(false)
             .folding(false)
+            // One row: no wrapping (a wrapped second row is clipped but
+            // scrollable) and no empty scroll space below the last line,
+            // which code-editor mode adds by default.
+            .soft_wrap(false)
+            .scroll_beyond_last_line(Some(0))
             .submit_on_enter(true)
             .default_value(value);
         install_highlighter(&mut state, cx);
@@ -417,7 +422,7 @@ mod tests {
 
     impl gpui::Render for Host {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            ExpressionEditor::new(&self.0)
+            ExpressionEditor::new(&self.0).w(gpui::px(360.0))
         }
     }
 
@@ -453,6 +458,27 @@ mod tests {
         assert_gapless(&runs, &range);
         let danger = cx.update(|_, cx| cx.tokens().colors.danger);
         assert_eq!(runs.last().unwrap().1.color, Some(danger));
+    }
+
+    /// The field is one row: the viewport must not be scrollable. Without
+    /// `scroll_beyond_last_line(Some(0))` the code-editor mode reserves empty
+    /// space below the last line and a scroll request sticks.
+    #[gpui::test]
+    fn the_one_row_field_cannot_be_scrolled(cx: &mut TestAppContext) {
+        let (cx, state) = built(cx);
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.set_scroll_offset(gpui::point(gpui::px(0.0), gpui::px(-60.0)), cx);
+            });
+            window.draw(cx).clear(cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let offset = cx.update(|_, cx| state.read(cx).scroll_offset());
+        assert_eq!(
+            offset.y,
+            gpui::px(0.0),
+            "the single row scrolled: {offset:?}"
+        );
     }
 
     struct NoStyles;

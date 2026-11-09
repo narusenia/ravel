@@ -234,3 +234,36 @@ spec の制約どおり。sim の下流に sim を繋いだ場合は評価エラ
   必須）。シェル側の編集（`layer_shell_changed`）はトラックに触れない。
 - 既知の制約: `TimeShift` スコープの内側にある sim はスコープごとに別
   トラックになる。
+
+### 単位 3（SIM-3）
+
+- 評価器側（`eval/sim.rs`）: `Evaluator::set_sim_provisional(Some(n))` を
+  立てると、`sim_state_or_provisional` が n フレームを超える前方ジャンプを
+  「トラックの最後の状態」で答え（`ProvisionalSim` を記録）、トラックが空なら
+  先に開始フレームだけ充填する。暫定で答えたノードと下流はノードキャッシュに
+  古いフレームの値を入れてしまうので、`settle_provisional` が
+  `mark_dirty_at` で落とす（確定の pull が実状態で再計算するため）。
+  `set_sim_cancel` は充填のフレーム間で問い合わせる中断判定で、中断時は
+  `EvalError::Cancelled`、計算済みのフレームはトラックに残る。
+- サービス側（`runtime/eval_service.rs`）: `EvalServiceConfig::sim_jump_frames`
+  （既定 `None` = 無効）。ワーカーは対象の評価を `run_targets` に括り出し、
+  暫定が出たら `EvalUpdate { provisional: true }` を先に publish →
+  `settle_provisional` → 新しい要求が来たら中断する判定を付けて同じ要求を
+  もう一度 `run_targets` で評価（充填の続き）→ 確定値を同じ世代で publish。
+  充填中に新しい要求が来たら確定値は publish せず、次の要求へ進む。
+  出力段フレームキャッシュへの insert は確定した pass の後（`Pass::finished`）
+  にだけ行うので、暫定の絵は入らない。投機（先読み）は暫定を使わない。
+- 「評価スレッドプール」: 充填は `ravel-eval-service`（評価ワーカー、UI と別
+  スレッド）上で走る。`EvalPool`（rayon）はサービスから使われていないので、
+  新たにプールへ載せ替えてはいない。
+- 消費側の注意: `ProjectState::on_eval_update` は `generation <=
+  published_generation` を捨てるため、暫定更新が fence を進めると同じ世代の
+  確定値が捨てられる。アプリは `sim_jump_frames` を `None` のままにしており
+  （`spawn_viewer_eval_service`）、暫定フラグの扱いは最初のステートフルノードを
+  載せる単位（PART-1）で入れる。
+
+### 単位 4（SIM-4）
+
+- `procedural-geometry.md` の sim 節と既存コードへの影響表、`REQ-CORE.md` の
+  REQ-CORE-011 / REQ-CORE-006 の受入条件、`architecture.md`（キャッシュ節と
+  前提照合表）、`agent-api-reference.md`、`docs/dev/add-node.md` を実装に合わせた。

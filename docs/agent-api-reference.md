@@ -430,11 +430,43 @@ trait EvalScope {                                 // implemented by Evaluator
         ctx: &EvalContext) -> Result<Option<Arc<dyn NodeData>>, EvalError>;
         // the same for "what is wired into my input `port`" (None = unwired); the
         // scope resolves the edge, a processor holds no Graph. Only inside process
+    fn sim_state(&mut self, node: &Node, ctx: &EvalContext,
+        stepper: &dyn SimStepper) -> Result<SimState, EvalError>;
+        // the state of a stateful node at ctx.frame, filling its track; only
+        // StatefulAdapter calls it. The default refuses (no sim cache)
     fn bindings(&self) -> &[(String, Arc<dyn NodeData>)];
     fn document(&self) -> Option<Arc<Document>>;
     fn path(&self) -> &[PathSegment];   // current ownership path (layer.ref
                                         // finds its enclosing layer here)
 }
+
+// Stateful nodes (REQ-CORE-011, ravel-core/src/eval/sim.rs): a value that is
+// a function of the previous frame's. Register with `stateful_processor(p)`,
+// never `Arc::new(p)` — the adapter is a NodeProcessor and downstream cannot
+// tell the difference.
+trait StatefulProcessor: Send + Sync + 'static {
+    type State: Send + Sync + 'static;
+    fn initial(&self, ctx: &EvalContext, inputs: &SimInputs) -> Self::State;
+    fn step(&self, prev: &Self::State, ctx: &EvalContext, inputs: &SimInputs) -> Self::State;
+    fn output(&self, state: &Self::State) -> Arc<dyn NodeData>;
+    fn byte_size(&self, state: &Self::State) -> u64 { size_of::<Self::State>() as u64 }
+}
+SimInputs { node: &Node, inputs: &[Option<Arc<dyn NodeData>>], params: &ResolvedParams }
+    // all three are the values AT THE FRAME BEING STEPPED, not the requested
+    // one. step may read only ctx.frame / ctx.fps, prev and these (no clock,
+    // no rand; no resolution or quality — they are not part of a track's premise)
+stateful_processor(p) -> Arc<dyn NodeProcessor>
+Evaluator
+    .sim_cached_frames(&[PathSegment], NodeId) -> Option<Range<u64>>  // the track
+    .sim_track_count() -> usize
+    .set_sim_provisional(Option<u64>)   // jumps longer than N answer with the
+        // last held state; must be followed by settle_provisional()
+    .has_provisional_sim() / .settle_provisional()
+    .set_sim_cancel(Option<CancelCheck>)  // a fill gives way between frames
+    // A track is dropped when its upstream premise hash changes (checked on
+    // every pull), by invalidate_node / invalidate_all / reset, and — for a
+    // deleted node or layer — by set_document. A sim downstream of a sim is
+    // an EvalError::ProcessFailed.
 
 enum PathSegment { Layer(CompId, LayerId), Subnet(NodeId), Comp(CompId) }
 
@@ -2082,7 +2114,14 @@ EvalService::spawn_with_budget(hooks, SharedCacheBudget, on_update)
 EvalService::spawn_with_config(hooks, EvalServiceConfig, on_update)
 EvalServiceConfig { budget: Option<SharedCacheBudget>,
                     read_ahead: Option<ReadAhead>,
-                    generation: u64 }
+                    generation: u64,
+                    sim_jump_frames: Option<u64> }
+    // sim_jump_frames: a jump through a stateful node longer than this is
+    // answered at once with EvalUpdate { provisional: true } and confirmed
+    // (same generation, provisional: false) after the fill on the worker; a
+    // newer request drops the fill's answer. None (default) = every update is
+    // final. A consumer must not let a provisional update advance its
+    // generation fence, or the confirmed one is dropped as stale
     // generation is where `request` starts counting: 0 for a session's first
     // worker, the retiring worker's latest_generation() for one replacing it
     // on a new GPU device epoch (GPULOSS-2). A replacement restarting at 0
@@ -2109,6 +2148,7 @@ EvalService                  // the four below are EvalService, not ProcessorSyn
         // builds the replacement only after this join (GPULOSS-2)
 EvalOutput = Result<Arc<dyn NodeData>, EvalError>  // one target's outcome
 EvalUpdate { generation, frame, timings,          // worker thread; timings
+    provisional: bool,                            // stateful node showed an older state
     results: Vec<(NodeId, EvalOutput)> }
     // one entry per requested node, in EvalRequest::nodes order; timings are
     // aggregated over every target and feed the node editor's load readout

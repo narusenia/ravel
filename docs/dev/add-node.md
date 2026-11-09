@@ -203,6 +203,14 @@ impl NodeProcessor for NoiseFieldProcessor {
 - ネストしたグラフ（ネットワーク境界 / Subnet）や Document 参照が必要なときは
   `scope` を使う。自前で評価器を作らない
 - エラーは `anyhow::Result` で返す。`unwrap` で落とさない（評価はワーカースレッド上）
+- **前フレームの結果に依存するノード（パーティクル・トレイル・積分系）** は
+  `NodeProcessor` ではなく `StatefulProcessor`（`initial` / `step` / `output`）
+  で書き、`processor_for_node` では `stateful_processor(p)` で包んで返す。
+  `step` は決定的な純関数にする（乱数は `seed` パラメータと `id` 属性のハッシュ
+  だけ。時計・`rand`・解像度・品質は読まない）。入力とパラメータは**各 step の
+  フレームの値**で渡るので、`process` のように要求フレームの値を当てにしない。
+  下流にステートフルノードを繋ぐことはできない（評価エラー）。仕様は
+  `procedural-geometry.md` の「ステートフル評価」
 - **上流を別のフレームで読むノード（時間系）** は `pulls_inputs_itself() = true`
   にして `scope.evaluate_input_at(node, port, frame, ctx)` で引く。`false` のままだと
   評価器が先に現在フレームで上流を評価してしまう（`comp/time.rs` が例）。

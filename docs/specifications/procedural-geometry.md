@@ -499,30 +499,50 @@ Hybrid Pull（REQ-CORE-002）は「フレーム t の値は t だけから決ま
 
 ### 規約
 
+実装は `ravel-core/src/eval/sim.rs`（設計の経緯は
+[`stateful-eval-plan.md`](../implementation/stateful-eval-plan.md)）。
+
 ```rust
-pub trait StatefulProcessor {
-    type State: Send + Sync;              // Arc で保持されるフレーム状態
-    fn initial(&self, ctx: &EvalContext, inputs: &Inputs) -> Self::State;
-    fn step(&self, prev: &Self::State, ctx: &EvalContext, inputs: &Inputs)
+pub trait StatefulProcessor: Send + Sync + 'static {
+    type State: Send + Sync + 'static;     // Arc で保持されるフレーム状態
+    fn initial(&self, ctx: &EvalContext, inputs: &SimInputs) -> Self::State;
+    fn step(&self, prev: &Self::State, ctx: &EvalContext, inputs: &SimInputs)
         -> Self::State;                    // 純関数: (state_{t-1}, t) → state_t
+    fn output(&self, state: &Self::State) -> Arc<dyn NodeData>;  // 下流が見る値
+    fn byte_size(&self, state: &Self::State) -> u64;             // 予算への申告
 }
 ```
 
-- 評価エンジンはステートフルノードごとに **sim キャッシュ**
-  `Vec<Arc<State>>`（フレーム連続区間）を保持する。
-- フレーム t の Pull 要求に対し、未計算区間 `[last+1, t]` を順に `step` して
-  埋める。区間評価は評価スレッドプールで行い UI を塞がない
-  （REQ-CORE-005）。長距離ジャンプ時は最後のキャッシュ済み状態を暫定表示。
-- **無効化**: 上流サブグラフの構造/パラメータハッシュを sim キャッシュに
-  記録し、変化したら全区間破棄（v1）。パラメータのキーフレーム変化は
-  影響開始フレーム以降のみ破棄（v2 最適化）。
+登録は `stateful_processor(p)`（型消去のアダプタで包んだ `NodeProcessor`）。
+下流のノードはステートフルかどうかを知らない。
+
+- 評価エンジンはステートフルノードごとに **sim キャッシュ**（`NodeKey` →
+  `SimTrack`、フレーム連続区間）を保持する。フレーム t の Pull 要求に対し、
+  未計算区間 `[last+1, t]` を順に `step` して埋める。**`step` へ渡す入力と
+  パラメータは、要求フレームではなく各 step のフレームで解決する**（入力は
+  `TimeShift(node, frame)` スコープ）。そうしないと状態が「どのフレームで
+  要求されたか」に依存する。
+- **前方ジャンプ**: `EvalServiceConfig::sim_jump_frames` を設定したサービスは、
+  それより長いジャンプに対し最後に届いた状態を `EvalUpdate::provisional =
+  true` で即座に返し、評価ワーカー上で充填を続けて同じ世代の確定値を返す。
+  充填中に新しい要求が来たら、その充填の答えは捨てる（計算済みのフレームは
+  トラックに残る）。既定は無効で、有効にする側は暫定フラグを扱えること。
+- **無効化**: 引くたびに、上流サブグラフ（配線と `NodeOutput` バインディングで
+  届くノード）の構造・種別・bypass・全パラメータ（キーフレーム・式を含む）と
+  fps・コンプ基準のハッシュをトラックの記録と比べ、変化していたら**全区間破棄**
+  する（v1）。ノードの位置・ラベルや上流でないノードの変更では破棄しない。
+  処理系の差し替え（`register` / `invalidate_node`）と全無効化は即座に
+  トラックを落とし、ノードやレイヤーの削除は文書の差分から解放する。
+  **影響開始フレーム以降のみ破棄する最適化は v2 で、未実装。**
 - **決定性**: 乱数は `seed` パラメータ + `id` 属性由来のハッシュのみ。
-  `step` が同一入力で同一出力を返すことをテストで担保する。
+  `step` は `ctx`（フレームと fps）・`prev`・渡された入力だけに依存する —
+  解像度や品質を読むと状態が要求のされ方に依存するので読まない。
 - sim キャッシュは汎用の評価キャッシュとは別の map で保持する（区間が
   順序を持ち、逐次充填という別のアクセスパターンだから）。バイト予算は
-  REQ-CORE-006 の単一予算の中に**保護枠**として確保し、通常のフレーム
-  キャッシュの圧力では削られない。ディスク層へのスピルは将来拡張とし、
-  長期保持は明示キャッシュノードに寄せる。
+  REQ-CORE-006 の単一予算の中に**保護枠**（`CacheKind::Sim`）として確保し、
+  通常のフレームキャッシュの圧力では削られない。sim 同士の退避は
+  **トラック単位**。ディスク層へのスピルは将来拡張とし、長期保持は明示
+  キャッシュノードに寄せる。
 
 ### スクラブ挙動
 
@@ -677,7 +697,7 @@ PolyExtrude、group の AND / OR / NOT 合成、`shape.box`。
 |------|------|------|
 | `ravel-core/src/types.rs` | `GeometricData` 実装型の追加 | ✅ `Geometry` が実装（geometry/container.rs） |
 | `ravel-core/src/geometry/`（新設） | Geometry / AttributeSet / Field | ✅ 実装済み（式フィールドは REQ-CORE-015 の式言語で実装済み、画像サンプラは未） |
-| `ravel-core/src/eval.rs` | sim キャッシュ、`StatefulProcessor` 統合 | 🔲 未着手（TASK-041） |
+| `ravel-core/src/eval/sim.rs` | sim キャッシュ、`StatefulProcessor` 統合 | ✅ 実装済み（組み込みのステートフルノードはまだ無い。最初の利用者は `particle-plan.md`） |
 | `ravel-core/src/registry/builtin.rs` | シェイプ系の出力型変更 + 新ノード登録 | ✅ shape / scatter / attribute / field / rasterize テンプレート登録済み |
 | `ravel-nodes` | シェイプ processor のジオメトリ化、Rasterize、属性・フィールド群 | ✅ shape / scatter / attribute / field と rasterize の GPU + CPU reference processor 実装済み |
 | `ravel-core/src/composition/compile.rs` | Shape/Text Layer ソースの展開先変更 | 🔶 Shape は `ShapeGeometry → Rasterize` 展開済み、Text は未 |
@@ -691,4 +711,6 @@ PolyExtrude、group の AND / OR / NOT 合成、`shape.box`。
   許す**。コンテナ構造は変えない（`Primitive` の種別追加は構造変更に含めない）。
   2026-07-29 に「位置は 2D。3D 拡張は属性型の追加で行う」という当初の決定を
   改めた — 3D 位置を別属性にすると位置の情報源が 2 つになるため（REQ-3D-003）。
-- ステートフルノードの多段接続（sim の下流に sim）は v1 では 1 段に制限。
+- ステートフルノードの多段接続（sim の下流に sim）は v1 では 1 段に制限し、
+  繋ぐと評価エラーになる。`TimeShift` スコープの内側にある sim はスコープごとに
+  別トラックになる。

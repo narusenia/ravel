@@ -53,7 +53,7 @@ several plans here wait on its later units rather than on each other.
 | `stateful-eval-plan.md` | `StatefulProcessor` and the simulation cache | — | REQ-CORE-011 |
 | `particle-plan.md` | Particle simulation as point geometry | `stateful-eval-plan.md`, `done/per-instance-modulation-plan.md` | REQ-MOGRAPH-002 |
 | `effects-library-plan.md` | Colour, blur, distortion, generation, stylise, and time nodes | — | REQ-MOGRAPH-005 |
-| `gpu-resident-geometry-plan.md` | `GpuGeometry`, GPU-side instance expansion, WGSL fields — **phase 0 measured; verdict: proceed** | — | REQ-CORE-009, REQ-GPU-001/003 |
+| `gpu-resident-geometry-plan.md` | `GpuGeometry`, GPU-side instance expansion, WGSL fields — **phase 0 measured; verdict: proceed; unit 1 (`GpuGeometry`, `BufferPool`, shared VRAM allowance) merged in #638** | — | REQ-CORE-009, REQ-GPU-001/003 |
 | `style-attributes-plan.md` | Fill and stroke as per-element attributes | — | REQ-CORE-010, REQ-MOGRAPH-001 |
 | `vector-field-plan.md` | Vector fields — look-at, curl noise, flow — **units 5 and 7a merged** | `done/per-instance-modulation-plan.md` | REQ-CORE-012 |
 | `path-ops-plan.md` | Boolean, offset, round corners, simplify, trim — **phase 0 decides the boolean approach** | `evaluation-scope-plan.md` | REQ-CORE-010, REQ-MOGRAPH-005 |

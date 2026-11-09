@@ -1296,10 +1296,10 @@ FX-3b は raster 側に**生成ノードが 1 つも無い**ことへの対応
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
 | GPU-0 | ✅ | **Phase 0 測定** → 判断は**実施** | — |
-| GPU-1 | ⬜ | `GpuGeometry` 型と転送 | — |
-| GPU-5 | ⬜ | **`rasterize` が常駐ジオメトリを直接読む（CPU 展開の除去）** | GPU-1 |
-| GPU-3 | ⬜ | 生成ノードの GPU 化 | GPU-1 |
-| GPU-2 | ⬜ | フィールドの WGSL 評価 | GPU-1 |
+| GPU-1 | ✅ #638 | `GpuGeometry` 型と転送 | — |
+| GPU-5 | 🟡 | **`rasterize` が常駐ジオメトリを直接読む（CPU 展開の除去）** | GPU-1 |
+| GPU-3 | 🟡 | 生成ノードの GPU 化 | GPU-1 |
+| GPU-2 | 🟡 | フィールドの WGSL 評価 | GPU-1 |
 | GPU-4 | ⬜ | 文書更新 | GPU-1〜3, GPU-5 |
 
 **GPU-0 は測定済み（2026-07-29、`perf-baseline.md`「ジオメトリ評価

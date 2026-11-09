@@ -550,6 +550,13 @@ impl DispatchState {
             })
         });
         crate::scene_pass::record(device, encoder, pass);
+        for call in pass.calls {
+            if let crate::scene_pass::SceneCall::Mesh { buffers, .. } = call {
+                for id in buffers.buffer_ids() {
+                    self.mark_buffer_use(id, false);
+                }
+            }
+        }
         for texture in crate::scene_pass::touched(pass) {
             self.used.insert(texture_ptr(&texture.texture));
         }

@@ -43,14 +43,17 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use wgpu::util::DeviceExt as _;
 
 use crate::binding::{BindingDesc, BindingKind, ShaderVisibility};
+use crate::buffer_pool::{BufferPool, BufferUsage, PooledBuffer};
 use crate::device::GpuContext;
 use crate::dispatch::TextureBinding;
 use crate::raster::{ColorTarget, RasterPipeline};
 use crate::shader::CompiledShader;
+use crate::transfer::upload_buffer;
 
 /// The depth format of a scene's depth attachment.
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -93,15 +96,26 @@ pub enum DrawClass {
 /// caller likes; this crate never rebuilds one on its own.
 pub struct MeshBuffers {
     id: u64,
-    vertices: wgpu::Buffer,
-    indices: wgpu::Buffer,
+    pool: Arc<Mutex<BufferPool>>,
+    /// Leased from `pool`; `Option` only so `Drop` can hand them back.
+    leases: Option<MeshLeases>,
+    /// Bytes of vertex / index data in the (larger, size-class) buffers.
+    vertex_len: u64,
+    index_len: u64,
     index_count: u32,
     colors: wgpu::BindGroup,
     byte_size: u64,
 }
 
+struct MeshLeases {
+    vertices: PooledBuffer,
+    indices: PooledBuffer,
+    colors: PooledBuffer,
+}
+
 impl MeshBuffers {
-    /// Upload a mesh.
+    /// Upload a mesh into buffers leased from `pool`; they go back to it when
+    /// the `MeshBuffers` is dropped.
     ///
     /// `colors` is one straight-alpha RGBA per vertex, or empty for a mesh
     /// with no vertex colours (the shader is told so by the object record's
@@ -111,6 +125,7 @@ impl MeshBuffers {
     /// `Geometry::validate` already does for a mesh primitive.
     pub fn new(
         ctx: &GpuContext,
+        pool: &Arc<Mutex<BufferPool>>,
         pipelines: &ScenePipelines,
         vertices: &[MeshVertex],
         colors: &[[f32; 4]],
@@ -123,8 +138,8 @@ impl MeshBuffers {
         } else {
             bytemuck::cast_slice(colors)
         };
-        // wgpu rejects a zero-sized buffer, and a mesh with no triangles is a
-        // legal (empty) value; its draw is skipped by `index_count == 0`.
+        // A mesh with no triangles is a legal (empty) value; its draw is
+        // skipped by `index_count == 0`, but the buffers still need a byte.
         let vertex_bytes: &[u8] = if vertices.is_empty() {
             &[0u8; size_of::<MeshVertex>()]
         } else {
@@ -135,37 +150,52 @@ impl MeshBuffers {
         } else {
             bytemuck::cast_slice(indices)
         };
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("scene mesh vertices"),
-            contents: vertex_bytes,
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("scene mesh indices"),
-            contents: index_bytes,
-            usage: wgpu::BufferUsages::INDEX,
-        });
-        let color_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("scene mesh colors"),
-            contents: color_bytes,
-            usage: wgpu::BufferUsages::STORAGE,
-        });
+        let lease = |bytes: &[u8], usage: BufferUsage| {
+            let buffer = pool
+                .lock()
+                .expect("buffer pool poisoned")
+                .acquire(bytes.len() as u64, usage | BufferUsage::COPY_DST);
+            upload_buffer(ctx, &buffer, bytes);
+            buffer
+        };
+        let leases = MeshLeases {
+            vertices: lease(vertex_bytes, BufferUsage::VERTEX),
+            indices: lease(index_bytes, BufferUsage::INDEX),
+            colors: lease(color_bytes, BufferUsage::STORAGE),
+        };
         let colors = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene mesh colors"),
             layout: &pipelines.mesh_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: color_buffer.as_entire_binding(),
+                resource: leases.colors.raw().as_entire_binding(),
             }],
         });
         Self {
             id: NEXT_MESH_ID.fetch_add(1, Ordering::Relaxed),
-            vertices: vertex_buffer,
-            indices: index_buffer,
+            pool: Arc::clone(pool),
+            leases: Some(leases),
+            vertex_len: vertex_bytes.len() as u64,
+            index_len: index_bytes.len() as u64,
             index_count: indices.len() as u32,
             colors,
             byte_size: (vertex_bytes.len() + index_bytes.len() + color_bytes.len()) as u64,
         }
+    }
+
+    fn leases(&self) -> &MeshLeases {
+        self.leases.as_ref().expect("leases live until drop")
+    }
+
+    /// The ids of the three pooled buffers, for the batcher's pending-use
+    /// record.
+    pub(crate) fn buffer_ids(&self) -> [u64; 3] {
+        let leases = self.leases();
+        [
+            leases.vertices.id(),
+            leases.indices.id(),
+            leases.colors.id(),
+        ]
     }
 
     /// Identity of this allocation: unique and never reused, so "the second
@@ -179,9 +209,30 @@ impl MeshBuffers {
         self.index_count
     }
 
-    /// Bytes of GPU memory the three buffers hold.
+    /// Ids of the pooled buffers this mesh holds (vertices, indices, colours):
+    /// a second frame that reuses the mesh holds the very same ones.
+    pub fn lease_ids(&self) -> [u64; 3] {
+        self.buffer_ids()
+    }
+
+    /// Bytes of mesh data the three buffers hold (the leases are rounded up
+    /// to size classes).
     pub fn byte_size(&self) -> u64 {
         self.byte_size
+    }
+}
+
+impl Drop for MeshBuffers {
+    fn drop(&mut self) {
+        let Some(leases) = self.leases.take() else {
+            return;
+        };
+        // A poisoned pool only loses the recycling; the buffers drop with it.
+        if let Ok(mut pool) = self.pool.lock() {
+            pool.release(leases.vertices);
+            pool.release(leases.indices);
+            pool.release(leases.colors);
+        }
     }
 }
 
@@ -577,8 +628,14 @@ pub(crate) fn record(
                 render.set_bind_group(0, &objects_group, &[]);
                 render.set_bind_group(1, &buffers.colors, &[]);
                 render.set_bind_group(2, &textures[&texture], &[]);
-                render.set_vertex_buffer(0, buffers.vertices.slice(..));
-                render.set_index_buffer(buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
+                render.set_vertex_buffer(
+                    0,
+                    buffers.leases().vertices.raw().slice(..buffers.vertex_len),
+                );
+                render.set_index_buffer(
+                    buffers.leases().indices.raw().slice(..buffers.index_len),
+                    wgpu::IndexFormat::Uint32,
+                );
                 render.draw_indexed(0..buffers.index_count, 0, *object..*object + 1);
             }
             SceneCall::Quads { instances, .. } => {

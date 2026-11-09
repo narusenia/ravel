@@ -63,6 +63,10 @@ pub(crate) struct IdleShare {
 }
 
 impl IdleShare {
+    pub(crate) fn allowance(&self) -> VramAllowance {
+        self.allowance.clone()
+    }
+
     pub(crate) fn new(allowance: VramAllowance) -> Self {
         Self {
             allowance,

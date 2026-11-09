@@ -29,10 +29,10 @@ use ravel_core::geometry::Geometry;
 use ravel_core::scene::Mat4;
 use ravel_core::types::NodeData;
 use ravel_gpu::{
-    ComputeDispatch, ComputePipeline, DepthBuffer, DrawClass, GpuContext, GpuFrameBuffer,
-    MeshBuffers, MeshVertex, PooledTexture, QuadBatch, RasterPipeline, SceneCall, ScenePass,
-    ScenePipelines, ShaderManager, TextureBinding, TextureFormat, TextureKey, TexturePool,
-    TextureUsage,
+    BufferPool, ComputeDispatch, ComputePipeline, DepthBuffer, DrawClass, GpuContext,
+    GpuFrameBuffer, MeshBuffers, MeshVertex, PooledTexture, QuadBatch, RasterPipeline, SceneCall,
+    ScenePass, ScenePipelines, ShaderManager, TextureBinding, TextureFormat, TextureKey,
+    TexturePool, TextureUsage,
 };
 
 use super::prepare::{Blended, MeshKey, MeshObject, Prepared, mesh_data};
@@ -98,17 +98,27 @@ struct CachedMesh {
 /// The static buffers of every mesh drawn recently.
 ///
 /// **This is the one place a mesh buffer is allocated.** [`Self::allocate`]
-/// is the whole seam: a general GPU buffer pool replaces its body (and the
-/// `MeshBuffers` it returns) without touching anything that decides *when* a
-/// mesh is stale, which is [`MeshKey`]'s job, or what draws it.
-#[derive(Default)]
+/// leases the three buffers from a [`BufferPool`]; they return to it when the
+/// entry ages out. *When* a mesh is stale is [`MeshKey`]'s job, not the
+/// pool's.
 struct StaticMeshCache {
+    /// Where the static buffers are leased from.
+    buffers: Arc<Mutex<BufferPool>>,
     entries: HashMap<MeshKey, CachedMesh>,
     frame: u64,
     allocations: u64,
 }
 
 impl StaticMeshCache {
+    fn new(buffers: Arc<Mutex<BufferPool>>) -> Self {
+        Self {
+            buffers,
+            entries: HashMap::new(),
+            frame: 0,
+            allocations: 0,
+        }
+    }
+
     fn allocate(
         &mut self,
         ctx: &GpuContext,
@@ -117,7 +127,14 @@ impl StaticMeshCache {
     ) -> Option<(Arc<MeshBuffers>, bool)> {
         let data = mesh_data(&object.geometry, object.primitive)?;
         self.allocations += 1;
-        let buffers = MeshBuffers::new(ctx, pipelines, &data.vertices, &data.colors, &data.indices);
+        let buffers = MeshBuffers::new(
+            ctx,
+            &self.buffers,
+            pipelines,
+            &data.vertices,
+            &data.colors,
+            &data.indices,
+        );
         Some((Arc::new(buffers), !data.colors.is_empty()))
     }
 
@@ -180,6 +197,14 @@ impl GpuSceneRenderer {
         let pipelines = ScenePipelines::new(&ctx, &shader, rasterize::scene_color_target());
         let paths = rasterize::depth_tested_pipeline(&ctx, shaders);
         let unpremultiply = rasterize::unpremultiply_pipeline(shaders);
+        // Idle buffers and idle textures share one VRAM allowance when the
+        // texture pool has one (the application's); a standalone pool gets a
+        // fixed budget like `shared_texture_pool`.
+        let allowance = pool.lock().expect("texture pool poisoned").vram_allowance();
+        let buffers = Arc::new(Mutex::new(match allowance {
+            Some(allowance) => BufferPool::with_vram_allowance(ctx.clone(), allowance),
+            None => BufferPool::new(ctx.clone(), 256 * 1024 * 1024),
+        }));
         let placeholder = pool
             .lock()
             .expect("texture pool poisoned")
@@ -197,7 +222,7 @@ impl GpuSceneRenderer {
             unpremultiply,
             placeholder,
             depth: Mutex::new(None),
-            cache: Mutex::new(StaticMeshCache::default()),
+            cache: Mutex::new(StaticMeshCache::new(buffers)),
         }
     }
 
@@ -205,6 +230,14 @@ impl GpuSceneRenderer {
     /// second frame of an unchanged scene must not move it.
     pub(super) fn static_allocations(&self) -> u64 {
         self.cache.lock().expect("mesh cache poisoned").allocations
+    }
+
+    /// `(buffers ever created, buffers idle)` of the static buffer pool.
+    #[cfg(test)]
+    pub(super) fn pool_stats(&self) -> (u64, usize) {
+        let pool = self.cache.lock().expect("mesh cache poisoned");
+        let pool = pool.buffers.lock().expect("buffer pool poisoned");
+        (pool.total_created(), pool.idle_count())
     }
 
     /// Buffer sets currently held.
@@ -225,7 +258,7 @@ impl GpuSceneRenderer {
             .meshes
             .iter()
             .filter_map(|object| cache.get(&self.ctx, &self.pipelines, object))
-            .map(|(buffers, _)| buffers.id())
+            .flat_map(|(buffers, _)| buffers.lease_ids())
             .collect()
     }
 

@@ -1194,6 +1194,52 @@ fn an_unchanged_mesh_is_not_reallocated_or_reuploaded_on_the_next_frame() {
 }
 
 #[test]
+fn an_aged_out_mesh_returns_its_buffers_to_the_pool_and_a_new_mesh_reuses_them() {
+    let rig = Rig::new();
+    let processor = rig.processor();
+    let gpu = processor.gpu.as_ref().unwrap();
+    let geometry = Arc::new(flat_quad(0.0, 8.0, 16.0, 24.0, 0.0, RED));
+    run(&processor, &moving_scene(&geometry, 0.0), &ctx(64, 40));
+    assert_eq!(
+        gpu.pool_stats(),
+        (3, 0),
+        "vertices, indices, colours leased"
+    );
+
+    // Meshless frames until the entry ages out (16 unused frames).
+    for _ in 0..20 {
+        run(
+            &processor,
+            &scene_of(pixel_camera(64, 40), vec![]),
+            &ctx(64, 40),
+        );
+    }
+    assert_eq!(gpu.live_buffer_sets(), 0, "the entry aged out");
+    assert_eq!(gpu.pool_stats(), (3, 3), "its three buffers went back idle");
+
+    // A different mesh of the same size class leases them again. The first
+    // frame's pass may still sit in the unsubmitted batch, and the pool skips
+    // a buffer that batch reads, so submit it first.
+    rig.gpu.flush();
+    let mut edited = (*geometry).clone();
+    if let AttributeArray::Vec3(positions) = edited.points_mut().make_mut(names::P).unwrap() {
+        positions[2].0 = 20.0;
+    }
+    let out = frame(&run(
+        &processor,
+        &moving_scene(&Arc::new(edited), 0.0),
+        &ctx(64, 40),
+    ));
+    assert_eq!(gpu.pool_stats(), (3, 0), "no new buffer was created");
+    assert_color(
+        px(&out, 10, 12),
+        RED,
+        4e-3,
+        "drawn through the recycled buffers",
+    );
+}
+
+#[test]
 fn a_changed_mesh_is_uploaded_again() {
     let rig = Rig::new();
     let processor = rig.processor();

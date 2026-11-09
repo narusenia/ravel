@@ -13,7 +13,7 @@ use crate::registry::{
     ContextualKind, DerivedFrom, NodeCategory, NodeRegistry, NodeTemplate, PIECE_MODE_INSTANCES,
     PIECE_MODE_PARAM, PIECE_MODE_WHOLE, ParamRole, SIZING_AUTO, SIZING_FIXED, SIZING_PARAM,
 };
-use crate::scene::camera;
+use crate::scene::{camera, light};
 
 /// Direct separable blur loop budget. Larger visual radii need a future
 /// downsampled or multi-pass approximation instead of an unbounded shader loop.
@@ -194,6 +194,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(scene_add());
     reg.register(scene_merge());
     reg.register(scene_camera());
+    reg.register(scene_light());
     reg.register(scene_render());
     reg.register(blur());
     reg.register(transform());
@@ -2046,6 +2047,42 @@ fn scene_camera() -> NodeTemplate {
         .with_param_group("clip", ["near", "far"])
 }
 
+/// `scene.light`: a scene holding one light and no objects.
+///
+/// Carried inside the `Scene` like a camera, so `scene.merge` combines lights,
+/// cameras and objects with one node. `direction` is used by a directional
+/// light and `position` / `radius` by a point light; the unused ones are kept
+/// so switching `type` does not lose an authored value (or its keyframes).
+fn scene_light() -> NodeTemplate {
+    NodeTemplate::new("scene.light", "Light", NodeCategory::Scene)
+        .with_output(scene_output())
+        .with_param(string_parameter("type", light::LIGHT_DIRECTIONAL))
+        .with_param_options("type", light::LIGHT_KINDS)
+        .with_param(color_parameter("color", [1.0, 1.0, 1.0, 1.0]))
+        .with_color_param("color")
+        .with_param(float_parameter("intensity", 1.0))
+        .with_param(channel3_parameter(
+            "direction",
+            light::DEFAULT_DIRECTION[0],
+            light::DEFAULT_DIRECTION[1],
+            light::DEFAULT_DIRECTION[2],
+        ))
+        .with_param(channel3_parameter(
+            "position",
+            light::DEFAULT_POSITION[0],
+            light::DEFAULT_POSITION[1],
+            light::DEFAULT_POSITION[2],
+        ))
+        .with_param(float_parameter("radius", light::DEFAULT_RADIUS))
+        .with_param_range("intensity", 0.0..=1e6, 0.0..=4.0)
+        .with_param_range("direction", -1e9..=1e9, -1.0..=1.0)
+        .with_param_range("position", -1e9..=1e9, -5000.0..=5000.0)
+        .with_param_range("radius", light::MIN_RADIUS..=1e9, 10.0..=5000.0)
+        // What the light is, then where it is or which way it points.
+        .with_param_group("light", ["type", "color", "intensity"])
+        .with_param_group("placement", ["direction", "position", "radius"])
+}
+
 /// `scene.render`: a scene seen through its first camera, as an image.
 ///
 /// `fill`, `stroke_width` and `color` are `rasterize`'s, with the same meaning
@@ -3578,7 +3615,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 134);
+        assert_eq!(reg.all_templates().count(), 135);
     }
 
     #[test]
@@ -3586,7 +3623,7 @@ mod tests {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
         assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 40);
-        assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 4);
+        assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 3);
@@ -4177,6 +4214,7 @@ mod tests {
             ("constant.color", "color", true),
             ("rasterize", "color", true),
             ("scene.render", "color", true),
+            ("scene.light", "color", true),
             ("comp.solid", "color", true),
             ("comp.fill", "color", true),
             ("comp.tint", "map_black", true),

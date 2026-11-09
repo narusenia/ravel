@@ -15,7 +15,10 @@
 //! mechanism serves both the 2D repeater and the 3D renderer
 //! (`docs/implementation/done/image-instancing-plan.md`).
 //!
-//! Lights are not part of a scene yet; they arrive with `scene.light`.
+//! A scene also carries its [`Light`]s, the way it carries cameras: only the
+//! top level counts, and a nested scene's lights are not promoted into its
+//! parent. With none, `scene.render` lights it with white ambient, so nothing
+//! goes dark for want of a light.
 //!
 //! # Not persisted
 //!
@@ -32,9 +35,11 @@
 //! copies neither the list spine nor any geometry (REQ-CORE-004).
 
 pub mod camera;
+pub mod light;
 pub mod matrix;
 
 pub use camera::{Camera, Projection};
+pub use light::{Light, LightKind};
 pub use matrix::Mat4;
 
 use crate::geometry::Geometry;
@@ -186,6 +191,7 @@ pub struct FlatObject {
 pub struct Scene {
     objects: im::Vector<SceneObject>,
     cameras: im::Vector<Camera>,
+    lights: im::Vector<Light>,
 }
 
 impl Scene {
@@ -200,8 +206,19 @@ impl Scene {
         let mut cameras = im::Vector::new();
         cameras.push_back(camera);
         Self {
-            objects: im::Vector::new(),
             cameras,
+            ..Self::default()
+        }
+    }
+
+    /// A scene holding one light and nothing else — what `scene.light`
+    /// produces.
+    pub fn from_light(light: Light) -> Self {
+        let mut lights = im::Vector::new();
+        lights.push_back(light);
+        Self {
+            lights,
+            ..Self::default()
         }
     }
 
@@ -222,14 +239,27 @@ impl Scene {
         next
     }
 
-    /// The union of two scenes: `self`'s objects and cameras first, then
-    /// `other`'s. This is what `scene.merge` computes.
+    /// This scene with `light` appended.
+    pub fn with_light(&self, light: Light) -> Self {
+        let mut next = self.clone();
+        next.lights.push_back(light);
+        next
+    }
+
+    /// The union of two scenes: `self`'s objects, cameras and lights first,
+    /// then `other`'s. This is what `scene.merge` computes.
     pub fn merged(&self, other: &Self) -> Self {
         let mut objects = self.objects.clone();
         objects.append(other.objects.clone());
         let mut cameras = self.cameras.clone();
         cameras.append(other.cameras.clone());
-        Self { objects, cameras }
+        let mut lights = self.lights.clone();
+        lights.append(other.lights.clone());
+        Self {
+            objects,
+            cameras,
+            lights,
+        }
     }
 
     /// The objects of this scene, in insertion order. Nested scenes appear as
@@ -242,6 +272,16 @@ impl Scene {
     /// The cameras of this scene, in insertion order.
     pub fn cameras(&self) -> &im::Vector<Camera> {
         &self.cameras
+    }
+
+    /// The lights of this scene, in insertion order.
+    pub fn lights(&self) -> &im::Vector<Light> {
+        &self.lights
+    }
+
+    /// Number of lights.
+    pub fn light_count(&self) -> usize {
+        self.lights.len()
     }
 
     /// Number of objects at this level (nested scenes count as one).
@@ -359,6 +399,7 @@ impl NodeData for Scene {
                 (self.objects.len() as u64).saturating_mul(size_of::<SceneObject>() as u64),
             )
             .saturating_add((self.cameras.len() as u64).saturating_mul(size_of::<Camera>() as u64))
+            .saturating_add((self.lights.len() as u64).saturating_mul(size_of::<Light>() as u64))
             .saturating_add(content)
     }
 }
@@ -384,6 +425,28 @@ mod tests {
             (actual - expected).abs() < 1e-4,
             "{what}: expected {expected}, got {actual}"
         );
+    }
+
+    /// Lights travel with the scene like cameras: they merge in order, and a
+    /// nested scene's lights are not promoted into the parent's list.
+    #[test]
+    fn lights_merge_in_order_and_are_not_promoted_from_nested_scenes() {
+        let sun = Light {
+            kind: LightKind::Directional {
+                direction: [0.0, 0.0, 1.0],
+            },
+            color: [1.0, 1.0, 1.0],
+            intensity: 1.0,
+        };
+        let merged = Scene::from_light(sun).merged(&Scene::from_light(Light::DEFAULT_AMBIENT));
+        assert_eq!(merged.light_count(), 2);
+        assert_eq!(merged.lights()[0], sun);
+        assert_eq!(merged.lights()[1], Light::DEFAULT_AMBIENT);
+
+        let nested = Arc::new(Scene::from_light(sun));
+        let parent = Scene::new().with_object(SceneObject::scene(nested, Transform3D::IDENTITY));
+        assert_eq!(parent.light_count(), 0);
+        assert_eq!(merged.with_light(sun).light_count(), 3);
     }
 
     #[test]

@@ -2642,17 +2642,98 @@ mod tests {
         assert!(positions(&along, true).iter().all(|p| p.1 == 0.0));
     }
 
-    /// A known limit, pinned so whoever writes the 3D expander finds it: the
-    /// instances are placed in 3D but nothing flattens 3D placements yet, so
-    /// `expand_instances` (and with it `scene.render`) stops with the explicit
-    /// planar-only error rather than drawing them at the wrong place.
+    /// 3D instances flatten: 27 boxes of 24 vertices and 12 triangles each,
+    /// with every instance's placement baked in.
     #[test]
-    fn expanding_three_dimensional_instances_is_not_supported_yet() {
-        let out = place("scatter.grid", &[("count_z", int(2))], &[Arc::new(tetra())]);
-        let error = ravel_core::geometry::expand_instances(&out).unwrap_err();
-        assert!(
-            error.to_string().contains("requires 2D positions"),
-            "{error}"
+    fn a_3d_grid_of_boxes_expands_to_one_flat_mesh() {
+        let cube = crate::mesh_primitives::BoxProcessor::from_node(&make_node("mesh.box", &[]));
+        let mut params = ResolvedParams::default();
+        params.set(
+            "size",
+            ravel_core::eval::ResolvedValue::Vec3([6.0, 6.0, 6.0]),
         );
+        let cube = cube
+            .process(
+                &make_node("mesh.box", &[]),
+                &ctx(),
+                &[],
+                &params,
+                &mut ravel_core::eval::Evaluator::new(),
+            )
+            .unwrap();
+        let grid = place(
+            "scatter.grid",
+            &[
+                ("count_x", int(3)),
+                ("count_y", int(3)),
+                ("count_z", int(3)),
+                ("spacing", ParameterValue::vec2(10.0, 10.0)),
+                ("spacing_z", float(10.0)),
+            ],
+            &[cube],
+        );
+        let flat = ravel_core::geometry::expand_instances(&grid).unwrap();
+        assert_eq!(flat.point_count(), 27 * 24);
+        assert_eq!(flat.indices().len(), 27 * 12 * 3);
+        assert_eq!(flat.primitives().len(), 27);
+        flat.validate().unwrap();
+        // The first box sits at the grid's first point, (-10, -10, -10), and
+        // its extent is the box's own 6 around it.
+        let p = positions3_of(&flat);
+        let first = &p[..24];
+        let low = first.iter().fold(f32::MAX, |m, v| m.min(v.0));
+        let high = first.iter().fold(f32::MIN, |m, v| m.max(v.0));
+        assert_eq!((low, high), (-13.0, -7.0));
+    }
+
+    fn positions3_of(geometry: &Geometry) -> Vec<Vec3> {
+        geometry
+            .points()
+            .get(names::P)
+            .unwrap()
+            .as_vec3(names::P)
+            .unwrap()
+            .to_vec()
+    }
+
+    /// A ring of boxes turned to face outward: the box's +X face normal is
+    /// carried by each copy's quarter turns about Z, `(1,0,0) → (0,1,0) →
+    /// (−1,0,0) → (0,−1,0)`.
+    #[test]
+    fn a_rotated_instance_carries_its_normals_with_it() {
+        let node = make_node("mesh.box", &[]);
+        let cube = crate::mesh_primitives::BoxProcessor::from_node(&node)
+            .process(
+                &node,
+                &ctx(),
+                &[],
+                &ResolvedParams::default(),
+                &mut ravel_core::eval::Evaluator::new(),
+            )
+            .unwrap();
+        let ring = place(
+            "scatter.circular",
+            &[("count", int(4)), ("radius", float(100.0))],
+            &[cube],
+        );
+        let flat = ravel_core::geometry::expand_instances(&ring).unwrap();
+        let normals = flat
+            .points()
+            .get(names::N)
+            .unwrap()
+            .as_vec3(names::N)
+            .unwrap();
+        // The +X face is the third face of a box: points 8..12 of its 24.
+        for (copy, expected) in [
+            Vec3(1.0, 0.0, 0.0),
+            Vec3(0.0, 1.0, 0.0),
+            Vec3(-1.0, 0.0, 0.0),
+            Vec3(0.0, -1.0, 0.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            near3(normals[copy * 24 + 8], expected);
+        }
     }
 }

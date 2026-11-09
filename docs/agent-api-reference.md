@@ -3269,6 +3269,19 @@ Input::new(&Entity<InputState>).compact() / .density(..)
 // number_input.rs — `gpui_base::NumberInput` in the same frame.
 NumberInput::new(&Entity<InputState>).compact() / .density(..) / .invalid(..)
 
+// expression_editor.rs — `gpui_base::EditorState` (one row, no line numbers,
+// Enter submits) in the same frame, coloured by `highlight_tokens`.
+expression_editor_state(value, &mut Window, &mut App) -> Entity<EditorState>
+    // read with `.read(cx).value()`; subscribe to `InputEvent::{Change, PressEnter}`
+ExpressionEditor::new(&Entity<EditorState>).compact() / .invalid(..)
+    .accessibility_label(..) .tab_index(..)   // `Styled`
+token_color(TokenClass, &Colors) -> Hsla      // pure, exhaustive `match`
+style_runs(&[(Span, TokenClass)], &Range<usize>, &Colors) -> Vec<(Range<usize>, HighlightStyle)>
+    // gapless cover of the range; what `InputHighlighter::styles` returns.
+    // A palette switch: the host calls `refresh_expression_colours(&state, cx)`
+    // after `set_active_tokens` (no observer; `observe-global` is linted)
+    // No completion, popup or Tab / Shift+Enter / paste handling yet.
+
 // scrub_input.rs — the AE gesture: drag a label sideways to change a value.
 ScrubInputState / ScrubInput / ScrubEvent::{Change, Commit}
     // `Change` fires live during the drag (apply, no undo); `Commit` fires

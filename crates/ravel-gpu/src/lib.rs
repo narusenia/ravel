@@ -29,6 +29,13 @@
 //! All internal image processing uses 32-bit float formats with no artificial
 //! resolution limits, matching Ravel's architecture.
 
+// Uploads and readbacks hand `bytemuck` casts straight to the GPU, which is
+// little-endian; a big-endian target would silently corrupt every column.
+#[cfg(target_endian = "big")]
+compile_error!(
+    "ravel-gpu assumes a little-endian target: texture and buffer transfers are native-endian casts"
+);
+
 pub mod binding;
 pub mod buffer_pool;
 pub mod compute;

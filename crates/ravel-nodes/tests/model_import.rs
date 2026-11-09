@@ -723,3 +723,71 @@ fn an_imported_mesh_can_be_transformed_and_modulated_then_rendered() {
     );
     assert!(alpha(&frame, 32, 25) < 0.01, "and empty above it");
 }
+
+// ---------------------------------------------------------------------------
+// The layer "add as layer" makes of a model
+// ---------------------------------------------------------------------------
+
+/// Evaluate the `model` layer template's own network at frame 0: the model must
+/// reach `net.out` as pixels, upright. The default camera sits at
+/// `(0, 0, -1000)` looking at the origin, which is the centre of a 64 x 64
+/// frame, and the template scales the model by 200 — so the wedge (apex 2 units
+/// above its base, i.e. 400 units) reaches `400 / (1000 * tan 25 deg)`, about
+/// 0.86 of the half-height, above the centre: pixel row ~4.5 for the apex, and
+/// the base on the centre row 32. Row 20 is inside the triangle, row 40 is
+/// below the base.
+#[test]
+fn the_model_layer_template_draws_the_model_upright_at_frame_zero() {
+    use ravel_core::composition::templates::model_layer_template;
+    use ravel_nodes::scene::{SceneAddProcessor, SceneCameraProcessor, SceneMergeProcessor};
+
+    let mut registry = NodeRegistry::new();
+    register_builtins(&mut registry);
+    let mut network = model_layer_template().instantiate(&registry).unwrap();
+    let import = network
+        .nodes()
+        .find(|n| n.type_key == "mesh.import")
+        .unwrap()
+        .clone();
+    let mut bound = (*import).clone();
+    bound
+        .parameters
+        .iter_mut()
+        .find(|p| p.key == "asset_id")
+        .unwrap()
+        .value = ParameterValue::String(AssetId::new(1).to_param_value());
+    network = network.replace_node(Arc::new(bound));
+
+    let mut ev = evaluator_with(MediaAssetEntry::from_absolute(fixture("wedge.obj")));
+    let mut render_id = None;
+    for node in network.nodes() {
+        let processor: Option<Arc<dyn NodeProcessor>> = match node.type_key.as_str() {
+            "mesh.import" => Some(Arc::new(MeshImportProcessor::from_node(node))),
+            "scene.add" => Some(Arc::new(SceneAddProcessor::from_node(node))),
+            "scene.merge" => Some(Arc::new(SceneMergeProcessor::from_node(node))),
+            "scene.camera" => Some(Arc::new(SceneCameraProcessor::from_node(node))),
+            "scene.render" => {
+                render_id = Some(node.id);
+                Some(Arc::new(SceneRenderProcessor::from_node(node)))
+            }
+            _ => None,
+        };
+        if let Some(processor) = processor {
+            ev.register(node.id, processor);
+        }
+    }
+    // The wedge file has two objects; the slab lies flat at y = 0 and edge-on
+    // to the camera, so it adds no coverage of its own.
+    let out = ev
+        .evaluate(&network, render_id.unwrap(), &ctx())
+        .expect("the layer network evaluates");
+    let frame = out.downcast_ref::<FrameBuffer>().expect("pixels").clone();
+    assert!(
+        alpha(&frame, 32, 20) > 0.5,
+        "the model is drawn above the centre"
+    );
+    assert!(
+        alpha(&frame, 32, 40) < 0.5,
+        "and nothing hangs below its base"
+    );
+}

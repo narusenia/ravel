@@ -1543,4 +1543,76 @@ mod tests {
         );
         assert_eq!(counter.initials.load(Ordering::Relaxed), 1);
     }
+
+    /// A value that costs 400 bytes of the budget, to put ordinary pressure on it.
+    struct Blob;
+
+    impl NodeData for Blob {
+        fn data_type_id(&self) -> DataTypeId {
+            DataTypeId::SCALAR
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn byte_size(&self) -> u64 {
+            400
+        }
+    }
+
+    struct BlobSource;
+
+    impl NodeProcessor for BlobSource {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            Ok(Arc::new(Blob))
+        }
+    }
+
+    #[test]
+    fn ordinary_pressure_never_evicts_a_sim_track() {
+        // 1000 bytes of RAM, 250 held back for sim. The track costs 200, and
+        // ten 400-byte node results go through behind it.
+        let budget = budgeted(1000, 0.25);
+        let counter = Counter {
+            state_bytes: 100,
+            ..Counter::default()
+        };
+        let mut graph = Graph::new().add_node(sim_node(2)).unwrap();
+        let mut ev = Evaluator::with_budget(budget.clone());
+        ev.register(NodeId::new(2), stateful_processor(counter));
+        for id in 10..20 {
+            graph = graph
+                .add_node(
+                    Node::new(NodeId::new(id), "test.blob").with_output("out", DataTypeId::SCALAR),
+                )
+                .unwrap();
+            ev.register(NodeId::new(id), Arc::new(BlobSource));
+        }
+        ev.evaluate(&graph, NodeId::new(2), &ctx_at(1)).unwrap();
+
+        for id in 10..20 {
+            ev.evaluate(&graph, NodeId::new(id), &ctx_at(1)).unwrap();
+        }
+
+        assert_eq!(
+            ev.sim_cached_frames(&[], NodeId::new(2)),
+            Some(0..2),
+            "ordinary frame pressure evicted the track"
+        );
+        let stats = budget.stats();
+        assert!(
+            stats.used[Tier::Ram as usize] - stats.sim_used[Tier::Ram as usize] <= 1000 - 250,
+            "ordinary entries spent the sim share: {stats:?}"
+        );
+        assert!(
+            ev.cache_stats().entries < 10,
+            "the node results were not under pressure, so the test proves nothing"
+        );
+    }
 }

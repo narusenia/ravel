@@ -71,7 +71,10 @@ pub use device::{
     AdapterInfo, DeviceType, GpuBackend, GpuContext, GpuDeviceSnapshot, GpuDeviceState,
     GpuLossReason,
 };
-pub use dispatch::{ComputeDispatch, DispatchSnapshot, QuadDraw, QuadRun, TextureBinding};
+pub use dispatch::{
+    BufferBinding, BufferDispatch, ComputeDispatch, DispatchSnapshot, QuadDraw, QuadRun,
+    TextureBinding,
+};
 pub use error::{GpuError, GpuResult};
 pub use frame::GpuFrameBuffer;
 pub use geometry::{GpuColumn, GpuGeometry, column_stride, column_wgsl_type};

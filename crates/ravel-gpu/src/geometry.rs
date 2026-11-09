@@ -73,15 +73,9 @@ pub const fn column_stride(ty: AttributeType) -> Option<u32> {
 /// The WGSL element type a resident column of `ty` is declared as
 /// (`array<T>`), or `None` for a CPU-only type.
 pub const fn column_wgsl_type(ty: AttributeType) -> Option<&'static str> {
-    match ty {
-        AttributeType::F32 => Some("f32"),
-        AttributeType::Vec2 => Some("vec2<f32>"),
-        AttributeType::Vec3 => Some("vec3<f32>"),
-        AttributeType::Vec4 | AttributeType::Color => Some("vec4<f32>"),
-        AttributeType::I32 => Some("i32"),
-        AttributeType::Bool => Some("u32"),
-        AttributeType::Str => None,
-    }
+    // One table, owned by the WGSL the fields emit (`ravel-core`), so a
+    // generated shader and a column's layout cannot disagree.
+    ravel_core::geometry::wgsl_element_type(ty)
 }
 
 /// Whether a column of `ty` in `domain` is made resident.
@@ -216,6 +210,55 @@ impl GpuColumn {
     fn data_bytes(&self) -> u64 {
         self.len as u64 * u64::from(column_stride(self.ty).expect("resident type"))
     }
+
+    /// Upload `column` into a buffer leased from `pool` (one counted upload).
+    /// `None` for a type with no GPU layout (`Str`). The buffer returns to the
+    /// pool when the last clone of the column drops.
+    pub fn upload(
+        ctx: &GpuContext,
+        pool: &Arc<Mutex<BufferPool>>,
+        column: &AttributeArray,
+    ) -> Option<Self> {
+        let bytes = encode_column(column)?;
+        let buffer = pool
+            .lock()
+            .expect("buffer pool poisoned")
+            .acquire(bytes.len() as u64, BufferUsage::COLUMN);
+        // Outside the pool lock, as texture uploads are.
+        crate::transfer::upload_buffer(ctx, &buffer, &bytes);
+        Some(Self::adopt(pool, buffer, column.attr_type(), column.len()))
+    }
+
+    /// Wrap a buffer a pass has filled with `len` elements of `ty` (laid out as
+    /// [`column_stride`] says) as a column, returned to `pool` on the last drop.
+    pub fn adopt(
+        pool: &Arc<Mutex<BufferPool>>,
+        buffer: PooledBuffer,
+        ty: AttributeType,
+        len: usize,
+    ) -> Self {
+        debug_assert!(
+            column_stride(ty)
+                .is_some_and(|stride| u64::from(stride) * len as u64 <= buffer.capacity()),
+            "the buffer must hold the column"
+        );
+        Self {
+            lease: Arc::new(ColumnLease {
+                pool: Arc::downgrade(pool),
+                buffer: Some(buffer),
+            }),
+            ty,
+            len,
+        }
+    }
+
+    /// Read the column back to the CPU. Blocks (and flushes a batch that writes
+    /// it); a true boundary.
+    pub fn read(&self, ctx: &GpuContext) -> GpuResult<AttributeArray> {
+        let bytes = crate::transfer::begin_read_buffer(ctx, self.buffer(), self.data_bytes())?
+            .wait_into_vec()?;
+        decode_column(self.ty, &bytes, self.len)
+    }
 }
 
 /// Element counts per domain, which the stripped host geometry cannot report
@@ -276,25 +319,10 @@ impl GpuGeometry {
                 if !is_resident(domain, column.attr_type()) {
                     continue;
                 }
-                let bytes = encode_column(column).expect("resident types encode");
-                let buffer = pool
-                    .lock()
-                    .expect("buffer pool poisoned")
-                    .acquire(bytes.len() as u64, BufferUsage::COLUMN);
-                // Outside the pool lock, as texture uploads are.
-                crate::transfer::upload_buffer(&ctx, &buffer, &bytes);
+                let uploaded =
+                    GpuColumn::upload(&ctx, pool, column).expect("resident types encode");
                 set_mut(&mut host, domain).remove(name);
-                columns.insert(
-                    (domain, name.clone()),
-                    GpuColumn {
-                        lease: Arc::new(ColumnLease {
-                            pool: Arc::downgrade(pool),
-                            buffer: Some(buffer),
-                        }),
-                        ty: column.attr_type(),
-                        len: column.len(),
-                    },
-                );
+                columns.insert((domain, name.clone()), uploaded);
             }
         }
         Ok(Self {
@@ -350,6 +378,33 @@ impl GpuGeometry {
     /// Every resident column.
     pub fn columns(&self) -> impl Iterator<Item = (Domain, &AttrName, &GpuColumn)> {
         self.columns.iter().map(|((d, n), c)| (*d, n, c))
+    }
+
+    /// This geometry with `name` of `domain` replaced by (or added as) the
+    /// resident `column`. Every other column is shared, not copied; a CPU
+    /// column of the same name is dropped so the name has one home.
+    pub fn with_column(&self, domain: Domain, name: &str, column: GpuColumn) -> Self {
+        let mut host = (*self.host).clone();
+        set_mut(&mut host, domain).remove(name);
+        let mut columns = self.columns.clone();
+        columns.insert((domain, AttrName::from(name)), column);
+        Self {
+            ctx: self.ctx.clone(),
+            columns,
+            host: Arc::new(host),
+            counts: self.counts,
+        }
+    }
+
+    /// Type and length of attribute `name` of `domain`, wherever it lives
+    /// (resident or on the host).
+    pub fn attribute_info(&self, domain: Domain, name: &str) -> Option<(AttributeType, usize)> {
+        self.column(domain, name)
+            .map(|column| (column.attr_type(), column.len()))
+            .or_else(|| {
+                self.host_attribute(domain, name)
+                    .map(|column| (column.attr_type(), column.len()))
+            })
     }
 
     /// A column that stayed on the CPU (`Str`, or any `Detail` attribute).
@@ -659,5 +714,60 @@ mod tests {
             .to_geometry()
             .unwrap();
         assert_eq!(back.point_count(), 0);
+    }
+
+    /// A column uploaded on its own reads back bit for bit, and `with_column`
+    /// swaps exactly one column while sharing the rest.
+    #[test]
+    fn a_standalone_column_round_trips_and_replaces_one_column() {
+        let Some((ctx, pool)) = rig() else { return };
+        for column in every_column() {
+            let uploaded = GpuColumn::upload(&ctx, &pool, &column).expect("a GPU layout");
+            assert_eq!(uploaded.attr_type(), column.attr_type());
+            assert_eq!(bits(&uploaded.read(&ctx).unwrap()), bits(&column));
+        }
+        let mut cpu = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(1.0, 1.0)]);
+        cpu.points_mut()
+            .insert("w", AttributeArray::F32(vec![1.0, 2.0]))
+            .unwrap();
+        cpu.points_mut()
+            .insert("tag", AttributeArray::Str(vec!["a".into(), "b".into()]))
+            .unwrap();
+        let resident = GpuGeometry::from_geometry(ctx.clone(), &pool, &cpu).unwrap();
+        let replacement =
+            GpuColumn::upload(&ctx, &pool, &AttributeArray::F32(vec![9.0, 8.0])).unwrap();
+        let swapped = resident.with_column(Domain::Point, "w", replacement);
+        let back = swapped.to_geometry().unwrap();
+        assert_eq!(
+            back.points().get("w").unwrap().as_f32("w").unwrap(),
+            &[9.0, 8.0]
+        );
+        // The original is immutable, and the other columns are the same buffers.
+        assert_eq!(
+            resident
+                .to_geometry()
+                .unwrap()
+                .points()
+                .get("w")
+                .unwrap()
+                .as_f32("w")
+                .unwrap(),
+            &[1.0, 2.0]
+        );
+        assert_eq!(
+            swapped.column(Domain::Point, "P").unwrap().buffer().id(),
+            resident.column(Domain::Point, "P").unwrap().buffer().id()
+        );
+        // Resident and host columns both answer `attribute_info`; absent ones do not.
+        assert_eq!(
+            swapped.attribute_info(Domain::Point, "w"),
+            Some((AttributeType::F32, 2))
+        );
+        assert_eq!(
+            swapped.attribute_info(Domain::Point, "tag"),
+            Some((AttributeType::Str, 2))
+        );
+        assert_eq!(swapped.attribute_info(Domain::Point, "nope"), None);
+        assert!(GpuColumn::upload(&ctx, &pool, &AttributeArray::Str(vec!["x".into()])).is_none());
     }
 }

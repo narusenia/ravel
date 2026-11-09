@@ -7409,10 +7409,10 @@ mod tests {
             .expect("the expansion is valid geometry");
     }
 
-    /// 3D instance positions are an error, not a silent projection onto xy —
-    /// the rule the position dimension table sets.
+    /// 3D instance positions are placed in 3D, not projected onto xy: the
+    /// planar source is lifted to `z = 0` and lands at the full offset.
     #[test]
-    fn three_dimensional_instance_positions_are_rejected() {
+    fn three_dimensional_instance_positions_are_placed_in_3d() {
         let mut geometry = Geometry::new();
         geometry
             .instances_mut()
@@ -7420,11 +7420,14 @@ mod tests {
             .expect("one 3D offset");
         geometry.set_instance_source(Some(Arc::new(Geometry::from_points(vec![Vec2(0.0, 0.0)]))));
 
-        let error = expand_instances(&geometry).expect_err("a 3D placement has no 2D answer");
-        assert!(
-            format!("{error}").contains("2D positions"),
-            "the error has to name the dimension: {error}"
-        );
+        let expanded = expand_instances(&geometry).expect("a 3D placement expands");
+        let positions = expanded
+            .points()
+            .get(names::P)
+            .expect("P")
+            .as_vec3(names::P)
+            .expect("the expansion is 3D");
+        assert_eq!(positions, &[Vec3(1.0, 2.0, 3.0)]);
     }
 
     /// An instance domain with no `P` places nothing, exactly as the

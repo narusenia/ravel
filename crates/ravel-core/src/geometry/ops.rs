@@ -3320,14 +3320,17 @@ fn bake_placements(
     points: &mut AttributeSet,
     blocks: &[(Range<usize>, Placement)],
 ) -> Result<(), GeometryOpError> {
-    if blocks.iter().all(|(_, placement)| placement.is_identity()) {
-        return Ok(());
-    }
+    // A 3D expansion checks its tangents before anything else, identity
+    // placements included: whether a curved source is allowed must not depend
+    // on where the instance happens to sit.
     if blocks
         .iter()
         .any(|(_, placement)| matches!(placement, Placement::Spatial(_)))
     {
         return bake_placements3(points, blocks);
+    }
+    if blocks.iter().all(|(_, placement)| placement.is_identity()) {
+        return Ok(());
     }
     let blocks: Vec<(Range<usize>, InstanceTransform)> = blocks
         .iter()
@@ -3432,6 +3435,9 @@ fn bake_placements3(
                 operation: "instance expansion",
             });
         }
+    }
+    if blocks.iter().all(|(_, placement)| placement.is_identity()) {
+        return Ok(());
     }
     let placement_of = |placement: &Placement| match placement {
         Placement::Spatial(placement) => *placement,
@@ -8903,5 +8909,28 @@ mod expand3_tests {
         );
         assert!(placement(Vec3(-1.0, 1.0, 1.0)).mirrors());
         assert!(!placement(Vec3(-1.0, -1.0, 1.0)).mirrors());
+    }
+
+    /// Whether a curved source may be placed in 3D does not depend on the
+    /// placement values: at `P = (0, 0, 0)` with identity columns it is refused
+    /// exactly as it is anywhere else.
+    #[test]
+    fn a_curved_source_is_refused_even_under_the_identity_placement() {
+        let mut path = Geometry::from_points(vec![Vec2(1.0, 0.0), Vec2(2.0, 0.0)]);
+        path.points_mut()
+            .insert(
+                names::IN_TAN,
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(0.0, 1.0)]),
+            )
+            .unwrap();
+        path.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        let host = stamped(path, Vec3(0.0, 0.0, 0.0), None, None);
+        assert!(matches!(
+            expand_instances(&host),
+            Err(GeometryOpError::TangentsIn3D { .. })
+        ));
     }
 }

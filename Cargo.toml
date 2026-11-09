@@ -132,6 +132,9 @@ earcut = "0.4.11"
 # default `ahash` is kept off the same way.
 gltf = { version = "1", default-features = false, features = ["names", "utils"] }
 tobj = { version = "4", default-features = false }
+# Already in the tree at 0.22.1 (decodes the `data:` buffers of a glTF); `alloc` is the
+# only feature the `Vec` decoder needs.
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 log = "0.4"
 sha2 = "0.10"
 notify = "8"

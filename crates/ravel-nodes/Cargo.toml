@@ -17,6 +17,7 @@ ravel-gpu = { workspace = true }
 ravel-media = { workspace = true }
 anyhow = { workspace = true }
 bytemuck = { workspace = true }
+base64 = { workspace = true }
 gltf = { workspace = true }
 tobj = { workspace = true }
 pollster = { workspace = true }

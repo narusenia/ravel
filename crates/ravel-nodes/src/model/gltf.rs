@@ -11,6 +11,7 @@
 
 use super::{MeshBuilder, to_scene_space};
 use anyhow::{Context as _, bail, ensure};
+use base64::Engine as _;
 use gltf::buffer::Source;
 use ravel_core::geometry::Geometry;
 use ravel_core::geometry::rotation::Quat;
@@ -80,7 +81,9 @@ fn buffers(
                     let (_, encoded) = rest
                         .split_once(";base64,")
                         .context("only base64 data URIs are supported")?;
-                    decode_base64(encoded).context("invalid base64 buffer")?
+                    base64::engine::general_purpose::STANDARD
+                        .decode(encoded)
+                        .map_err(|error| anyhow::anyhow!("invalid base64 buffer: {error}"))?
                 }
                 None => std::fs::read(directory.join(uri))
                     .with_context(|| format!("cannot read buffer file {uri}"))?,
@@ -96,32 +99,6 @@ fn buffers(
         out.push(data);
     }
     Ok(out)
-}
-
-/// Standard-alphabet base64, padding optional. About twenty lines instead of
-/// the `base64` crate, which the `gltf` import feature would drag in.
-fn decode_base64(text: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(text.len() * 3 / 4);
-    let (mut accumulator, mut bits) = (0u32, 0u32);
-    for byte in text.bytes().filter(|b| !b.is_ascii_whitespace()) {
-        let value = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            b'=' => break,
-            _ => return None,
-        };
-        accumulator = (accumulator << 6) | u32::from(value);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((accumulator >> bits) as u8);
-            accumulator &= (1 << bits) - 1;
-        }
-    }
-    Some(out)
 }
 
 struct Converter {

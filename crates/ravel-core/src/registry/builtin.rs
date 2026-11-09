@@ -41,6 +41,7 @@ pub const TRANSFORM_SECTION_NODES: &[&str] = &[
     "scatter.circular",
     "scatter.grid",
     "scatter.path_array",
+    "scatter.points",
     "scatter.scatter",
     "shape.custom_path",
     "shape.ellipse",
@@ -197,6 +198,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(geometry_from_image());
     reg.register(geometry_iterate());
     reg.register(particle_simulate());
+    reg.register(scatter_points());
     reg.register(scene_add());
     reg.register(scene_merge());
     reg.register(scene_camera());
@@ -3150,6 +3152,56 @@ fn particle_simulate() -> NodeTemplate {
     .with_param_group("forces", ["force_direction", "drag"])
 }
 
+/// `scatter.points`: one instance of the source shape on every point of the
+/// `points` input (copy-to-points). Placement comes from the point's `P`,
+/// `rot`, `scale` and `pscale`; its other attributes ride onto the instance.
+fn scatter_points() -> NodeTemplate {
+    NodeTemplate::new("scatter.points", "Scatter Points", NodeCategory::Geometry)
+        .with_input(InputPort {
+            name: "points".into(),
+            accepted_types: vec![DataTypeId::GEOMETRY],
+            is_param: false,
+            is_variadic: false,
+        })
+        .with_variadic_input_group(InputPort {
+            name: "instance_source".into(),
+            accepted_types: vec![DataTypeId::GEOMETRY],
+            is_param: false,
+            is_variadic: false,
+        })
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::GEOMETRY,
+        })
+        .with_param(Parameter {
+            key: "center_input".into(),
+            value: ParameterValue::Bool(true),
+        })
+        .with_param(Parameter {
+            key: "source_mode".into(),
+            value: ParameterValue::String("sequential".into()),
+        })
+        .with_param_options("source_mode", ["sequential", "random"])
+        .with_param(Parameter {
+            key: "source_seed".into(),
+            value: ParameterValue::Int(0),
+        })
+        .with_param(Parameter {
+            key: PIECE_MODE_PARAM.into(),
+            value: ParameterValue::String(PIECE_MODE_WHOLE.into()),
+        })
+        .with_param_options(PIECE_MODE_PARAM, [PIECE_MODE_WHOLE, PIECE_MODE_INSTANCES])
+        .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
+        .with_param_group(
+            "source",
+            ["center_input", "piece_mode", "source_mode", "source_seed"],
+        )
+        // Placed by the points it stamps on, like `scatter.path_array`: the
+        // section's `translate` is the node's one position.
+        .with_transform_section()
+        .with_param_role("translate", ParamRole::Position)
+}
+
 fn scatter_scatter() -> NodeTemplate {
     NodeTemplate::new("scatter.scatter", "Scatter", NodeCategory::Geometry)
         .with_variadic_input_group(InputPort {
@@ -3678,14 +3730,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 136);
+        assert_eq!(reg.all_templates().count(), 137);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 41);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 42);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
@@ -4017,6 +4069,7 @@ mod tests {
             "scatter.grid",
             "scatter.circular",
             "scatter.path_array",
+            "scatter.points",
             "scatter.scatter",
         ] {
             let template = registry.get(type_key).unwrap();
@@ -4053,7 +4106,7 @@ mod tests {
             let variadic_start = template.inputs.len();
             assert_eq!(
                 variadic_start,
-                usize::from(type_key == "scatter.path_array")
+                usize::from(type_key == "scatter.path_array" || type_key == "scatter.points")
             );
             let node = template.create_node(crate::id::NodeId::new(99));
             assert_eq!(node.inputs.len(), variadic_start + 1);

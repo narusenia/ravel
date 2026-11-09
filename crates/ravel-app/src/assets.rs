@@ -340,6 +340,8 @@ pub enum RavelIcon {
     NodeScatterPathArray,
     /// Node header/menu: `scatter.scatter`.
     NodeScatterScatter,
+    /// Node header/menu: `scatter.points`.
+    NodeScatterPoints,
     /// Node header/menu: `particle.simulate`.
     NodeParticleSimulate,
     /// Node header/menu: `attribute.set`.
@@ -598,6 +600,7 @@ impl RavelIcon {
             "scatter.circular" => Self::NodeScatterCircular,
             "scatter.path_array" => Self::NodeScatterPathArray,
             "scatter.scatter" => Self::NodeScatterScatter,
+            "scatter.points" => Self::NodeScatterPoints,
             "particle.simulate" => Self::NodeParticleSimulate,
             "attribute.set" => Self::NodeAttributeSet,
             "attribute.delete" => Self::NodeAttributeDelete,
@@ -805,6 +808,7 @@ impl RavelIcon {
             Self::NodeScatterCircular => "icons/circle-dashed.svg",
             Self::NodeScatterPathArray => "icons/waypoints.svg",
             Self::NodeScatterScatter => "icons/sparkles.svg",
+            Self::NodeScatterPoints => "icons/circle-dot.svg",
             Self::NodeParticleSimulate => "icons/wind.svg",
             Self::NodeAttributeSet => "icons/tag.svg",
             Self::NodeAttributeDelete => "icons/eraser.svg",

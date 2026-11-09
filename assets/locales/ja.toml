@@ -1772,6 +1772,23 @@ emitter = "エミッタ"
 motion = "運動"
 forces = "フォース"
 
+[node."scatter.points"]
+label = "スキャッター（ポイント）"
+description = "points 入力の全ポイントにソースジオメトリのインスタンスを置く。位置・回転・スケールはポイントから取り、ポイントのその他の属性（Cd / alpha / id / age など）はインスタンスへ引き継ぐ。"
+[node."scatter.points".params]
+center_input = "インスタンス化の前に各ソースジオメトリをアンカーへ移動する。"
+piece_mode = "配るものの単位。whole は 1 本のワイヤが 1 ソース、instances はワイヤごとにインスタンスへ分解する。"
+source_mode = "複数ソース接続時の割り当て方: sequential / random。"
+source_seed = "ソース割り当ての乱数シード。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
+[node."scatter.points".group]
+source = "ソース"
+transform = "トランスフォーム"
+
 [node."attribute.set"]
 label = "アトリビュート設定"
 description = "ジオメトリのドメインに定数アトリビュートを書き込む。"

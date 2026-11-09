@@ -3,6 +3,7 @@
 
 //! Node-graph adapters for the headless field implementations in `ravel-core`.
 
+use crate::gpu_util::ensure_cpu_geometry;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams, ResolvedValue};
 use ravel_core::geometry::{
     AddField, AngleField, AttributeField, BlendField, CombineMode, ComponentField, ComponentMask,
@@ -14,6 +15,10 @@ use ravel_core::geometry::{
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::types::{NodeData, Vec2};
 use std::sync::Arc;
+
+mod gpu;
+
+pub use gpu::{GPU_MIN_ELEMENTS, GpuFieldBackend};
 
 pub struct NoiseFieldProcessor;
 
@@ -539,12 +544,39 @@ impl NodeProcessor for ConstantFieldProcessor {
     }
 }
 
+/// `field.apply`: modulate one attribute of a geometry by a field, on the CPU.
+///
+/// The reference implementation. A resident geometry is read back first (the
+/// boundary the plan names); [`GpuApplyFieldProcessor`] is the one that avoids
+/// that where the GPU can do the work.
 pub struct ApplyFieldProcessor;
 
 impl ApplyFieldProcessor {
     pub fn from_node(_node: &Node) -> Self {
         Self
     }
+}
+
+/// What a `field.apply` node's parameters ask for.
+fn apply_spec(params: &ResolvedParams) -> FieldApply<'_> {
+    let domain = match params.str_or("domain", "point") {
+        "instance" => Domain::Instance,
+        "detail" => Domain::Detail,
+        _ => Domain::Point,
+    };
+    FieldApply::new(domain, params.str_or("target", "value"))
+        .with_amount(params.f32_or("amount", 1.0))
+        .with_combine(CombineMode::parse(params.str_or("combine", "set")))
+        .with_components(ComponentMask::parse(params.str_or("components", "")))
+        .with_group(params.str_or("group", ""))
+        .with_create_if_missing(params.bool_or("create_if_missing", true))
+}
+
+fn geometry_input(inputs: &[Option<Arc<dyn NodeData>>]) -> anyhow::Result<&Arc<dyn NodeData>> {
+    inputs
+        .first()
+        .and_then(|input| input.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("field.apply: input 0 is not Geometry"))
 }
 
 impl NodeProcessor for ApplyFieldProcessor {
@@ -556,29 +588,51 @@ impl NodeProcessor for ApplyFieldProcessor {
         params: &ResolvedParams,
         _scope: &mut dyn EvalScope,
     ) -> anyhow::Result<Arc<dyn NodeData>> {
-        let geometry = inputs
-            .first()
-            .and_then(|input| input.as_ref())
-            .and_then(|input| input.downcast_ref::<Geometry>())
-            .ok_or_else(|| anyhow::anyhow!("field.apply: input 0 is not Geometry"))?;
+        let input = geometry_input(inputs)?;
         let field = field_input(inputs, 1, "field.apply")?;
-        let domain = match params.str_or("domain", "point") {
-            "instance" => Domain::Instance,
-            "detail" => Domain::Detail,
-            _ => Domain::Point,
-        };
-        let spec = FieldApply::new(domain, params.str_or("target", "value"))
-            .with_amount(params.f32_or("amount", 1.0))
-            .with_combine(CombineMode::parse(params.str_or("combine", "set")))
-            .with_components(ComponentMask::parse(params.str_or("components", "")))
-            .with_group(params.str_or("group", ""))
-            .with_create_if_missing(params.bool_or("create_if_missing", true));
+        let geometry = ensure_cpu_geometry(input.as_ref())
+            .map_err(|_| anyhow::anyhow!("field.apply: input 0 is not Geometry"))?;
         Ok(Arc::new(apply_field(
-            geometry,
-            &spec,
+            &geometry,
+            &apply_spec(params),
             field.0.as_ref(),
             ctx,
         )?))
+    }
+}
+
+/// `field.apply` that evaluates the field on the GPU wherever it can (see
+/// [`GpuFieldBackend`] for when), and otherwise is [`ApplyFieldProcessor`] —
+/// the CPU path raises every error, creates every column and answers every
+/// field that has no WGSL version.
+pub struct GpuApplyFieldProcessor {
+    gpu: Arc<GpuFieldBackend>,
+}
+
+impl GpuApplyFieldProcessor {
+    pub fn new(gpu: Arc<GpuFieldBackend>) -> Self {
+        Self { gpu }
+    }
+}
+
+impl NodeProcessor for GpuApplyFieldProcessor {
+    fn process(
+        &self,
+        node: &Node,
+        ctx: &EvalContext,
+        inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let input = geometry_input(inputs)?;
+        let field = field_input(inputs, 1, "field.apply")?;
+        if let Some(result) =
+            self.gpu
+                .apply(input.as_ref(), &apply_spec(params), field.0.as_ref(), ctx)?
+        {
+            return Ok(result);
+        }
+        ApplyFieldProcessor.process(node, ctx, inputs, params, scope)
     }
 }
 
@@ -633,6 +687,7 @@ mod tests {
     use ravel_core::param_curve::CurveParam;
     use ravel_core::param_ramp::RampParam;
     use ravel_core::types::{Color, FrameRate};
+    use ravel_gpu::GpuGeometry;
 
     fn ctx() -> EvalContext {
         EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080))
@@ -1669,6 +1724,161 @@ mod tests {
             7.0,
             "the picture froze: the time field was served from the timeless cache"
         );
+    }
+
+    // ---- field.apply on the GPU -------------------------------------------------
+
+    /// A `GpuApplyFieldProcessor` over a fresh buffer pool, sending every
+    /// geometry — however small — to the GPU. `None` without an adapter.
+    type GpuApply = (
+        ravel_gpu::GpuContext,
+        Arc<std::sync::Mutex<ravel_gpu::BufferPool>>,
+        Arc<dyn NodeProcessor>,
+    );
+
+    fn gpu_apply() -> Option<GpuApply> {
+        let Ok(gpu) = ravel_gpu::GpuContext::new_blocking() else {
+            eprintln!("skipping: no GPU adapter available");
+            return None;
+        };
+        let pool = Arc::new(std::sync::Mutex::new(ravel_gpu::BufferPool::new(
+            gpu.clone(),
+            64 * 1024 * 1024,
+        )));
+        let backend =
+            Arc::new(GpuFieldBackend::new(gpu.clone(), pool.clone()).with_min_elements(0));
+        Some((gpu, pool, Arc::new(GpuApplyFieldProcessor::new(backend))))
+    }
+
+    fn gpu_apply_node() -> Node {
+        Node::new(NodeId::new(1), "field.apply")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_input("field", &[DataTypeId::FIELD])
+            .with_param("target", ParameterValue::String("weight".into()))
+            .with_param("combine", ParameterValue::String("add".into()))
+    }
+
+    fn weights(value: &Arc<dyn NodeData>) -> Vec<f32> {
+        let cpu = ensure_cpu_geometry(value.as_ref()).unwrap();
+        cpu.points()
+            .get("weight")
+            .unwrap()
+            .as_f32("weight")
+            .unwrap()
+            .to_vec()
+    }
+
+    fn weighted_points(count: usize) -> Geometry {
+        let mut geometry = Geometry::from_points(
+            (0..count)
+                .map(|i| Vec2(i as f32 * 0.37 - 3.0, (i % 7) as f32 - 3.0))
+                .collect(),
+        );
+        geometry
+            .points_mut()
+            .insert(
+                "weight",
+                AttributeArray::F32((0..count).map(|i| i as f32 * 0.5).collect()),
+            )
+            .unwrap();
+        geometry
+    }
+
+    #[test]
+    fn the_gpu_apply_processor_answers_what_the_cpu_one_does() {
+        let Some((_, _, gpu)) = gpu_apply() else {
+            return;
+        };
+        let node = gpu_apply_node();
+        let geometry: Arc<dyn NodeData> = Arc::new(weighted_points(64));
+        let field: Arc<dyn NodeData> = Arc::new(FieldValue::new(NoiseField {
+            seed: 3,
+            frequency: 0.7,
+            octaves: 2,
+        }));
+        let inputs = [geometry, field];
+        let cpu = run(&node, Arc::new(ApplyFieldProcessor), &inputs);
+        let gpu = run(&node, gpu, &inputs);
+        for (cpu, gpu) in weights(&cpu).iter().zip(weights(&gpu)) {
+            assert!(
+                (cpu - gpu).abs() <= 1e-4 * (1.0 + cpu.abs()),
+                "cpu {cpu} gpu {gpu}"
+            );
+        }
+    }
+
+    /// An expression field has no WGSL version, so the node must come back with
+    /// the CPU answer — for a CPU input and for a resident one alike, the latter
+    /// read back first.
+    #[test]
+    fn a_field_with_no_wgsl_version_is_answered_by_the_cpu_path() {
+        let Some((context, pool, gpu)) = gpu_apply() else {
+            return;
+        };
+        let node = gpu_apply_node();
+        let geometry = weighted_points(64);
+        let field: Arc<dyn NodeData> = Arc::new(FieldValue::new(ExpressionField::new(
+            "@P.x * 3.0 + @index",
+            0.0,
+        )));
+        let cpu = run(
+            &node,
+            Arc::new(ApplyFieldProcessor),
+            &[Arc::new(geometry.clone()), field.clone()],
+        );
+
+        let from_cpu = run(
+            &node,
+            gpu.clone(),
+            &[Arc::new(geometry.clone()), field.clone()],
+        );
+        assert_eq!(weights(&from_cpu), weights(&cpu));
+        assert!(from_cpu.downcast_ref::<Geometry>().is_some());
+
+        let resident = GpuGeometry::from_geometry(context, &pool, &geometry).unwrap();
+        let from_resident = run(&node, gpu, &[Arc::new(resident), field]);
+        assert_eq!(weights(&from_resident), weights(&cpu));
+        assert!(
+            from_resident.downcast_ref::<Geometry>().is_some(),
+            "the CPU path hands back a CPU geometry"
+        );
+    }
+
+    #[test]
+    fn a_resident_geometry_stays_resident_through_the_gpu_apply_processor() {
+        let Some((context, pool, gpu)) = gpu_apply() else {
+            return;
+        };
+        let node = gpu_apply_node();
+        let geometry = weighted_points(64);
+        let field: Arc<dyn NodeData> = Arc::new(FieldValue::new(ConstantField(2.0)));
+        let resident = GpuGeometry::from_geometry(context.clone(), &pool, &geometry).unwrap();
+        let readbacks = context.transfer_stats().readbacks;
+        let out = run(&node, gpu, &[Arc::new(resident), field]);
+        assert!(out.downcast_ref::<GpuGeometry>().is_some());
+        assert_eq!(context.transfer_stats().readbacks, readbacks);
+        let expected: Vec<f32> = (0..64).map(|i| i as f32 * 0.5 + 2.0).collect();
+        assert_eq!(weights(&out), expected);
+    }
+
+    /// The CPU processor takes a resident geometry too (reading it back), which
+    /// is what keeps a CPU-only build of the graph working once resident values
+    /// flow.
+    #[test]
+    fn the_cpu_apply_processor_reads_a_resident_geometry_back() {
+        let Some((context, pool, _)) = gpu_apply() else {
+            return;
+        };
+        let node = gpu_apply_node();
+        let resident = GpuGeometry::from_geometry(context, &pool, &weighted_points(8)).unwrap();
+        let field: Arc<dyn NodeData> = Arc::new(FieldValue::new(ConstantField(1.0)));
+        let out = run(
+            &node,
+            Arc::new(ApplyFieldProcessor),
+            &[Arc::new(resident), field],
+        );
+        assert_eq!(weights(&out)[3], 2.5);
+        assert!(out.downcast_ref::<Geometry>().is_some());
     }
 
     #[test]

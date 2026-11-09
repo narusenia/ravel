@@ -36,6 +36,10 @@ pub struct GpuEvalHooks {
     gpu: GpuContext,
     shaders: ShaderManager,
     pool: Arc<Mutex<TexturePool>>,
+    /// Evaluates the fields of `field.apply` on the GPU, leasing its columns
+    /// from a buffer pool that shares this worker's VRAM allowance with
+    /// [`Self::pool`] (`with_budget`).
+    fields: Arc<crate::field::GpuFieldBackend>,
     /// The viewer's display transform (`CM-7`), present only when the host
     /// asked for one. A render must not have it: the export path encodes with
     /// `to_output_space` while the frame is still float, and it has no
@@ -58,10 +62,15 @@ impl GpuEvalHooks {
     pub fn new(gpu: GpuContext) -> Self {
         let shaders = ShaderManager::new(gpu.clone());
         let pool = crate::shared_texture_pool(&gpu);
+        let fields = Arc::new(crate::field::GpuFieldBackend::new(
+            gpu.clone(),
+            crate::shared_buffer_pool(&gpu),
+        ));
         Self {
             gpu,
             shaders,
             pool,
+            fields,
             display: None,
             media_frames: MediaFrameCache::standalone(),
             viewer_rasterize: None,
@@ -75,11 +84,13 @@ impl GpuEvalHooks {
     /// from the same place — see `ProjectState::new`.
     pub fn with_budget(gpu: GpuContext, budget: SharedCacheBudget) -> Self {
         let shaders = ShaderManager::new(gpu.clone());
-        let pool = crate::shared_texture_pool_with_budget(&gpu, budget.clone());
+        let (pool, buffers) = crate::shared_pools_with_budget(&gpu, budget.clone());
+        let fields = Arc::new(crate::field::GpuFieldBackend::new(gpu.clone(), buffers));
         Self {
             gpu,
             shaders,
             pool,
+            fields,
             display: None,
             media_frames: MediaFrameCache::new(budget),
             viewer_rasterize: None,
@@ -256,11 +267,12 @@ impl EvalWorkerHooks for GpuEvalHooks {
                         continue;
                     }
                     if let Some(node) = find_node(graph, document, *id)
-                        && let Some(proc) = crate::processor_for_node(
+                        && let Some(proc) = crate::processor_for_node_with_fields(
                             &node,
                             &self.gpu,
                             &mut self.shaders,
                             &self.pool,
+                            Some(&self.fields),
                             &self.media_frames,
                         )
                     {
@@ -272,12 +284,13 @@ impl EvalWorkerHooks for GpuEvalHooks {
                 // The evaluator arrives already reset: `EvalService` clears
                 // it for a structural hint, which is what keeps the cache
                 // budget (state the service owns) across the resync.
-                crate::register_all_processors(
+                crate::register_all_processors_with_fields(
                     evaluator,
                     graph,
                     &self.gpu,
                     &mut self.shaders,
                     &self.pool,
+                    Some(&self.fields),
                     &self.media_frames,
                 );
                 // Layer networks are evaluated through the document, not the
@@ -286,12 +299,13 @@ impl EvalWorkerHooks for GpuEvalHooks {
                 if let Some(document) = document {
                     for comp in document.compositions.values() {
                         for layer in &comp.layers {
-                            crate::register_all_processors(
+                            crate::register_all_processors_with_fields(
                                 evaluator,
                                 &layer.network,
                                 &self.gpu,
                                 &mut self.shaders,
                                 &self.pool,
+                                Some(&self.fields),
                                 &self.media_frames,
                             );
                         }
@@ -341,6 +355,7 @@ impl EvalWorkerHooks for GpuEvalHooks {
                 gpu,
                 shaders,
                 pool,
+                fields: _,
                 display,
                 media_frames: _,
                 viewer_rasterize: _,
@@ -404,6 +419,7 @@ impl GpuEvalHooks {
             gpu,
             shaders,
             pool,
+            fields: _,
             display: _,
             media_frames: _,
             viewer_rasterize,

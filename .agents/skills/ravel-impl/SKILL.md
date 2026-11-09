@@ -139,6 +139,8 @@ git worktree add .worktrees/<単位 ID 小文字> -b <prefix>/<kebab-case> <base
 - `base` は `main`（`--stack` なら依存ブランチ）
 - **新しい worktree では `mise trust` を一度実行する**。しないと `mise run` が
   全部 `Config files … are not trusted` で落ちる
+- 続けて worktree の中で `mise run worktree:seed-target`。主ワークツリーの `target/` を
+  copy-on-write で複製し、依存を 1 から作り直さない。`target/` を worktree 間で共有しない
 
 ## 4. ブリーフを渡す
 

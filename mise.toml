@@ -61,6 +61,31 @@ depends = ["fmt", "lint:patterns", "clippy", "test"]
 description = "Install lefthook git hooks"
 run = "lefthook install"
 
+# Run inside a fresh worktree, before its first build. It clones the main
+# checkout's `target/` copy-on-write (APFS `cp -c`, `--reflink` on Btrfs/XFS),
+# so dependencies are not recompiled and the copy costs no disk until files
+# diverge. Without it a fresh worktree recompiles every dependency (gpui and
+# the rest, ~18 GB, minutes at full CPU). Each worktree keeps its own
+# `target/`: a target directory shared between worktrees is unsafe, because
+# cargo cannot tell two checkouts' same-named path crates apart and can link
+# the other checkout's artifacts (rust-lang/cargo#12516). Where the filesystem
+# cannot clone, it does nothing rather than copy gigabytes.
+[tasks."worktree:seed-target"]
+description = "Clone the main checkout's target/ into this fresh worktree (copy-on-write)"
+run = """
+main="$(git worktree list --porcelain | sed -n '1s/^worktree //p')"
+here="$(git rev-parse --show-toplevel)"
+if [ "$here" = "$main" ]; then echo "already the main checkout"; exit 0; fi
+if [ -e "$here/target" ]; then echo "target/ already exists; left as is"; exit 0; fi
+if [ ! -d "$main/target" ]; then echo "main checkout has no target/ yet; nothing to clone"; exit 0; fi
+if cp -c -R "$main/target" "$here/target" 2>/dev/null \
+  || cp --reflink=always -R "$main/target" "$here/target" 2>/dev/null; then
+  echo "cloned $main/target"
+else
+  rm -rf "$here/target"; echo "filesystem cannot clone; first build starts cold"
+fi
+"""
+
 [tasks."docs:search"]
 description = "Search the docs by role (see scripts/docs.sh for subcommands)"
 run = "bash scripts/docs.sh"

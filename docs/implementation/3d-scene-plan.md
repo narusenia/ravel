@@ -413,6 +413,27 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
 - 球の極（縮退する三角形）の扱いが定義どおりであるテスト
 - フィールドで変調できる結合テスト
 
+**実装メモ（単位 5）**
+
+- 実装は `ravel-nodes/src/mesh_primitives.rs` 1 ファイル（`MeshBuilder` が
+  `P` / `N` / `uv` と三角形列を貯め、`tri` が法線ヒントと突き合わせて巻きを決める）。
+  規約（軸・巻き・極・分割数の下限・頂点数の上限）は仕様書
+  「基本プリミティブ」に書いた。ここには置かない
+- テンプレートは `mesh_primitive`（出力と `center`）+ `mesh_segments`（分割数）の
+  2 つの小関数で組む。`center` だけが `ParamRole::Position`。`size` / `radius` は
+  スカラーまたは全幅なので `Size` の役割（中心からのオフセット）には当たらない
+- **トランスフォームセクションは宣言しない**（`geometry.transform` が `N` を回さない
+  ため）。`every_geometry_producing_built_in_decides_about_the_section` の
+  「持たない」側に載せた。`geometry.transform` 自体が法線を回すようになれば
+  再検討する
+- アイコンは新規 SVG を足さず既存を割り当てた（box → `boxes`、sphere →
+  `circle-dot`、cylinder → `layers`、plane → `square-square`）
+- ゴールデン画像は追加していない。数値（頂点数・面数・法線の向きと長さ・巻き・
+  極の頂点位置・`uv` の向き）と、`scene.render` の CPU 経路で `mesh.plane` に
+  2 x 2 のテクスチャを貼って四隅の色を読むテストで固定した。変異テスト（巻きの
+  補正・面中心の符号・裏面の `u` 反転・`v` 反転・極の法線・扇の欠落・下限の丸め）
+  は全て落ちることを確認した
+
 ### 単位 6: 3D 複製（REQ-3D-009）
 
 - `scatter.grid` に 3 軸目の分割数を追加

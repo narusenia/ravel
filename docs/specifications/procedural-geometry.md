@@ -123,7 +123,7 @@ CPU 経路は texel を読むので、GPU 常駐フレームで来た画像は�
 | `shear` | Instance | F32 | 水平せん断（`x' = x + shear · y`、スケール前の形に対する係数）。**2D のみ**。**無ければ 0**。`rot` / `scale` と合わせて線形部分 `R(rot) · S(scale) · H(shear)` を表す。入れ子の合成が書く（下記）ので、組み込みノードは普段は作らず、列があるとき・非 0 のときだけ書かれる | 0 |
 | `orient` | Instance | Vec4 | 姿勢（クォータニオン）。**3D のみ**（REQ-3D-003） | —（3D は未配線） |
 | `scale3` | Instance | Vec3 | スケール。**3D のみ** | —（同上） |
-| `N` | Point/Primitive | Vec3 | 法線。**3D のみ**（ライティングが読む） | —（同上） |
+| `N` | Point/Primitive | Vec3 | 法線。**3D のみ**。`scene.render` のライティングが読む。**Point 列の `N` を持つ Mesh だけが陰影を受け**、`N` の無い Mesh と Path は光の影響を受けず自分の色のまま描かれる（捏造した法線で恣意的に陰影が付くのを避ける）。シーン空間へはオブジェクト行列の逆転置で運ぶ（非一様スケール・ミラーで面に垂直なまま） | —（列が無ければ陰影なし） |
 | `uv` | Point | Vec2 | テクスチャ座標。**3D のみ**。`(0, 0)` が画像の左上で `v` は下向きに増える（FrameBuffer の行と同じ向き）。`scene.render` は画像を**この列で**サンプルし、暗黙の矩形 UV を持たない | —（列が無ければ `(0, 0)`） |
 | `Cd` | Point/Instance | Color | 色（＝塗り色。`style.fill` が書く）。**Point ドメインの `Cd` は、パスの頂点に書くと線の頂点色になる**（塗りには効かない。下記） | Instance: 白（色味）。Primitive: `rasterize` の `color`。Point: パスの頂点なら所属プリミティブの線色、それ以外は `color` |
 | `alpha` | Point/Instance | F32 | 不透明度 | 1 |

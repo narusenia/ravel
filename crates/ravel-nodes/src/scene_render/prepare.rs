@@ -38,7 +38,8 @@ use ravel_core::geometry::{
     AttributeArray, Domain, Geometry, InstanceTransform, Positions, Primitive, names,
 };
 use ravel_core::scene::camera::aspect_ratio;
-use ravel_core::scene::{Camera, Mat4, Scene};
+use ravel_core::scene::light::MIN_RADIUS;
+use ravel_core::scene::{Camera, Light, LightKind, Mat4, Scene};
 use ravel_core::types::{Color, NodeData, Vec2, Vec3};
 use ravel_gpu::MeshVertex;
 
@@ -78,7 +79,68 @@ pub(super) struct MeshObject {
     pub color: Color,
     /// The frame the fragment stage samples through the mesh's `uv`, if any.
     pub texture: Option<Arc<dyn NodeData>>,
+    /// Whether lights shade it: it carries an `N` column. A mesh without one
+    /// is drawn in its own colour.
+    pub shaded: bool,
     pub depth: ViewDepth,
+}
+
+/// What [`LightRecord::vector`]'s `w` holds for each kind of light.
+pub(super) const KIND_AMBIENT: f32 = 0.0;
+pub(super) const KIND_DIRECTIONAL: f32 = 1.0;
+pub(super) const KIND_POINT: f32 = 2.0;
+
+/// One light in scene space, the layout `LightData` declares in
+/// `scene_mesh.wgsl` (32 bytes) and the CPU reference reads as is.
+///
+/// A record of all zeros is an ambient light of no strength, so the GPU's
+/// padding past the last light delivers nothing.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub(super) struct LightRecord {
+    /// `xyz`: the unit vector **toward** a directional light, or a point
+    /// light's position; unused for ambient. `w`: the kind.
+    pub vector: [f32; 4],
+    /// `rgb`: colour times intensity. `w`: a point light's half-strength
+    /// radius.
+    pub color: [f32; 4],
+}
+
+fn light_record(light: &Light) -> LightRecord {
+    let [r, g, b] = light.radiance();
+    match light.kind {
+        LightKind::Ambient => LightRecord {
+            vector: [0.0, 0.0, 0.0, KIND_AMBIENT],
+            color: [r, g, b, 0.0],
+        },
+        LightKind::Directional { direction } => {
+            // The record holds the way *to* the light, opposite its travel. A
+            // zero direction has none: a zero vector delivers nothing.
+            let len = direction.iter().map(|c| c * c).sum::<f32>().sqrt();
+            let to_light = if len.is_finite() && len > 1e-6 {
+                direction.map(|c| -c / len)
+            } else {
+                [0.0; 3]
+            };
+            LightRecord {
+                vector: [to_light[0], to_light[1], to_light[2], KIND_DIRECTIONAL],
+                color: [r, g, b, 0.0],
+            }
+        }
+        LightKind::Point { position, radius } => LightRecord {
+            vector: [position[0], position[1], position[2], KIND_POINT],
+            color: [r, g, b, radius.max(MIN_RADIUS)],
+        },
+    }
+}
+
+/// The scene's lights as records; white ambient when it has none, which is
+/// what leaves a scene without a light looking as its colours say.
+fn light_records(scene: &Scene) -> Vec<LightRecord> {
+    if scene.light_count() == 0 {
+        return vec![light_record(&Light::DEFAULT_AMBIENT)];
+    }
+    scene.lights().iter().map(light_record).collect()
 }
 
 /// One Path object, projected to output pixels.
@@ -115,6 +177,8 @@ pub(super) struct Prepared {
     pub blended: Vec<Blended>,
     pub paths: Vec<PathObject>,
     pub paint: PathPaint,
+    /// Never empty: see [`light_records`].
+    pub lights: Vec<LightRecord>,
 }
 
 pub(super) struct SceneParams {
@@ -1073,6 +1137,7 @@ pub(super) fn prepare(
         blended: Vec::new(),
         paths: Vec::new(),
         paint,
+        lights: light_records(scene),
     };
     let quad = unit_quad();
     for object in scene.flatten() {
@@ -1107,6 +1172,7 @@ pub(super) fn prepare(
                 model,
                 color: instance.tint,
                 texture: Some(Arc::clone(instance.image.frame())),
+                shaded: true,
                 depth: extent.view_depth(&model, &view),
             });
             let index = prepared.meshes.len() - 1;
@@ -1149,6 +1215,7 @@ pub(super) fn prepare(
                 model,
                 color,
                 texture: None,
+                shaded: flat.points().get(names::N).is_some(),
                 depth: extent.view_depth(&model, &view),
             });
             let index = prepared.meshes.len() - 1;

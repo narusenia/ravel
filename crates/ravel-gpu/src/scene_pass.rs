@@ -15,6 +15,7 @@
 //! |---|---|---|
 //! | Static mesh: vertices, normals, UVs, indices, vertex colours | [`MeshBuffers`] | only when the caller makes a new one |
 //! | Per object: matrices, colour, flags | [`ScenePass::objects`] | every pass |
+//! | Lights, in scene space | [`ScenePass::lights`] | every pass |
 //!
 //! The split is the point. A transform is applied in the vertex shader, never
 //! baked into a vertex, so animating an object rewrites 160 bytes of its object
@@ -33,8 +34,8 @@
 //!
 //! # Shader contract
 //!
-//! The mesh shader declares `@group(0) @binding(0)` the object records,
-//! `@group(1) @binding(0)` the vertex colours, `@group(2) @binding(0)` the
+//! The mesh shader declares `@group(0) @binding(0)` the object records and
+//! `@group(0) @binding(1)` the light records, `@group(1) @binding(0)` the vertex colours, `@group(2) @binding(0)` the
 //! sampled texture, and takes vertex buffer 0 as [`MeshVertex`] at locations
 //! 0 (position), 1 (normal) and 2 (uv). Entry points are `mesh_vertex` and
 //! `mesh_fragment`. An object is drawn as instance `object`, so the shader
@@ -73,8 +74,7 @@ static NEXT_MESH_ID: AtomicU64 = AtomicU64::new(1);
 pub struct MeshVertex {
     /// Object-space position.
     pub position: [f32; 3],
-    /// Object-space normal. Interpolated and handed to the fragment stage;
-    /// nothing shades with it yet.
+    /// Object-space normal, carried to scene space for lighting.
     pub normal: [f32; 3],
     /// Texture coordinate, `(0, 0)` at the top-left texel.
     pub uv: [f32; 2],
@@ -317,15 +317,23 @@ impl ScenePipelines {
     /// `target`.
     pub fn new(ctx: &GpuContext, shader: &CompiledShader, target: ColorTarget) -> Self {
         let device = ctx.device();
-        let objects_layout = layout(
-            ctx,
-            "scene objects",
-            BindingDesc::new(
-                0,
-                BindingKind::ReadOnlyStorageBuffer,
-                ShaderVisibility::VERTEX_FRAGMENT,
-            ),
-        );
+        let objects_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("scene objects"),
+            entries: &[
+                BindingDesc::new(
+                    0,
+                    BindingKind::ReadOnlyStorageBuffer,
+                    ShaderVisibility::VERTEX_FRAGMENT,
+                )
+                .to_wgpu(),
+                BindingDesc::new(
+                    1,
+                    BindingKind::ReadOnlyStorageBuffer,
+                    ShaderVisibility::FRAGMENT,
+                )
+                .to_wgpu(),
+            ],
+        });
         let mesh_layout = layout(
             ctx,
             "scene mesh colors",
@@ -461,6 +469,10 @@ pub struct ScenePass<'a> {
     pub depth: &'a DepthBuffer,
     /// Serialized object records, indexed by [`SceneCall::Mesh::object`].
     pub objects: &'a [u8],
+    /// Serialized light records. Padded with zeros to the minimum buffer, so
+    /// the shader's `arrayLength` sees trailing records the caller defines to
+    /// deliver nothing.
+    pub lights: &'a [u8],
     /// A texture to bind where a call samples nothing.
     pub placeholder: &'a TextureBinding,
     /// The shared path draw data, when any call is [`SceneCall::Quads`].
@@ -513,13 +525,24 @@ pub(crate) fn record(
         objects.resize(MIN_OBJECT_BYTES, 0);
     }
     let objects_buffer = buffer_with(device, pass.label, &objects, wgpu::BufferUsages::STORAGE);
+    let mut lights = pass.lights.to_vec();
+    if lights.len() < MIN_OBJECT_BYTES {
+        lights.resize(MIN_OBJECT_BYTES, 0);
+    }
+    let lights_buffer = buffer_with(device, pass.label, &lights, wgpu::BufferUsages::STORAGE);
     let objects_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some(pass.label),
         layout: &pass.pipelines.objects_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: objects_buffer.as_entire_binding(),
-        }],
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: objects_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: lights_buffer.as_entire_binding(),
+            },
+        ],
     });
 
     let mut textures: HashMap<u64, wgpu::BindGroup> = HashMap::new();

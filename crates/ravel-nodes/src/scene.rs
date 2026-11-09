@@ -1,8 +1,8 @@
 // Copyright 2026 Ravel Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Scene assembly (CPU-only): `scene.add`, `scene.merge`, and
-//! `scene.camera`.
+//! Scene assembly (CPU-only): `scene.add`, `scene.merge`, `scene.camera`,
+//! and `scene.light`.
 //!
 //! These processors build the [`Scene`] value the renderer consumes; none of
 //! them draws anything and none of them touches a geometry's `P` attribute.
@@ -15,7 +15,8 @@ use ravel_core::geometry::Geometry;
 use ravel_core::graph::Node;
 use ravel_core::id::DataTypeId;
 use ravel_core::scene::camera::{PROJECTION_ORTHOGRAPHIC, PROJECTION_PERSPECTIVE};
-use ravel_core::scene::{Camera, Projection, Scene, SceneContent, Transform3D};
+use ravel_core::scene::light::{self, LIGHT_AMBIENT, LIGHT_POINT};
+use ravel_core::scene::{Camera, Light, LightKind, Projection, Scene, SceneContent, Transform3D};
 use ravel_core::types::NodeData;
 use std::sync::Arc;
 
@@ -106,7 +107,7 @@ impl NodeProcessor for SceneAddProcessor {
     }
 }
 
-/// `scene.merge`: the union of two scenes, objects and cameras alike.
+/// `scene.merge`: the union of two scenes: objects, cameras and lights.
 pub struct SceneMergeProcessor;
 
 impl SceneMergeProcessor {
@@ -190,6 +191,47 @@ impl NodeProcessor for SceneCameraProcessor {
             far: params.f32_or("far", defaults.far),
         };
         Ok(Arc::new(Scene::from_camera(camera)))
+    }
+}
+
+/// `scene.light`: a scene holding one light and no objects.
+pub struct SceneLightProcessor;
+
+impl SceneLightProcessor {
+    pub fn from_node(_node: &Node) -> Self {
+        Self
+    }
+}
+
+impl NodeProcessor for SceneLightProcessor {
+    fn process(
+        &self,
+        _node: &Node,
+        _ctx: &EvalContext,
+        _inputs: &[Option<Arc<dyn NodeData>>],
+        params: &ResolvedParams,
+        _scope: &mut dyn EvalScope,
+    ) -> anyhow::Result<Arc<dyn NodeData>> {
+        let kind = match params.str_or("type", light::LIGHT_DIRECTIONAL) {
+            LIGHT_AMBIENT => LightKind::Ambient,
+            LIGHT_POINT => LightKind::Point {
+                position: params.vec3_or("position", light::DEFAULT_POSITION),
+                radius: params
+                    .f32_or("radius", light::DEFAULT_RADIUS)
+                    .max(light::MIN_RADIUS),
+            },
+            // An unknown type (a hand-edited project, a future kind read by
+            // an older build) falls back to directional, the default.
+            _ => LightKind::Directional {
+                direction: params.vec3_or("direction", light::DEFAULT_DIRECTION),
+            },
+        };
+        let [r, g, b, _] = params.vec4_or("color", [1.0, 1.0, 1.0, 1.0]);
+        Ok(Arc::new(Scene::from_light(Light {
+            kind,
+            color: [r, g, b],
+            intensity: params.f32_or("intensity", 1.0),
+        })))
     }
 }
 
@@ -284,6 +326,7 @@ mod tests {
             "scene.add" => Arc::new(SceneAddProcessor),
             "scene.merge" => Arc::new(SceneMergeProcessor),
             "scene.camera" => Arc::new(SceneCameraProcessor),
+            "scene.light" => Arc::new(SceneLightProcessor),
             other => panic!("no processor for {other}"),
         }
     }
@@ -917,6 +960,163 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // scene.light
+    // -----------------------------------------------------------------------
+
+    fn light_of(out: &Arc<dyn NodeData>) -> Light {
+        let scene = as_scene(out);
+        assert_eq!(scene.light_count(), 1);
+        assert_eq!(scene.object_count(), 0);
+        *scene.lights().front().expect("one light")
+    }
+
+    fn color_param(rgba: [f32; 4]) -> Parameter {
+        Parameter {
+            key: "color".into(),
+            value: ParameterValue::Channel4(rgba.map(AnimationChannel::constant)),
+        }
+    }
+
+    /// Each `type` builds its own kind, with the parameters that kind reads.
+    #[test]
+    fn scene_light_builds_each_kind_from_its_parameters() {
+        let make = |params: Vec<Parameter>| {
+            light_of(&run("scene.light", params, vec![], &ctx((1920, 1080))).expect("evaluates"))
+        };
+
+        let default = make(vec![]);
+        assert_eq!(
+            default.kind,
+            LightKind::Directional {
+                direction: light::DEFAULT_DIRECTION
+            },
+            "the default is a directional light"
+        );
+        assert_eq!(default.color, [1.0, 1.0, 1.0]);
+        assert_eq!(default.intensity, 1.0);
+
+        let ambient = make(vec![
+            string_param("type", "ambient"),
+            color_param([0.2, 0.4, 0.6, 1.0]),
+            float_param("intensity", 0.5),
+        ]);
+        assert_eq!(ambient.kind, LightKind::Ambient);
+        assert_eq!(ambient.color, [0.2, 0.4, 0.6]);
+        assert_eq!(ambient.intensity, 0.5);
+
+        let directional = make(vec![
+            string_param("type", "directional"),
+            Parameter {
+                key: "direction".into(),
+                value: ParameterValue::vec3(0.0, 0.0, 2.0),
+            },
+        ]);
+        assert_eq!(
+            directional.kind,
+            LightKind::Directional {
+                direction: [0.0, 0.0, 2.0]
+            }
+        );
+
+        let point = make(vec![
+            string_param("type", "point"),
+            Parameter {
+                key: "position".into(),
+                value: ParameterValue::vec3(1.0, 2.0, 3.0),
+            },
+            float_param("radius", 250.0),
+        ]);
+        assert_eq!(
+            point.kind,
+            LightKind::Point {
+                position: [1.0, 2.0, 3.0],
+                radius: 250.0
+            }
+        );
+
+        let zero_radius = make(vec![
+            string_param("type", "point"),
+            float_param("radius", 0.0),
+        ]);
+        assert!(
+            matches!(zero_radius.kind, LightKind::Point { radius, .. } if radius >= light::MIN_RADIUS),
+            "a zero radius is lifted so the falloff cannot divide by zero"
+        );
+
+        // An unknown spelling falls back rather than failing the frame.
+        let unknown = make(vec![string_param("type", "spot")]);
+        assert!(matches!(unknown.kind, LightKind::Directional { .. }));
+    }
+
+    /// Light parameters are on the unified animation channel: a keyframed
+    /// intensity, colour and direction change the light over time
+    /// (REQ-3D-006).
+    #[test]
+    fn scene_light_parameters_are_keyframable() {
+        let ramp = |from: f32, to: f32| {
+            let mut curve = KeyframeCurve::new();
+            curve.insert(0, from, Interpolation::Linear);
+            curve.insert(10, to, Interpolation::Linear);
+            AnimationChannel::keyframes(curve)
+        };
+        let params = vec![
+            Parameter {
+                key: "intensity".into(),
+                value: ParameterValue::Channel(ramp(0.0, 2.0)),
+            },
+            Parameter {
+                key: "color".into(),
+                value: ParameterValue::Channel4([
+                    ramp(1.0, 0.0),
+                    AnimationChannel::constant(0.5),
+                    AnimationChannel::constant(0.5),
+                    AnimationChannel::constant(1.0),
+                ]),
+            },
+            Parameter {
+                key: "direction".into(),
+                value: ParameterValue::Channel3([
+                    ramp(-1.0, 1.0),
+                    AnimationChannel::constant(0.0),
+                    AnimationChannel::constant(1.0),
+                ]),
+            },
+        ];
+        let at = |frame: u64| {
+            let context = EvalContext::new(frame, FrameRate::new(30, 1), (1920, 1080));
+            light_of(&run("scene.light", params.clone(), vec![], &context).expect("evaluates"))
+        };
+        let (a, b, c) = (at(0), at(5), at(10));
+        assert_close(a.intensity, 0.0, "intensity at frame 0");
+        assert_close(b.intensity, 1.0, "intensity at frame 5");
+        assert_close(c.intensity, 2.0, "intensity at frame 10");
+        assert_close(a.color[0], 1.0, "red at frame 0");
+        assert_close(b.color[0], 0.5, "red at frame 5");
+        assert_close(c.color[0], 0.0, "red at frame 10");
+        let LightKind::Directional { direction } = b.kind else {
+            panic!("directional")
+        };
+        assert_close(direction[0], 0.0, "direction x at frame 5");
+    }
+
+    /// A light scene merges into an object scene and the two keep their
+    /// own contents, so lights, cameras and objects wire with one node.
+    #[test]
+    fn a_light_scene_merges_into_an_object_scene() {
+        let light_scene: Arc<dyn NodeData> = Arc::new(Scene::from_light(Light::DEFAULT_AMBIENT));
+        let camera_scene: Arc<dyn NodeData> = Arc::new(Scene::from_camera(Camera::default()));
+        let merged = run(
+            "scene.merge",
+            vec![],
+            vec![(0, camera_scene), (1, light_scene)],
+            &ctx((1920, 1080)),
+        )
+        .expect("evaluates");
+        let scene = as_scene(&merged);
+        assert_eq!((scene.camera_count(), scene.light_count()), (1, 1));
+    }
+
+    // -----------------------------------------------------------------------
     // Registration
     // -----------------------------------------------------------------------
 
@@ -933,6 +1133,14 @@ mod tests {
         let merge = template("scene.merge");
         assert_eq!(merge.inputs.len(), 2);
         assert_eq!(merge.outputs[0].data_type, DataTypeId::SCENE);
+
+        let light = template("scene.light");
+        assert!(light.inputs.is_empty(), "a light is a source node");
+        assert_eq!(light.outputs[0].data_type, DataTypeId::SCENE);
+        assert_eq!(
+            light.param_option_values("type"),
+            Some(&["ambient".to_string(), "directional".into(), "point".into()][..])
+        );
 
         let camera = template("scene.camera");
         assert!(camera.inputs.is_empty(), "a camera is a source node");
@@ -960,6 +1168,10 @@ mod tests {
             (
                 "scene.camera",
                 &["position", "target", "fov", "near", "far", "ortho_height"][..],
+            ),
+            (
+                "scene.light",
+                &["color", "intensity", "direction", "position", "radius"][..],
             ),
         ] {
             let node = template(type_key).create_node(NodeId::new(1));

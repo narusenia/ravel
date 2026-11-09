@@ -1223,6 +1223,20 @@ view = "視点"
 lens = "レンズ"
 clip = "クリップ"
 
+[node."scene.light"]
+label = "ライト"
+description = "ライトを 1 つ持つシーン。照らしたいシーンへマージして使う（ディレクショナル / ポイント / アンビエント）。"
+[node."scene.light".params]
+type = "ディレクショナル / ポイント / アンビエント。"
+color = "ライトの色。"
+intensity = "色にかける倍率。"
+direction = "光の進む向き（シーン座標）。ディレクショナルのみ。"
+position = "光源の位置（シーン座標）。ポイントのみ。"
+radius = "ポイントライトが半分の強さになる距離。ポイントのみ。"
+[node."scene.light".group]
+light = "ライト"
+placement = "配置"
+
 [node."scene.render"]
 label = "シーンレンダー"
 description = "シーンを最初のカメラ越しに画像へ描画する。"

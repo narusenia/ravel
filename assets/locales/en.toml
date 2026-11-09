@@ -1235,6 +1235,20 @@ view = "View"
 lens = "Lens"
 clip = "Clipping"
 
+[node."scene.light"]
+label = "Light"
+description = "A scene holding one light (directional, point or ambient). Merge it with the scene to be lit."
+[node."scene.light".params]
+type = "Directional, point or ambient."
+color = "Light color."
+intensity = "Multiplier on the color."
+direction = "Direction the light travels, in scene coordinates. Directional only."
+position = "Light position in scene coordinates. Point only."
+radius = "Distance at which a point light has fallen to half strength. Point only."
+[node."scene.light".group]
+light = "Light"
+placement = "Placement"
+
 [node."scene.render"]
 label = "Scene Render"
 description = "Draws a scene through its first camera into an image."

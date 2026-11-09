@@ -23,11 +23,11 @@ use ravel_gpu::{GpuContext, GpuFrameBuffer, ShaderManager, TexturePool};
 use super::prepare::{Blended, SceneParams, prepare};
 use super::{SceneRenderProcessor, cpu};
 
-const RED: Color = Color::new(1.0, 0.0, 0.0, 1.0);
-const GREEN: Color = Color::new(0.0, 1.0, 0.0, 1.0);
-const BLUE: Color = Color::new(0.0, 0.0, 1.0, 1.0);
+pub(super) const RED: Color = Color::new(1.0, 0.0, 0.0, 1.0);
+pub(super) const GREEN: Color = Color::new(0.0, 1.0, 0.0, 1.0);
+pub(super) const BLUE: Color = Color::new(0.0, 0.0, 1.0, 1.0);
 
-fn ctx(width: u32, height: u32) -> EvalContext {
+pub(super) fn ctx(width: u32, height: u32) -> EvalContext {
     EvalContext::new(0, FrameRate::new(30, 1), (width, height))
 }
 
@@ -38,7 +38,7 @@ fn ctx(width: u32, height: u32) -> EvalContext {
 /// By hand: the camera looks down `+Z` with image-up `-Y`, so view `y` is the
 /// scene `y` measured from the camera's, and a half-height of `height / 2`
 /// maps it onto `[-1, 1]` exactly.
-fn pixel_camera(width: u32, height: u32) -> Camera {
+pub(super) fn pixel_camera(width: u32, height: u32) -> Camera {
     let (cx, cy) = (width as f32 / 2.0, height as f32 / 2.0);
     Camera::looking_at([cx, cy, -100.0], [cx, cy, 0.0])
         .with_projection(Projection::Orthographic {
@@ -60,11 +60,11 @@ fn mesh(corners: [[f32; 3]; 4], color: Color) -> Geometry {
 }
 
 /// An axis-aligned quad `[x0, x1] x [y0, y1]` at depth `z`.
-fn flat_quad(x0: f32, y0: f32, x1: f32, y1: f32, z: f32, color: Color) -> Geometry {
+pub(super) fn flat_quad(x0: f32, y0: f32, x1: f32, y1: f32, z: f32, color: Color) -> Geometry {
     mesh([[x0, y0, z], [x1, y0, z], [x1, y1, z], [x0, y1, z]], color)
 }
 
-fn scene_of(camera: Camera, objects: Vec<Geometry>) -> Scene {
+pub(super) fn scene_of(camera: Camera, objects: Vec<Geometry>) -> Scene {
     objects
         .into_iter()
         .fold(Scene::from_camera(camera), |scene, geometry| {
@@ -75,7 +75,7 @@ fn scene_of(camera: Camera, objects: Vec<Geometry>) -> Scene {
         })
 }
 
-fn node() -> Node {
+pub(super) fn node() -> Node {
     Node::new(NodeId::new(1), "scene.render")
 }
 
@@ -101,7 +101,7 @@ fn frame(out: &Arc<dyn NodeData>) -> FrameBuffer {
         .clone()
 }
 
-fn cpu_frame(scene: &Scene, width: u32, height: u32) -> FrameBuffer {
+pub(super) fn cpu_frame(scene: &Scene, width: u32, height: u32) -> FrameBuffer {
     frame(&run(
         &SceneRenderProcessor::from_node(&node()),
         scene,
@@ -109,13 +109,13 @@ fn cpu_frame(scene: &Scene, width: u32, height: u32) -> FrameBuffer {
     ))
 }
 
-struct Rig {
+pub(super) struct Rig {
     gpu: GpuContext,
     pool: Arc<Mutex<TexturePool>>,
 }
 
 impl Rig {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let gpu = GpuContext::new_blocking().expect("GPU required");
         let pool = Arc::new(Mutex::new(TexturePool::new(gpu.clone(), 128 * 1024 * 1024)));
         Self { gpu, pool }
@@ -126,17 +126,17 @@ impl Rig {
         SceneRenderProcessor::new(self.gpu.clone(), &mut shaders, self.pool.clone(), &node())
     }
 
-    fn frame(&self, scene: &Scene, width: u32, height: u32) -> FrameBuffer {
+    pub(super) fn frame(&self, scene: &Scene, width: u32, height: u32) -> FrameBuffer {
         frame(&run(&self.processor(), scene, &ctx(width, height)))
     }
 }
 
-fn px(frame: &FrameBuffer, x: u32, y: u32) -> [f32; 4] {
+pub(super) fn px(frame: &FrameBuffer, x: u32, y: u32) -> [f32; 4] {
     let index = ((y * frame.width + x) * 4) as usize;
     frame.as_f32()[index..index + 4].try_into().unwrap()
 }
 
-fn assert_color(actual: [f32; 4], expected: Color, tolerance: f32, label: &str) {
+pub(super) fn assert_color(actual: [f32; 4], expected: Color, tolerance: f32, label: &str) {
     let expected = [expected.r, expected.g, expected.b, expected.a];
     for channel in 0..4 {
         assert!(
@@ -146,7 +146,7 @@ fn assert_color(actual: [f32; 4], expected: Color, tolerance: f32, label: &str) 
     }
 }
 
-fn covered(frame: &FrameBuffer) -> usize {
+pub(super) fn covered(frame: &FrameBuffer) -> usize {
     frame
         .as_f32()
         .chunks_exact(4)
@@ -156,7 +156,7 @@ fn covered(frame: &FrameBuffer) -> usize {
 
 /// Per-pixel agreement between two frames: the fraction within `tolerance` on
 /// every channel, and the largest channel difference seen.
-fn agreement(a: &FrameBuffer, b: &FrameBuffer, tolerance: f32) -> (f32, f32) {
+pub(super) fn agreement(a: &FrameBuffer, b: &FrameBuffer, tolerance: f32) -> (f32, f32) {
     assert_eq!((a.width, a.height), (b.width, b.height));
     let mut within = 0usize;
     let mut worst = 0.0f32;
@@ -178,7 +178,7 @@ fn agreement(a: &FrameBuffer, b: &FrameBuffer, tolerance: f32) -> (f32, f32) {
 // prepare: classification, ordering, identity
 // ---------------------------------------------------------------------------
 
-fn prepare_default(scene: &Scene, width: u32, height: u32) -> super::prepare::Prepared {
+pub(super) fn prepare_default(scene: &Scene, width: u32, height: u32) -> super::prepare::Prepared {
     let camera = scene.primary_camera().copied().unwrap_or_default();
     prepare(
         scene,
@@ -341,7 +341,7 @@ fn a_scene_without_a_camera_is_drawn_through_the_default_one() {
     );
 }
 
-fn scene_of_without_camera(objects: Vec<Geometry>) -> Scene {
+pub(super) fn scene_of_without_camera(objects: Vec<Geometry>) -> Scene {
     objects.into_iter().fold(Scene::new(), |scene, geometry| {
         scene.with_object(SceneObject::geometry(
             Arc::new(geometry),
@@ -780,7 +780,7 @@ fn frame_resident(rig: &Rig, processor: &SceneRenderProcessor, color: Color) -> 
 // ---------------------------------------------------------------------------
 
 /// A filled square path `[x0, x1] x [y0, y1]` at depth `z`, coloured by `Cd`.
-fn path_square(x0: f32, y0: f32, x1: f32, y1: f32, z: f32, color: Color) -> Geometry {
+pub(super) fn path_square(x0: f32, y0: f32, x1: f32, y1: f32, z: f32, color: Color) -> Geometry {
     let mut geometry = Geometry::from_points3(vec![
         Vec3(x0, y0, z),
         Vec3(x1, y0, z),

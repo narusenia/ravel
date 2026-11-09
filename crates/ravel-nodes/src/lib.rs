@@ -280,6 +280,7 @@ pub fn processor_for_node(
         "scene.add" => Some(Arc::new(scene::SceneAddProcessor::from_node(node))),
         "scene.merge" => Some(Arc::new(scene::SceneMergeProcessor::from_node(node))),
         "scene.camera" => Some(Arc::new(scene::SceneCameraProcessor::from_node(node))),
+        "scene.light" => Some(Arc::new(scene::SceneLightProcessor::from_node(node))),
         "scene.render" => Some(Arc::new(scene_render::SceneRenderProcessor::new(
             ctx.clone(),
             shaders,

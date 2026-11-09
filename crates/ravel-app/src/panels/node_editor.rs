@@ -2654,10 +2654,8 @@ impl NodeEditorPanel {
             PointerHint::Port
         } else if Self::node_hit_at(graph, viewport, flow, node_sizes, lx, ly).is_some() {
             PointerHint::Node
-        } else if painting::edge_at_local_pos(
-            graph, viewport, lx, ly, 5.0, edge_style, flow, node_sizes,
-        )
-        .is_some()
+        } else if painting::edge_at_local_pos(graph, viewport, lx, ly, 5.0, edge_style, flow)
+            .is_some()
         {
             PointerHint::Edge
         } else {
@@ -2720,7 +2718,7 @@ impl NodeEditorPanel {
         lx: f32,
         ly: f32,
     ) -> Option<PortHit> {
-        let port = painting::port_at_local_pos(graph, viewport, flow, node_sizes, lx, ly)?;
+        let port = painting::port_at_local_pos(graph, viewport, flow, lx, ly)?;
         let Some(body) = Self::node_hit_at(graph, viewport, flow, node_sizes, lx, ly) else {
             return Some(port);
         };
@@ -2811,7 +2809,6 @@ impl NodeEditorPanel {
                 5.0,
                 self.edge_style,
                 self.flow_direction,
-                &self.node_sizes,
             )
             .is_none()
         {
@@ -2878,7 +2875,6 @@ impl NodeEditorPanel {
             5.0,
             self.edge_style,
             self.flow_direction,
-            &self.node_sizes,
         ) {
             if !event.modifiers.shift {
                 self.selected_edges.clear();
@@ -3039,7 +3035,6 @@ impl NodeEditorPanel {
                     &self.graph,
                     &self.viewport,
                     self.flow_direction,
-                    &self.node_sizes,
                     from,
                     lx,
                     ly,
@@ -3799,7 +3794,6 @@ impl Render for NodeEditorPanel {
                                     5.0,
                                     this.edge_style,
                                     this.flow_direction,
-                                    &this.node_sizes,
                                 )
                                 .is_none();
                             if empty {
@@ -3875,16 +3869,8 @@ impl Render for NodeEditorPanel {
                 let flow = self.flow_direction;
                 move |menu, window, cx| {
                     let (lx, ly) = right_click.get();
-                    let hit_edge = painting::edge_at_local_pos(
-                        &graph_snap,
-                        &vp_snap,
-                        lx,
-                        ly,
-                        5.0,
-                        es,
-                        flow,
-                        &sizes_snap,
-                    );
+                    let hit_edge =
+                        painting::edge_at_local_pos(&graph_snap, &vp_snap, lx, ly, 5.0, es, flow);
                     let hit_node = NodeEditorPanel::node_hit_at(
                         &graph_snap,
                         &vp_snap,
@@ -4246,7 +4232,6 @@ impl Render for NodeEditorPanel {
                             &selected_edges,
                             edge_style,
                             flow,
-                            &node_sizes,
                             &colors,
                             window,
                         );
@@ -5068,15 +5053,8 @@ mod tests {
         let (x, y) = painting::output_port_screen_center((0.0, 0.0), 0, 1.0);
 
         assert!(
-            painting::port_at_local_pos(
-                &graph,
-                &viewport,
-                FlowDirection::Horizontal,
-                &HashMap::new(),
-                x,
-                y
-            )
-            .is_some()
+            painting::port_at_local_pos(&graph, &viewport, FlowDirection::Horizontal, x, y)
+                .is_some()
         );
         assert!(
             NodeEditorPanel::port_hit_at(
@@ -7461,7 +7439,11 @@ mod tests {
         window
             .update(cx, |panel, _window, _cx| {
                 assert_eq!(panel.flow_direction, FlowDirection::Vertical);
-                assert!(panel.node_sizes[&blur].0 < before_width);
+                let node = panel.graph.node(blur).unwrap();
+                assert!(
+                    painting::vertical_box_size(node, panel.viewport.zoom).0 < before_width,
+                    "the top-down box is narrower than the horizontal node"
+                );
                 assert_eq!(
                     positions(panel),
                     before_positions,
@@ -7492,6 +7474,75 @@ mod tests {
             .unwrap();
     }
 
+    /// The name beside a top-down box is part of the node: a press on it hits
+    /// the node, a press past the label does not, and ports stay on the box.
+    #[gpui::test]
+    fn the_vertical_label_is_part_of_the_nodes_hit_area(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+        cx.update(|cx| {
+            crate::app_settings::install(crate::app_settings::GlobalSettingsFile::default(), cx)
+        });
+        cx.update(crate::panels::toggle_node_flow_direction);
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                let node = panel.graph.node(blur).unwrap().clone();
+                let z = panel.viewport.zoom;
+                let (sx, sy) = panel
+                    .viewport
+                    .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+                let (box_w, box_h) = painting::vertical_box_size(&node, z);
+                let (extent_w, _) = panel.node_sizes[&blur];
+
+                let on_label = (sx + box_w + 20.0 * z, sy + box_h / 2.0);
+                assert_eq!(panel.node_at_local_pos(on_label.0, on_label.1), Some(blur));
+                assert!(
+                    panel.port_at_local_pos(on_label.0, on_label.1).is_none(),
+                    "the label carries no port"
+                );
+                assert!(
+                    panel
+                        .node_at_local_pos(sx + extent_w + 5.0, sy + 2.0)
+                        .is_none()
+                );
+            })
+            .unwrap();
+    }
+
+    /// A marquee that only touches the label still takes the node.
+    #[gpui::test]
+    fn a_marquee_over_the_vertical_label_selects_the_node(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+        cx.update(|cx| {
+            crate::app_settings::install(crate::app_settings::GlobalSettingsFile::default(), cx)
+        });
+        cx.update(crate::panels::toggle_node_flow_direction);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let node = panel.graph.node(blur).unwrap().clone();
+                let z = panel.viewport.zoom;
+                let (sx, sy) = panel
+                    .viewport
+                    .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+                let (box_w, _) = painting::vertical_box_size(&node, z);
+                let origin = panel.canvas_origin.get();
+                // A band wholly right of the box, inside the label column.
+                let from = (sx + box_w + 30.0 * z, sy - 4.0);
+                let to = (sx + box_w + 60.0 * z, sy + 10.0);
+                panel.drag = DragMode::SelectBox {
+                    start: from,
+                    current: from,
+                };
+                panel.canvas_mouse_moved(
+                    &pointer_move((to.0 + origin.0, to.1 + origin.1), Some(MouseButton::Left)),
+                    cx,
+                );
+                assert!(NodeEditorPanel::selected_nodes(cx).contains(&blur));
+            })
+            .unwrap();
+    }
+
     /// Top-down nodes print no port names, so the dot under the idle pointer
     /// is tracked for its name tag; horizontal nodes never track it.
     #[gpui::test]
@@ -7511,7 +7562,6 @@ mod tests {
                 let (x, y) = painting::port_screen_center(
                     &node,
                     screen,
-                    panel.node_sizes[&blur],
                     panel.viewport.zoom,
                     panel.flow_direction,
                     false,

@@ -3588,12 +3588,16 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   dots of the data it deals with. A pair table in that file's tests pins the
   1:1 mapping.
 - Flow direction (`NGR-5`): `painting::port_screen_center(node, node_screen,
-  size, zoom, flow, is_output, index)` is the **one** port-geometry function;
+  zoom, flow, is_output, index)` is the **one** port-geometry function;
   paint, `port_at_local_pos`, `find_snap_target` and the edge endpoints all call
   it. `compute_node_size(node, zoom, show_param_values, flow)` is the one size
-  function (vertical: 120px wide, no port rows, widens to
-  `ports * 2 * PORT_HIT_RADIUS`), and `node_size_or_default` is the fallback
-  every hit test and anchor shares. `step_points` / `flow_bezier` route edges
+  function and returns the **full extent**: horizontal as before; vertical is a
+  small icon-only box (`vertical_box_size`, 72x24, widens to
+  `ports * 2 * PORT_HIT_RADIUS`) plus the label column to its right
+  (`paint_vertical_label` draws name and, under the values flag, muted
+  values). Ports live on the box only, so `port_screen_center` takes no size;
+  `node_size_or_default` is the extent fallback every node hit test and anchor
+  shares. `step_points` / `flow_bezier` route edges
   for both axes. The panel mirrors the flow from the settings global (an
   `observe_global::<AppSettings>`), so `panels::set_node_flow_direction` /
   `toggle_node_flow_direction` (behind `CommandId::ViewToggleNodeFlowDirection`)

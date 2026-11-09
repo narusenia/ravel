@@ -57,13 +57,23 @@ fn channels_display(chs: &[ravel_core::animation::channel::AnimationChannel]) ->
 }
 
 const BASE_NODE_WIDTH: f32 = 160.0;
-/// Narrowest top-down node, at zoom 1.0. The ports sit on the top and bottom
-/// edges, so the body carries only the header and parameter rows.
-const BASE_VERTICAL_NODE_WIDTH: f32 = 120.0;
+/// A top-down node is a small box (about 3:1, Houdini's proportions) holding
+/// only the category glyph; the name and parameter values sit *outside* it, to
+/// its right. These are the box's height and its narrowest width at zoom 1.0.
+const BASE_VERTICAL_BOX_H: f32 = 24.0;
+const BASE_VERTICAL_BOX_MIN_W: f32 = 72.0;
 /// Least width each port on a top/bottom edge gets, at zoom 1.0 — the hit
-/// diameter, so two neighbouring dots never share a hit target and the node
-/// widens past [`BASE_VERTICAL_NODE_WIDTH`] before they would.
+/// diameter, so two neighbouring dots never share a hit target; the box
+/// widens past [`BASE_VERTICAL_BOX_MIN_W`] before they would.
 const BASE_VERTICAL_PORT_SPACING: f32 = 2.0 * PORT_HIT_RADIUS;
+/// Gap between the box and the label beside it, and the label column's width
+/// (names and values elide past it), both at zoom 1.0.
+const BASE_VERTICAL_LABEL_GAP: f32 = 6.0;
+const BASE_VERTICAL_LABEL_W: f32 = 104.0;
+/// Height of the name line in the label column.
+const BASE_VERTICAL_NAME_H: f32 = 18.0;
+/// The category glyph centred in the box.
+const BASE_VERTICAL_ICON: f32 = 16.0;
 const BASE_HEADER_H: f32 = 24.0;
 const BASE_PORT_ROW_H: f32 = 18.0;
 const BASE_PARAM_ROW_H: f32 = 16.0;
@@ -100,7 +110,11 @@ const HEADER_ICON_MIN_PX: f32 = 6.0;
 /// glyph would be too small to read. Snapping to [`HEADER_ICON_SIZES`]
 /// bounds the number of sprite-atlas entries a zoom session creates.
 pub fn quantized_header_icon_size(zoom: f32) -> Option<f32> {
-    let raw = BASE_HEADER_ICON * zoom;
+    quantize_icon_px(BASE_HEADER_ICON * zoom)
+}
+
+/// [`quantized_header_icon_size`] for an arbitrary raw pixel size.
+fn quantize_icon_px(raw: f32) -> Option<f32> {
     if raw < HEADER_ICON_MIN_PX {
         return None;
     }
@@ -142,16 +156,17 @@ pub fn compute_node_size(
 ) -> (f32, f32) {
     let z = zoom;
     if flow == FlowDirection::Vertical {
-        let param_rows = painted_param_rows(node, show_param_values);
-        let sep = if param_rows > 0 { 6.0 * z } else { 0.0 };
-        let ports = node.inputs.len().max(node.outputs.len()) as f32;
-        let w = BASE_VERTICAL_NODE_WIDTH.max(ports * BASE_VERTICAL_PORT_SPACING);
-        let h = BASE_NODE_PAD * z
-            + BASE_HEADER_H * z
-            + sep
-            + param_rows as f32 * BASE_PARAM_ROW_H * z
-            + BASE_NODE_PAD * z;
-        return (w * z, h);
+        // The full extent: box plus the label column beside it. Clicking the
+        // label selects the node, a marquee that touches it takes the node,
+        // and layout / fit measure all of it. Ports are on the box only
+        // ([`vertical_box_size`]).
+        let (box_w, box_h) = vertical_box_size(node, z);
+        let rows = painted_param_rows(node, show_param_values);
+        let label_h = (BASE_VERTICAL_NAME_H + rows as f32 * BASE_PARAM_ROW_H) * z;
+        return (
+            box_w + (BASE_VERTICAL_LABEL_GAP + BASE_VERTICAL_LABEL_W) * z,
+            box_h.max(label_h),
+        );
     }
     let port_rows = node.inputs.len().max(node.outputs.len());
     let param_rows = painted_param_rows(node, show_param_values);
@@ -164,6 +179,17 @@ pub fn compute_node_size(
         + param_rows as f32 * BASE_PARAM_ROW_H * z
         + BASE_NODE_PAD * z;
     (BASE_NODE_WIDTH * z, h)
+}
+
+/// The top-down node's box (the part that carries the ports), at `zoom`.
+/// A pure function of the node: it does not depend on the label or on the
+/// parameter-values flag, so a port stays put when either changes.
+pub fn vertical_box_size(node: &Node, zoom: f32) -> (f32, f32) {
+    let ports = node.inputs.len().max(node.outputs.len()) as f32;
+    (
+        BASE_VERTICAL_BOX_MIN_W.max(ports * BASE_VERTICAL_PORT_SPACING) * zoom,
+        BASE_VERTICAL_BOX_H * zoom,
+    )
 }
 
 /// A node's drawn size, falling back to what [`compute_node_size`] gives
@@ -184,13 +210,13 @@ pub fn node_size_or_default(
 /// enters port geometry. Painting, hit testing, snapping and edge endpoints
 /// all call this, so they cannot disagree about where a dot is.
 ///
-/// `size` is the node's drawn size ([`compute_node_size`]). Horizontal puts
-/// inputs on the left edge and outputs on the right, one per row; vertical
-/// spreads them evenly across the top (inputs) or bottom (outputs) edge.
+/// Horizontal puts inputs on the left edge and outputs on the right, one per
+/// row; vertical spreads them evenly across the top (inputs) or bottom
+/// (outputs) edge of the node's *box* ([`vertical_box_size`]) — never of the
+/// label beside it.
 pub fn port_screen_center(
     node: &Node,
     node_screen: (f32, f32),
-    size: (f32, f32),
     zoom: f32,
     flow: FlowDirection,
     is_output: bool,
@@ -211,9 +237,10 @@ pub fn port_screen_center(
                 node.inputs.len()
             }
             .max(1);
-            let x = node_screen.0 + size.0 * (port_index as f32 + 0.5) / count as f32;
+            let (box_w, box_h) = vertical_box_size(node, zoom);
+            let x = node_screen.0 + box_w * (port_index as f32 + 0.5) / count as f32;
             let y = if is_output {
-                node_screen.1 + size.1
+                node_screen.1 + box_h
             } else {
                 node_screen.1
             };
@@ -304,12 +331,10 @@ fn edge_endpoints(
     tgt_node: &Node,
     viewport: &Viewport,
     flow: FlowDirection,
-    node_sizes: &HashMap<NodeId, (f32, f32)>,
 ) -> ((f32, f32), (f32, f32)) {
     let at = |node: &Node, is_output: bool, port: usize| {
         let screen = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-        let size = node_size_or_default(node_sizes, node, viewport.zoom, flow);
-        port_screen_center(node, screen, size, viewport.zoom, flow, is_output, port)
+        port_screen_center(node, screen, viewport.zoom, flow, is_output, port)
     };
     (
         at(src_node, true, edge.source_port.0 as usize),
@@ -348,7 +373,6 @@ pub fn paint_edges(
     selected_edges: &HashSet<EdgeId>,
     edge_style: super::EdgeStyle,
     flow: FlowDirection,
-    node_sizes: &HashMap<NodeId, (f32, f32)>,
     colors: &Colors,
     window: &mut Window,
 ) {
@@ -372,8 +396,7 @@ pub fn paint_edges(
             continue;
         }
 
-        let ((sx, sy), (tx, ty)) =
-            edge_endpoints(edge, src_node, tgt_node, viewport, flow, node_sizes);
+        let ((sx, sy), (tx, ty)) = edge_endpoints(edge, src_node, tgt_node, viewport, flow);
 
         let sx = sx + ox;
         let sy = sy + oy;
@@ -652,7 +675,19 @@ pub fn paint_nodes(
         {
             paint_mono_text(
                 &readout.text,
-                Point::new(px(wx + BASE_NODE_PAD * z), px(wy + sh + 2.0 * z)),
+                Point::new(
+                    px(wx + BASE_NODE_PAD * z),
+                    // Below the output dots too in top-down flow, where they
+                    // straddle the box's bottom edge.
+                    px(wy
+                        + sh
+                        + if flow == FlowDirection::Vertical {
+                            BASE_PORT_DOT_R * z
+                        } else {
+                            0.0
+                        }
+                        + 2.0 * z),
+                ),
                 9.0 * z,
                 readout.level.color(colors),
                 window,
@@ -712,11 +747,20 @@ fn paint_single_node(
     let node_border = dim(if selected { highlight } else { colors.border });
     let border_w = if selected { 2.0 } else { 1.0 };
 
+    // The outlined body: the whole node in horizontal flow, only the small
+    // box in top-down flow (its label is drawn outside, beside it). Selection,
+    // bypass and the outline all live on this rect.
+    let vertical = flow == FlowDirection::Vertical;
+    let (face_w, face_h) = if vertical {
+        vertical_box_size(node, z)
+    } else {
+        (w, h)
+    };
     let node_bounds = Bounds::new(
         Point::new(px(x), px(y)),
         Size {
-            width: px(w),
-            height: px(h),
+            width: px(face_w),
+            height: px(face_h),
         },
     );
 
@@ -732,18 +776,24 @@ fn paint_single_node(
             alpha: HEADER_TINT_ALPHA,
             ..category_color(category)
         };
+        // Top-down: the box is all header, so the wash covers all of it.
         let header = Bounds::new(
             Point::new(px(x), px(y)),
             Size {
-                width: px(w),
-                height: px(pad + header_h),
+                width: px(face_w),
+                height: if vertical {
+                    px(face_h)
+                } else {
+                    px(pad + header_h)
+                },
             },
         );
+        let bottom_r = if vertical { corner_r } else { 0.0 };
         window.paint_quad(fill(header, dim(tint)).corner_radii(Corners {
             top_left: px(corner_r),
             top_right: px(corner_r),
-            bottom_left: px(0.0),
-            bottom_right: px(0.0),
+            bottom_left: px(bottom_r),
+            bottom_right: px(bottom_r),
         }));
     }
 
@@ -753,81 +803,96 @@ fn paint_single_node(
             .border_widths(px(border_w)),
     );
 
-    // Resolved by the host (`crate::node_locale::display_label`): a user
-    // rename, else the locale entry for the type, else the type key.
-    let mut label_x = x + pad;
-    // Type glyph at the header's left edge, in the category color: the tint
-    // is a low-alpha wash of the same hue, so the header reads as a pale
-    // face with a saturated mark. Neither the header height nor the node
-    // width changes — the label simply starts after the glyph. The glyph is
-    // skipped at low zoom (see `quantized_header_icon_size`).
-    if let Some(icon_size) = quantized_header_icon_size(z) {
-        let icon = RavelIcon::for_node_type(&node.type_key, category);
-        let icon_color = dim(category
-            .map(category_color)
-            .unwrap_or(colors.muted_foreground));
-        // Vertically centered against the label's line box.
-        let icon_y = y + pad + 2.0 * z + (font_header * 1.4 - icon_size) / 2.0;
-        window
-            .paint_svg(
-                Bounds::new(
-                    Point::new(px(label_x), px(icon_y)),
-                    Size {
-                        width: px(icon_size),
-                        height: px(icon_size),
-                    },
-                ),
-                icon.icon_path(),
-                None,
-                TransformationMatrix::default(),
-                icon_color,
-                cx,
-            )
-            .ok();
-        label_x += icon_size + BASE_HEADER_ICON_GAP * z;
-    }
-    // Elided against the node's right edge: a localized title
-    // ("カーブリマップフィールド") is far wider than the fixed node box.
-    let label_avail = (x + w - pad - label_x).max(0.0);
-    shape_elided(
-        label,
-        font_header,
-        &crate::fonts::ui_font(cx),
-        dim(colors.foreground),
-        label_avail,
-        window,
-    )
-    .paint(
-        Point::new(px(label_x), px(y + pad + 2.0 * z)),
-        px(font_header * 1.4),
-        TextAlign::Left,
-        None,
-        window,
-        cx,
-    )
-    .ok();
-
     let sep_y = y + pad + header_h;
-    let sep_bounds = Bounds::new(
-        Point::new(px(x + 4.0 * z), px(sep_y)),
-        Size {
-            width: px(w - 8.0 * z),
-            height: px(1.0),
-        },
-    );
-    window.paint_quad(fill(
-        sep_bounds,
-        dim(Hsla {
-            alpha: 0.2,
-            ..colors.border
-        }),
-    ));
+    if !vertical {
+        // Resolved by the host (`crate::node_locale::display_label`): a user
+        // rename, else the locale entry for the type, else the type key.
+        let mut label_x = x + pad;
+        // Type glyph at the header's left edge, in the category color: the tint
+        // is a low-alpha wash of the same hue, so the header reads as a pale
+        // face with a saturated mark. Neither the header height nor the node
+        // width changes — the label simply starts after the glyph. The glyph is
+        // skipped at low zoom (see `quantized_header_icon_size`).
+        if let Some(icon_size) = quantized_header_icon_size(z) {
+            let icon = RavelIcon::for_node_type(&node.type_key, category);
+            let icon_color = dim(category
+                .map(category_color)
+                .unwrap_or(colors.muted_foreground));
+            // Vertically centered against the label's line box.
+            let icon_y = y + pad + 2.0 * z + (font_header * 1.4 - icon_size) / 2.0;
+            window
+                .paint_svg(
+                    Bounds::new(
+                        Point::new(px(label_x), px(icon_y)),
+                        Size {
+                            width: px(icon_size),
+                            height: px(icon_size),
+                        },
+                    ),
+                    icon.icon_path(),
+                    None,
+                    TransformationMatrix::default(),
+                    icon_color,
+                    cx,
+                )
+                .ok();
+            label_x += icon_size + BASE_HEADER_ICON_GAP * z;
+        }
+        // Elided against the node's right edge: a localized title
+        // ("カーブリマップフィールド") is far wider than the fixed node box.
+        let label_avail = (x + w - pad - label_x).max(0.0);
+        shape_elided(
+            label,
+            font_header,
+            &crate::fonts::ui_font(cx),
+            dim(colors.foreground),
+            label_avail,
+            window,
+        )
+        .paint(
+            Point::new(px(label_x), px(y + pad + 2.0 * z)),
+            px(font_header * 1.4),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        )
+        .ok();
 
+        let sep_bounds = Bounds::new(
+            Point::new(px(x + 4.0 * z), px(sep_y)),
+            Size {
+                width: px(w - 8.0 * z),
+                height: px(1.0),
+            },
+        );
+        window.paint_quad(fill(
+            sep_bounds,
+            dim(Hsla {
+                alpha: 0.2,
+                ..colors.border
+            }),
+        ));
+    }
+    if vertical {
+        paint_vertical_label(
+            node,
+            label,
+            (x, y),
+            (face_w, face_h),
+            category,
+            z,
+            show_param_values,
+            opacity,
+            colors,
+            window,
+            cx,
+        );
+    }
     let port_base_y = sep_y + port_gap;
-    let vertical = flow == FlowDirection::Vertical;
 
     for (i, input) in node.inputs.iter().enumerate() {
-        let (pcx, py) = port_screen_center(node, (x, y), (w, h), z, flow, false, i);
+        let (pcx, py) = port_screen_center(node, (x, y), z, flow, false, i);
         // Parameter inputs keep the same center and hit target as ordinary
         // inputs, but render slightly smaller so their role is visible.
         let input_dot_r = if input.is_param { dot_r * 0.75 } else { dot_r };
@@ -860,7 +925,7 @@ fn paint_single_node(
     }
 
     for (i, output) in node.outputs.iter().enumerate() {
-        let (pcx, py) = port_screen_center(node, (x, y), (w, h), z, flow, true, i);
+        let (pcx, py) = port_screen_center(node, (x, y), z, flow, true, i);
         let dot_color = dim(port_color(output.data_type));
 
         paint_port_marker(
@@ -906,14 +971,13 @@ fn paint_single_node(
     // Skipped wholesale when the rows are off, separator included: the
     // height `compute_node_size` returned for this node left no room for
     // either (the two read the same flag).
+    // Top-down nodes list their values in the label column instead
+    // ([`paint_vertical_label`]).
     let rows = painted_param_rows(node, show_param_values);
-    if rows > 0 {
+    if rows > 0 && !vertical {
         let param_row_h = BASE_PARAM_ROW_H * z;
-        let params_base_y = if vertical {
-            sep_y + 6.0 * z
-        } else {
-            port_base_y + node.inputs.len().max(node.outputs.len()) as f32 * port_row_h + 6.0 * z
-        };
+        let params_base_y =
+            port_base_y + node.inputs.len().max(node.outputs.len()) as f32 * port_row_h + 6.0 * z;
 
         let sep2 = Bounds::new(
             Point::new(px(x + 4.0 * z), px(params_base_y - 3.0 * z)),
@@ -922,17 +986,13 @@ fn paint_single_node(
                 height: px(1.0),
             },
         );
-        // The header's own separator already sits right above in top-down
-        // mode.
-        if !vertical {
-            window.paint_quad(fill(
-                sep2,
-                dim(Hsla {
-                    alpha: 0.2,
-                    ..colors.border
-                }),
-            ));
-        }
+        window.paint_quad(fill(
+            sep2,
+            dim(Hsla {
+                alpha: 0.2,
+                ..colors.border
+            }),
+        ));
 
         for (i, param) in node.parameters.iter().enumerate().take(rows) {
             let py = params_base_y + i as f32 * param_row_h;
@@ -944,24 +1004,7 @@ fn paint_single_node(
                 window,
                 cx,
             );
-            let val_str = match &param.value {
-                ParameterValue::Float(v) => format!("{v:.2}"),
-                ParameterValue::Int(v) => v.to_string(),
-                ParameterValue::Bool(v) => v.to_string(),
-                ParameterValue::String(v) => v.clone(),
-                // No evaluation context in a node body, so the frame-0 sample
-                // stands in — the same stand-in `channel_sample` uses for a
-                // keyframe curve.
-                ParameterValue::StringSteps(steps) => steps.sample(0.0).clone(),
-                ParameterValue::Channel(ch) => channel_display(ch),
-                ParameterValue::IntChannel(ch) => channel_int_display(ch),
-                ParameterValue::Channel2(chs) => channels_display(chs),
-                ParameterValue::Channel3(chs) => channels_display(chs),
-                ParameterValue::Channel4(chs) => channels_display(chs),
-                ParameterValue::PathPoints(points) => format!("{} points", points.len()),
-                ParameterValue::Curve(curve) => format!("{} points", curve.len()),
-                ParameterValue::Ramp(ramp) => format!("{} stops", ramp.len()),
-            };
+            let val_str = param_value_text(&param.value);
             // The value is right-aligned against a fixed node width, so a long
             // one — a vec4, a long string — would otherwise run back over the
             // key on its left.
@@ -987,6 +1030,130 @@ fn paint_single_node(
                 )
                 .ok();
         }
+    }
+}
+
+/// The text a node body shows for a parameter value.
+fn param_value_text(value: &ParameterValue) -> String {
+    match value {
+        ParameterValue::Float(v) => format!("{v:.2}"),
+        ParameterValue::Int(v) => v.to_string(),
+        ParameterValue::Bool(v) => v.to_string(),
+        ParameterValue::String(v) => v.clone(),
+        // No evaluation context in a node body, so the frame-0 sample
+        // stands in — the same stand-in `channel_sample` uses for a
+        // keyframe curve.
+        ParameterValue::StringSteps(steps) => steps.sample(0.0).clone(),
+        ParameterValue::Channel(ch) => channel_display(ch),
+        ParameterValue::IntChannel(ch) => channel_int_display(ch),
+        ParameterValue::Channel2(chs) => channels_display(chs),
+        ParameterValue::Channel3(chs) => channels_display(chs),
+        ParameterValue::Channel4(chs) => channels_display(chs),
+        ParameterValue::PathPoints(points) => format!("{} points", points.len()),
+        ParameterValue::Curve(curve) => format!("{} points", curve.len()),
+        ParameterValue::Ramp(ramp) => format!("{} stops", ramp.len()),
+    }
+}
+
+/// The top-down node's face: the category glyph centred in the box, and the
+/// name — with the parameter values small and muted under it — in a column to
+/// the box's right. The column is part of the node's extent
+/// ([`compute_node_size`]) so it is clickable, but it is not outlined: the box
+/// carries the selection and bypass state.
+#[allow(clippy::too_many_arguments)]
+fn paint_vertical_label(
+    node: &Node,
+    label: &str,
+    origin: (f32, f32),
+    box_size: (f32, f32),
+    category: Option<NodeCategory>,
+    z: f32,
+    show_param_values: bool,
+    opacity: f32,
+    colors: &Colors,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let (x, y) = origin;
+    let dim = |color: Hsla| Hsla {
+        alpha: color.alpha * opacity,
+        ..color
+    };
+    if let Some(icon_size) = quantize_icon_px(BASE_VERTICAL_ICON * z) {
+        let icon = RavelIcon::for_node_type(&node.type_key, category);
+        let icon_color = dim(category
+            .map(category_color)
+            .unwrap_or(colors.muted_foreground));
+        window
+            .paint_svg(
+                Bounds::new(
+                    Point::new(
+                        px(x + (box_size.0 - icon_size) / 2.0),
+                        px(y + (box_size.1 - icon_size) / 2.0),
+                    ),
+                    Size {
+                        width: px(icon_size),
+                        height: px(icon_size),
+                    },
+                ),
+                icon.icon_path(),
+                None,
+                TransformationMatrix::default(),
+                icon_color,
+                cx,
+            )
+            .ok();
+    }
+
+    let col_x = x + box_size.0 + BASE_VERTICAL_LABEL_GAP * z;
+    let avail = BASE_VERTICAL_LABEL_W * z;
+    let font_name = 12.0 * z;
+    shape_elided(
+        label,
+        font_name,
+        &crate::fonts::ui_font(cx),
+        dim(colors.foreground),
+        avail,
+        window,
+    )
+    .paint(
+        Point::new(
+            px(col_x),
+            px(y + (BASE_VERTICAL_NAME_H * z - font_name * 1.4) / 2.0),
+        ),
+        px(font_name * 1.4),
+        TextAlign::Left,
+        None,
+        window,
+        cx,
+    )
+    .ok();
+
+    let rows = painted_param_rows(node, show_param_values);
+    let font_param = 9.0 * z;
+    let mono = crate::fonts::mono_font(cx);
+    for (i, param) in node.parameters.iter().enumerate().take(rows) {
+        let text = format!("{}: {}", param.key, param_value_text(&param.value));
+        shape_elided(
+            &text,
+            font_param,
+            &mono,
+            dim(colors.muted_foreground),
+            avail,
+            window,
+        )
+        .paint(
+            Point::new(
+                px(col_x),
+                px(y + (BASE_VERTICAL_NAME_H + i as f32 * BASE_PARAM_ROW_H) * z),
+            ),
+            px(font_param * 1.4),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        )
+        .ok();
     }
 }
 
@@ -1073,7 +1240,6 @@ pub fn edge_at_local_pos(
     threshold: f32,
     edge_style: super::EdgeStyle,
     flow: FlowDirection,
-    node_sizes: &HashMap<NodeId, (f32, f32)>,
 ) -> Option<EdgeId> {
     use super::bezier::point_to_bezier_distance;
 
@@ -1090,8 +1256,7 @@ pub fn edge_at_local_pos(
             continue;
         }
 
-        let ((sx, sy), (tx, ty)) =
-            edge_endpoints(edge, src_node, tgt_node, viewport, flow, node_sizes);
+        let ((sx, sy), (tx, ty)) = edge_endpoints(edge, src_node, tgt_node, viewport, flow);
 
         let dist = match edge_style {
             super::EdgeStyle::Bezier => {
@@ -1140,7 +1305,6 @@ pub fn port_at_local_pos(
     graph: &Graph,
     viewport: &Viewport,
     flow: FlowDirection,
-    node_sizes: &HashMap<NodeId, (f32, f32)>,
     lx: f32,
     ly: f32,
 ) -> Option<PortHit> {
@@ -1150,10 +1314,9 @@ pub fn port_at_local_pos(
     let mut best = PORT_HIT_RADIUS;
     for node in z_ordered(graph) {
         let screen = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-        let size = node_size_or_default(node_sizes, node, viewport.zoom, flow);
 
         for (i, _input) in node.inputs.iter().enumerate() {
-            let (cx, cy) = port_screen_center(node, screen, size, viewport.zoom, flow, false, i);
+            let (cx, cy) = port_screen_center(node, screen, viewport.zoom, flow, false, i);
             let dist = ((lx - cx).powi(2) + (ly - cy).powi(2)).sqrt();
             if dist <= best {
                 best = dist;
@@ -1167,7 +1330,7 @@ pub fn port_at_local_pos(
         }
 
         for (i, _output) in node.outputs.iter().enumerate() {
-            let (cx, cy) = port_screen_center(node, screen, size, viewport.zoom, flow, true, i);
+            let (cx, cy) = port_screen_center(node, screen, viewport.zoom, flow, true, i);
             let dist = ((lx - cx).powi(2) + (ly - cy).powi(2)).sqrt();
             if dist <= best {
                 best = dist;
@@ -1269,7 +1432,6 @@ pub fn find_snap_target(
     graph: &Graph,
     viewport: &Viewport,
     flow: FlowDirection,
-    node_sizes: &HashMap<NodeId, (f32, f32)>,
     from: &PortHit,
     mouse_lx: f32,
     mouse_ly: f32,
@@ -1282,7 +1444,6 @@ pub fn find_snap_target(
         }
 
         let screen = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-        let size = node_size_or_default(node_sizes, node, viewport.zoom, flow);
 
         let ports: Vec<(usize, bool)> = if from.is_output {
             node.inputs
@@ -1303,7 +1464,7 @@ pub fn find_snap_target(
                 continue;
             }
 
-            let (cx, cy) = port_screen_center(node, screen, size, viewport.zoom, flow, is_out, i);
+            let (cx, cy) = port_screen_center(node, screen, viewport.zoom, flow, is_out, i);
 
             let dist = ((mouse_lx - cx).powi(2) + (mouse_ly - cy).powi(2)).sqrt();
             // z_ordered walks back to front, so an equal-distance candidate
@@ -1736,28 +1897,11 @@ mod tests {
         let (px, py) = output_port_screen_center((0.0, 0.0), 0, vp.zoom);
 
         let hidden = Graph::new().add_node(scalar_source(1, true)).unwrap();
-        assert!(
-            port_at_local_pos(
-                &hidden,
-                &vp,
-                FlowDirection::Horizontal,
-                &HashMap::new(),
-                px,
-                py
-            )
-            .is_none()
-        );
+        assert!(port_at_local_pos(&hidden, &vp, FlowDirection::Horizontal, px, py).is_none());
 
         let visible = Graph::new().add_node(scalar_source(1, false)).unwrap();
-        let hit = port_at_local_pos(
-            &visible,
-            &vp,
-            FlowDirection::Horizontal,
-            &HashMap::new(),
-            px,
-            py,
-        )
-        .expect("visible port hits");
+        let hit = port_at_local_pos(&visible, &vp, FlowDirection::Horizontal, px, py)
+            .expect("visible port hits");
         assert!(hit.is_output);
     }
 
@@ -1797,16 +1941,9 @@ mod tests {
         let (x, y) = output_port_screen_center((0.0, 0.0), 0, vp.zoom);
 
         assert_eq!(
-            port_at_local_pos(
-                &graph,
-                &vp,
-                FlowDirection::Horizontal,
-                &HashMap::new(),
-                x,
-                y
-            )
-            .unwrap()
-            .node_id,
+            port_at_local_pos(&graph, &vp, FlowDirection::Horizontal, x, y)
+                .unwrap()
+                .node_id,
             NodeId::new(2)
         );
     }
@@ -1828,29 +1965,13 @@ mod tests {
             .unwrap();
         let source_pos = vp.flow_to_screen(-200.0, 0.0);
         let (sx, sy) = output_port_screen_center(source_pos, 0, vp.zoom);
-        let from = port_at_local_pos(
-            &graph,
-            &vp,
-            FlowDirection::Horizontal,
-            &HashMap::new(),
-            sx,
-            sy,
-        )
-        .unwrap();
+        let from = port_at_local_pos(&graph, &vp, FlowDirection::Horizontal, sx, sy).unwrap();
         let (x, y) = input_port_screen_center((0.0, 0.0), 0, vp.zoom);
 
         assert_eq!(
-            find_snap_target(
-                &graph,
-                &vp,
-                FlowDirection::Horizontal,
-                &HashMap::new(),
-                &from,
-                x,
-                y
-            )
-            .unwrap()
-            .node_id,
+            find_snap_target(&graph, &vp, FlowDirection::Horizontal, &from, x, y)
+                .unwrap()
+                .node_id,
             NodeId::new(3)
         );
     }
@@ -2073,28 +2194,9 @@ mod tests {
             .unwrap();
 
         let (px, py) = output_port_screen_center((0.0, 0.0), 0, vp.zoom);
-        let from = port_at_local_pos(
-            &graph,
-            &vp,
-            FlowDirection::Horizontal,
-            &HashMap::new(),
-            px,
-            py,
-        )
-        .unwrap();
+        let from = port_at_local_pos(&graph, &vp, FlowDirection::Horizontal, px, py).unwrap();
         let (ix, iy) = input_port_screen_center((0.0, 0.0), 0, vp.zoom);
-        assert!(
-            find_snap_target(
-                &graph,
-                &vp,
-                FlowDirection::Horizontal,
-                &HashMap::new(),
-                &from,
-                ix,
-                iy
-            )
-            .is_none()
-        );
+        assert!(find_snap_target(&graph, &vp, FlowDirection::Horizontal, &from, ix, iy).is_none());
     }
 
     #[test]
@@ -2118,22 +2220,14 @@ mod tests {
 
         let source_screen = vp.flow_to_screen(0.0, 100.0);
         let (source_x, source_y) = output_port_screen_center(source_screen, 0, vp.zoom);
-        let from = port_at_local_pos(
-            &graph,
-            &vp,
-            FlowDirection::Horizontal,
-            &HashMap::new(),
-            source_x,
-            source_y,
-        )
-        .unwrap();
+        let from =
+            port_at_local_pos(&graph, &vp, FlowDirection::Horizontal, source_x, source_y).unwrap();
         let sink_screen = vp.flow_to_screen(300.0, 0.0);
         let (target_x, target_y) = input_port_screen_center(sink_screen, 0, vp.zoom);
         let target = find_snap_target(
             &graph,
             &vp,
             FlowDirection::Horizontal,
-            &HashMap::new(),
             &from,
             target_x,
             target_y,
@@ -2146,21 +2240,13 @@ mod tests {
             .with_output("out", DataTypeId::COLOR)
             .with_position(0.0, 100.0);
         let graph = graph.replace_node(Arc::new(color_source));
-        let from = port_at_local_pos(
-            &graph,
-            &vp,
-            FlowDirection::Horizontal,
-            &HashMap::new(),
-            source_x,
-            source_y,
-        )
-        .unwrap();
+        let from =
+            port_at_local_pos(&graph, &vp, FlowDirection::Horizontal, source_x, source_y).unwrap();
         assert!(
             find_snap_target(
                 &graph,
                 &vp,
                 FlowDirection::Horizontal,
-                &HashMap::new(),
                 &from,
                 target_x,
                 target_y
@@ -2185,20 +2271,13 @@ mod tests {
         node
     }
 
-    fn sizes_of(graph: &Graph, zoom: f32, flow: FlowDirection) -> HashMap<NodeId, (f32, f32)> {
-        graph
-            .nodes()
-            .map(|n| (n.id, compute_node_size(n, zoom, true, flow)))
-            .collect()
-    }
-
     /// Every port's drawn centre must be what the hit test finds, in both
-    /// directions and across port counts — the centre is computed once
-    /// (`port_screen_center`) and painting and picking both read it.
+    /// directions and across port counts and zooms — the centre is computed
+    /// once (`port_screen_center`) and painting and picking both read it.
+    /// Low zooms are included: neighbouring hit circles overlap there, and the
+    /// nearest port must still win.
     #[test]
     fn port_centres_round_trip_through_the_hit_test_in_both_flows() {
-        // Low zooms included: neighbouring hit circles overlap there, and the
-        // nearest port must still win.
         for (flow, zoom) in [FlowDirection::Horizontal, V]
             .into_iter()
             .flat_map(|flow| [1.5, 0.3, Viewport::MIN_ZOOM].map(|zoom| (flow, zoom)))
@@ -2211,22 +2290,20 @@ mod tests {
                     y: 5.0,
                     zoom,
                 };
-                let sizes = sizes_of(&graph, vp.zoom, flow);
                 let node = graph.node(NodeId::new(1)).unwrap();
                 let screen = vp.flow_to_screen(40.0, 30.0);
-                let size = sizes[&node.id];
                 for (is_output, count) in [(false, inputs), (true, outputs)] {
                     for index in 0..count {
                         let (cx, cy) =
-                            port_screen_center(node, screen, size, vp.zoom, flow, is_output, index);
-                        let hit = port_at_local_pos(&graph, &vp, flow, &sizes, cx, cy)
-                            .unwrap_or_else(|| {
-                                panic!("{flow:?} {inputs}x{outputs} port {index} not hit")
+                            port_screen_center(node, screen, vp.zoom, flow, is_output, index);
+                        let hit =
+                            port_at_local_pos(&graph, &vp, flow, cx, cy).unwrap_or_else(|| {
+                                panic!("{flow:?} z{zoom} {inputs}x{outputs} port {index} not hit")
                             });
                         assert_eq!(
                             (hit.is_output, hit.port_index),
                             (is_output, index as u32),
-                            "{flow:?} {inputs}x{outputs}"
+                            "{flow:?} z{zoom} {inputs}x{outputs}"
                         );
                         assert_eq!(hit.center, (cx, cy));
                     }
@@ -2235,40 +2312,72 @@ mod tests {
         }
     }
 
+    /// Ports sit on the box's top and bottom edges — never on the label
+    /// column beside it, whatever the extent is.
     #[test]
-    fn vertical_inputs_sit_on_the_top_edge_and_outputs_on_the_bottom() {
+    fn vertical_ports_sit_on_the_box_edges_only() {
         let node = ported(1, 3, 2);
-        let size = compute_node_size(&node, 1.0, true, V);
-        let (ix, iy) = port_screen_center(&node, (10.0, 20.0), size, 1.0, V, false, 1);
-        let (ox, oy) = port_screen_center(&node, (10.0, 20.0), size, 1.0, V, true, 0);
+        let (box_w, box_h) = vertical_box_size(&node, 1.0);
+        let (extent_w, _) = compute_node_size(&node, 1.0, true, V);
+        let (ix, iy) = port_screen_center(&node, (10.0, 20.0), 1.0, V, false, 1);
+        let (ox, oy) = port_screen_center(&node, (10.0, 20.0), 1.0, V, true, 0);
         assert_eq!(iy, 20.0, "inputs on the top edge");
-        assert_eq!(oy, 20.0 + size.1, "outputs on the bottom edge");
-        // Spread across the width: the middle of three is the centre, the
-        // first of two sits a quarter in.
-        assert_eq!(ix, 10.0 + size.0 / 2.0);
-        assert_eq!(ox, 10.0 + size.0 / 4.0);
+        assert_eq!(oy, 20.0 + box_h, "outputs on the bottom edge");
+        assert_eq!(ix, 10.0 + box_w / 2.0, "the middle of three is the centre");
+        assert_eq!(ox, 10.0 + box_w / 4.0, "the first of two is a quarter in");
+        for index in 0..3 {
+            let (x, _) = port_screen_center(&node, (0.0, 0.0), 1.0, V, false, index);
+            assert!(x < box_w && x < extent_w - BASE_VERTICAL_LABEL_W);
+        }
     }
 
-    /// No port-name rows, narrower than horizontal, and widening for many
-    /// inputs so neighbouring dots keep their hit targets apart.
+    /// The box is a small ~3:1 rectangle that does not depend on the label or
+    /// the values flag; the extent adds the label column (so it is clickable)
+    /// and grows with the value rows without growing the box.
     #[test]
-    fn vertical_nodes_are_narrow_rowless_and_widen_for_many_ports() {
+    fn the_vertical_extent_is_the_box_plus_the_label_column() {
+        let node = ported(1, 2, 1)
+            .with_param("a", ParameterValue::Float(1.0))
+            .with_param("b", ParameterValue::Float(2.0))
+            .with_param("c", ParameterValue::Float(3.0));
+        let (box_w, box_h) = vertical_box_size(&node, 1.0);
+        assert_eq!(
+            (box_w, box_h),
+            (BASE_VERTICAL_BOX_MIN_W, BASE_VERTICAL_BOX_H)
+        );
+        assert!(box_w / box_h >= 2.5 && box_w / box_h <= 3.5, "about 3:1");
+
+        let (hw, hh) = compute_node_size(&node, 1.0, false, FlowDirection::Horizontal);
+        let (hidden_w, hidden_h) = compute_node_size(&node, 1.0, false, V);
+        let (shown_w, shown_h) = compute_node_size(&node, 1.0, true, V);
+        assert_eq!(
+            hidden_w,
+            box_w + BASE_VERTICAL_LABEL_GAP + BASE_VERTICAL_LABEL_W
+        );
+        assert_eq!(shown_w, hidden_w, "values do not widen the node");
+        assert_eq!(hidden_h, box_h, "the name line fits beside the box");
+        assert_eq!(
+            shown_h,
+            BASE_VERTICAL_NAME_H + 3.0 * BASE_PARAM_ROW_H,
+            "the value rows extend the label column, not the box"
+        );
+        assert!(hidden_h < hh && hidden_w < hw + BASE_VERTICAL_LABEL_W);
+        assert_eq!(vertical_box_size(&node, 2.0), (box_w * 2.0, box_h * 2.0));
+        assert_eq!(
+            compute_node_size(&node, 2.0, true, V),
+            (shown_w * 2.0, shown_h * 2.0)
+        );
+    }
+
+    /// Many inputs widen the box (not the label) so neighbouring dots keep
+    /// their hit targets apart.
+    #[test]
+    fn many_inputs_widen_the_box_to_keep_the_dots_apart() {
         let few = ported(1, 2, 1);
         let many = ported(2, 12, 1);
-        let (hw, hh) = compute_node_size(&few, 1.0, false, FlowDirection::Horizontal);
-        let (fw, fh) = compute_node_size(&few, 1.0, false, V);
-        let (mw, mh) = compute_node_size(&many, 1.0, false, V);
-
-        assert_eq!(fw, BASE_VERTICAL_NODE_WIDTH);
-        assert!(fw < hw, "vertical is narrower: {fw} vs {hw}");
-        assert!(fh < hh, "no port rows: {fh} vs {hh}");
-        assert_eq!(fh, mh, "height does not depend on the port count");
-        assert!(mw > fw, "many inputs widen the node");
-
-        let node = many.with_position(0.0, 0.0);
-        let size = compute_node_size(&node, 1.0, false, V);
+        assert!(vertical_box_size(&many, 1.0).0 > vertical_box_size(&few, 1.0).0);
         let xs: Vec<f32> = (0..12)
-            .map(|i| port_screen_center(&node, (0.0, 0.0), size, 1.0, V, false, i).0)
+            .map(|i| port_screen_center(&many, (0.0, 0.0), 1.0, V, false, i).0)
             .collect();
         for pair in xs.windows(2) {
             assert!(
@@ -2276,18 +2385,6 @@ mod tests {
                 "dots {pair:?} would share a hit target"
             );
         }
-    }
-
-    /// Parameter rows follow the same flag as in horizontal flow, and cost the
-    /// same rows.
-    #[test]
-    fn vertical_height_follows_the_parameter_rows_flag() {
-        let node = ported(1, 1, 1)
-            .with_param("a", ParameterValue::Float(1.0))
-            .with_param("b", ParameterValue::Float(2.0));
-        let (_, shown) = compute_node_size(&node, 1.0, true, V);
-        let (_, hidden) = compute_node_size(&node, 1.0, false, V);
-        assert_eq!(shown - hidden, 6.0 + 2.0 * BASE_PARAM_ROW_H);
     }
 
     /// `Step` jogs across halfway along the flow axis: horizontal runs along x
@@ -2320,31 +2417,25 @@ mod tests {
             )
             .unwrap();
         let vp = viewport();
-        let sizes = sizes_of(&graph, 1.0, V);
         let src = graph.node(NodeId::new(1)).unwrap();
         let tgt = graph.node(NodeId::new(2)).unwrap();
-        let (sx, sy) = port_screen_center(src, (0.0, 0.0), sizes[&src.id], 1.0, V, true, 0);
-        let (tx, ty) = port_screen_center(tgt, (200.0, 200.0), sizes[&tgt.id], 1.0, V, false, 0);
-        let hit = |style, x: f32, y: f32| {
-            edge_at_local_pos(&graph, &vp, x, y, 3.0, style, V, &sizes).is_some()
-        };
+        let (sx, sy) = port_screen_center(src, (0.0, 0.0), 1.0, V, true, 0);
+        let (tx, ty) = port_screen_center(tgt, (200.0, 200.0), 1.0, V, false, 0);
+        let hit =
+            |style, x: f32, y: f32| edge_at_local_pos(&graph, &vp, x, y, 3.0, style, V).is_some();
+        use super::super::EdgeStyle::{Bezier, Step, Straight};
 
         // Step: down from the source, across at mid-height, down into the target.
         let mid_y = (sy + ty) / 2.0;
-        assert!(hit(super::super::EdgeStyle::Step, sx, (sy + mid_y) / 2.0));
-        assert!(hit(super::super::EdgeStyle::Step, (sx + tx) / 2.0, mid_y));
-        assert!(hit(super::super::EdgeStyle::Step, tx, (mid_y + ty) / 2.0));
+        assert!(hit(Step, sx, (sy + mid_y) / 2.0));
+        assert!(hit(Step, (sx + tx) / 2.0, mid_y));
+        assert!(hit(Step, tx, (mid_y + ty) / 2.0));
         // The horizontal route's first leg runs along y = sy; vertical does not.
-        assert!(!hit(super::super::EdgeStyle::Step, (sx + tx) / 2.0, sy));
+        assert!(!hit(Step, (sx + tx) / 2.0, sy));
 
-        // Straight and Bezier both pass through the endpoints and the middle.
-        assert!(hit(
-            super::super::EdgeStyle::Straight,
-            (sx + tx) / 2.0,
-            mid_y
-        ));
-        assert!(hit(super::super::EdgeStyle::Bezier, sx, sy));
-        assert!(hit(super::super::EdgeStyle::Bezier, (sx + tx) / 2.0, mid_y));
-        assert!(!hit(super::super::EdgeStyle::Bezier, sx + 60.0, sy));
+        assert!(hit(Straight, (sx + tx) / 2.0, mid_y));
+        assert!(hit(Bezier, sx, sy));
+        assert!(hit(Bezier, (sx + tx) / 2.0, mid_y));
+        assert!(!hit(Bezier, sx + 60.0, sy));
     }
 }

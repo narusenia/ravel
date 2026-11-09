@@ -219,8 +219,10 @@ Phase 0 の結果しだいで縮小・中止する。以下は「実施」判断
   （下限 256 B）で、バイト数そのままではない。散布の個数はパラメータで
   変わるので、完全一致キーだと編集のたびに再確保になる。代償は最大 2 倍の
   余白で、**論理長は列側（`GpuColumn::len`）が持つ**。アイドル台帳は
-  `TexturePool` / staging と同じ `LruBudget`、`with_shared_budget` で VRAM
-  tier に載る。`TexturePool` との共通化は `LruBudget` までに留めた —
+  `TexturePool` / staging と同じ `LruBudget`。VRAM tier へは
+  `VramAllowance`（予算 + 共有プールのアイドル合計）経由で載り、
+  `TexturePool` と `BufferPool` を同じ `VramAllowance` から作ると、両者の
+  アイドルの合計が headroom に収まる（独立に読むと最大 2 倍保持する）。`TexturePool` との共通化は `LruBudget` までに留めた —
   `TexturePool` は pending-use 判定と bind group 退避を持つ別物で、
   共通の `Pool<K, T>` に畳むとその 2 つが型引数に漏れる。
 - **長寿命の再利用**: 借りた `PooledBuffer` を保持し続ければ、それが
@@ -254,11 +256,16 @@ Phase 0 の結果しだいで縮小・中止する。以下は「実施」判断
   （`uploads` / `readbacks`）に列ごとに 1 回ずつ計上する。借用で増えないことは
   `ravel-nodes` の `a_cpu_geometry_uploads_once_and_a_resident_one_is_only_borrowed`
   が固定している。
+- **pending-use**: 池のバッファを dispatch バッチが使っている間は
+  `acquire` が飛ばす（`GpuContext::mark_buffer_in_flight` が印、`flush` が
+  消す）。上書き（`upload_buffer`）と書込み済みバッファの読み戻しは先に
+  flush する。バインドする単位 2 / 5 は印を付けるだけでよい。
 - **範囲外のまま残したもの**: 池のバッファを `dispatch_compute` /
-  ラスタライザへバインドする経路と、dispatch バッチの pending-use による
-  バッファ再利用の抑止（テクスチャにある `acquire` のスキップ）は、最初に
-  バインドする単位 2 / 5 が足す。アプリ側での `BufferPool` 生成
-  （`TexturePool` と同じ共有予算に載せる）も同じ。
+  ラスタライザへバインドする経路と、アプリ側での `BufferPool` 生成
+  （`TexturePool` と同じ `VramAllowance` から作る）は、最初の消費者である
+  単位 2 / 5 が足す。
+- ビッグエンディアン対象は `compile_error!` で拒否（テクスチャ転送と同じく
+  ネイティブ順のキャストで GPU に渡すため）。
 
 ### 単位 2: フィールドの WGSL 評価
 

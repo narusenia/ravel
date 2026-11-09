@@ -2557,8 +2557,16 @@ so `GpuColumn::len()` is the element count. In `ravel-nodes`,
 `gpu_util::ensure_gpu_geometry(ctx, &pool, &dyn NodeData) -> GpuGeometryInput`
 (`Resident` borrows with no transfer, `Uploaded` owns buffers that return to
 the pool on drop) and `ensure_cpu_geometry` mirror `ensure_gpu` /
-`ensure_cpu`. Nothing binds a pooled buffer to `dispatch_compute` yet, and no
-production site builds a `BufferPool`; the first consumer adds both.
+`ensure_cpu`. A pass that binds a pooled buffer calls
+`GpuContext::mark_buffer_in_flight(&PooledBuffer, written)`: until the batch
+is submitted `BufferPool::acquire` skips that buffer, `upload_buffer` flushes
+before overwriting it and a readback flushes before copying a written one
+(the buffer counterpart of the texture pending-use rules). Nothing binds a
+pooled buffer to `dispatch_compute` yet, and no production site builds a
+`BufferPool`; the first consumer adds both, building it with
+`BufferPool::with_vram_allowance` over the **same** `VramAllowance` as its
+`TexturePool` (`TexturePool::with_vram_allowance`) so idle textures and idle
+buffers together stay inside the budget's headroom.
 A GPU node's per-frame work is one
 `GpuContext::dispatch_compute(&ComputeDispatch { pipeline, inputs, output,
 uniform, width, height, .. })` call: inputs are `TextureBinding`s from

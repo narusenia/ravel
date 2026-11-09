@@ -397,6 +397,14 @@ precomp で他コンプに置かれたコンプの編集は、**それを含む�
 **別の仕事を指すので吸収しない**（ノード列をそのまま運ぶ。落とすと
 coalesce された `Params` が求めたプロセッサ再構築が失われる）。
 
+**ステートフル評価**（REQ-CORE-011）は、前フレームの結果に依存するノード
+（パーティクル等）を、ノード結果キャッシュとは**別の** sim トラック
+（`NodeKey` → フレーム連続区間）で持つ。トラックは単一予算の保護枠
+（`CacheKind::Sim`）に載り、通常のフレームの圧力では退避されない。長い前方
+ジャンプは最後に届いた状態を暫定として先に返し（`EvalUpdate::provisional`）、
+充填は評価ワーカー上で続けて、新しい要求が来たら諦める。設計と制約は
+[`procedural-geometry.md`](procedural-geometry.md#ステートフル評価sim-キャッシュ)。
+
 **先読み（投機充填）** は、評価ワーカーが一定時間なにも要求されていない
 ときにプレイヘッド前方のフレームを埋める。投機は対話要求とは別のキューに
 入り、対話要求が来たら残りは破棄され、**すでに評価中のフレームも次の
@@ -456,11 +464,12 @@ coalesce された `Params` が求めたプロセッサ再構築が失われる�
 
 | 受け入れ地点 | 識別子 | 前提を変える側がすること |
 |---|---|---|
-| Viewer への publish（`ProjectState::on_eval_update`） | 評価の世代と fence（`published_generation`） | 結果を**誤り**にする変更（コンプ切替、表示チャンネル、ピクセル読み取り、プロジェクトの差し替え、素材の変更）は再要求の前に `fence_in_flight_results` を呼ぶ |
-| 出力段フレームキャッシュへの insert（ワーカー） | insert epoch（`InsertTicket`。要求の取り出し時に取る） | `SharedFrameCache::clear` / `invalidate_comp` が epoch を進める（空でも） |
+| Viewer への publish（`ProjectState::on_eval_update`） | 評価の世代と fence（`published_generation`）。ステートフルノードの暫定更新があるので**（世代, 暫定か）の組**（`published_provisional`）で、同じ世代の確定値は暫定値を置き換え、逆はしない | 結果を**誤り**にする変更（コンプ切替、表示チャンネル、ピクセル読み取り、プロジェクトの差し替え、素材の変更）は再要求の前に `fence_in_flight_results` を呼ぶ |
+| 出力段フレームキャッシュへの insert（ワーカー） | insert epoch（`InsertTicket`。要求の取り出し時に取る） | `SharedFrameCache::clear` / `invalidate_comp` が epoch を進める（空でも）。暫定（`EvalUpdate::provisional`）の絵は別規則で、**そもそも insert しない**（そのフレームの絵ではない）。確定した絵だけが入る |
 | Timeline のキャッシュ帯（`publish_cache_band`） | 帯の鍵（frame cache version、コンプ、`viewer_eval_context`） | 何もしない。入力が変われば鍵が変わる |
 | 共有デコードキャッシュのヒット（`ravel-media` `FrameKey`）とリーダー | 素材の版（`MediaAssetEntry::content_revision`、セッション限り） | 素材の監視（`media/watch.rs`）が変更を検知したら `rederive` で版を進める。パスをキーにした音声デコードキャッシュとサムネイルも同時に捨てる |
 | ライブ編集の削除の承認（`live_edit::handle`） | 確認を出した時点のプロジェクトの世代（`ProjectState::generation`）と文書 | 何もしない。新規・読み込みで世代が進み、編集で文書が変わる。不一致なら `document-changed` を返す |
+| sim トラックの状態の再利用（`Evaluator::sim_state_at`、`eval/sim.rs`） | 上流サブグラフの構造・パラメータ・fps・コンプ基準のハッシュ（`SimTrack` の `Premise::hash`） | 何もしない。引くたびに現在値と比べ、不一致ならトラックを全破棄して充填し直す。処理系の差し替え・素材の中身は上流ハッシュに映らないので `invalidate_node` / `invalidate_all` が落とし、ノード・レイヤーの削除はスコープ剪定（`sim_prune_scope`）が解放する |
 
 照合はすべて「一致しなければ捨てる」に倒す。有効な結果を捨てた損失は
 再評価 1 回、古い結果を受け入れた損失は次の無効化まで誤った絵が残ることだから。

@@ -70,8 +70,13 @@ SimTrack { start_frame: u64, states: Vec<Arc<dyn Any + Send + Sync>>, input_hash
 **保護枠**（既定で総額の 25%、設定可変）を持ち、通常のフレームキャッシュの
 圧力では削られない。枠を超える長期保持は暗黙 LRU で守るのではなく、
 将来の明示キャッシュノードに寄せる（同計画の「将来方向」）。
-`SimTrack` 内部の退避は「区間の先頭側を捨てない」という sim 固有の規則に
-なる（再生の先頭が要るため）。
+`SimTrack` 内部の保持は**チェックポイント**で行う: トラックが保護枠
+（トラック 1 本あたりの上限）を超えたら、保持する状態を「開始フレーム + 最新
+フレーム + `stride` の倍数のフレーム」に間引き、収まるまで `stride` を倍にする。
+保持されていないフレームの pull は、直前の保持フレームから `step` で
+やり直す（`stride` 未満の step）。規則はフレーム番号と予算だけの関数なので
+状態は変わらず、近さだけが変わる。GPU 常駐の sim（PART-6）が VRAM 層で使う
+のも同じ規則。
 
 「同一ノードの複数結果を保持できない」という制約そのものは
 `evaluation-scope-plan.md` が `PathSegment` の拡張で解く。
@@ -170,3 +175,117 @@ spec の制約どおり。sim の下流に sim を繋いだ場合は評価エラ
 - **GPU でのシミュレーション**。CPU SoA（rayon）のみ
   （`procedural-geometry.md` の GPU 方針に従う）。
 - **グラフ内反復**（REQ-CORE-013）。spec が v1 で採用しないと明記。
+
+## 実装メモ
+
+計画の起草（2026-07-27）後にコードが動いたので、計画が引いている位置は
+次に読み替える（行番号は腐るので関数名で書く）。
+
+- ノード結果キャッシュ: `eval.rs:457` の `HashMap` ではなく、`eval.rs` の
+  `cache_store` モジュールの `CacheStore`（`Evaluator::store`）。
+- scope 無効化: `eval.rs:490-511` ではなく `Evaluator::invalidate_scope` /
+  `drop_scope_owner_caches` / `prune_scope_state`。`PathSegment` のスコープ
+  次元（SCOPE-1）は実装済みで、sim トラックはその `NodeKey` を共有する。
+- `EvalRequest` / `EvalUpdate` は `runtime/eval_service.rs`。複数ターゲット化
+  （属性スプレッドシート単位 1）は実装済みで、その上に暫定フラグを足す。
+- バイト予算: `cache_budget.rs` の `CacheKind::Sim`（保護枠 =
+  `sim_reserve_ratio`）が既にあり、sim はそこへ `reserve` する。予算の
+  追加実装は無い。
+
+### 単位 1（SIM-1）
+
+- 実装は `crates/ravel-core/src/eval/sim.rs`（`eval.rs` の子モジュール。
+  `Evaluator` の private フィールドと `NodeKey` をそのまま使うため）。
+- `StatefulProcessor`（`initial` / `step` / `output` / `byte_size`）。計画の
+  スケッチに **`output`** を足した。型消去アダプタは状態を `NodeData` へ
+  戻す手段が要るため。`SimStepper`（型消去）→ `StatefulAdapter<P>`
+  （`NodeProcessor`。`is_time_dependent` と `pulls_inputs_itself` は真）。
+  登録は `stateful_processor(p)`（`ProcessorRegistry` からも使える）。
+- `SimCache`（`NodeKey → SimTrack`）。`Evaluator::sim_state_at`
+  （`EvalScope::sim_state` の実装）が `fill_sim_track` で
+  `[last+1, t]` を埋める。1 フレームごとに状態を格納するので、失敗や中断で
+  もそこまでの充填は残る。
+- 入力とパラメータは**要求フレームではなく各 step のフレーム**で引く
+  （`sim_inputs_at`。入力は `TimeShift(node, frame)` スコープ、パラメータは
+  `resolve_channel_params` + `materialize_params` + `parameter_overlays`）。
+  そうしないと状態が「どのフレームで要求されたか」に依存する。
+  `parameter_overlays` は `eval_node` のパラメータポート処理を括り出した
+  もので、両者が同じ規則を読む。`pull_input_at` は `evaluate_input_at` の
+  本体（`pull_log` へ記録するかを選べる）。sim は記録しない — 記録すると
+  キャッシュヒットのたびに全フレーム分の再引きが走る。
+- バイト予算: トラック 1 本 = 予約 1 件で、伸びるたびに取り直す。追い出しは
+  **トラック単位**（`SimCache::drop_evicted`）で、sim 同士でのみ起こる。
+  トラック内の保持はチェックポイント（単位 5 の項）。
+- 多段: `Evaluator::sim_active` が立っている間に別の sim が始まれば
+  `EvalError::ProcessFailed`（下流に sim を繋いだ）。
+- `register` / `invalidate_node` は該当ノードのトラックを落とし、
+  `invalidate_all` / `reset` は全部落とす。
+
+### 単位 2（SIM-2）
+
+- 無効化の権威は**引く時点の前提照合**（`SimCache::discard_if_stale`）。
+  `Evaluator::sim_premise_hash` が上流サブグラフ（配線と `NodeOutput`
+  バインディングで届くノード）の構造・種別・bypass・ポート・全パラメータ
+  （キーフレーム・式を含む）と fps・コンプ基準をハッシュする。位置・ラベル・
+  色・z と上流でないノードは入れない。`Premise` が直近のグラフを
+  `Graph::ptr_eq` で覚え、同じグラフなら再計算しない。
+- 解像度・品質はハッシュに入れない（プレビュー ↔ 最終の切替で全破棄に
+  なるため）。`step` はこれらを読まない契約（`StatefulProcessor` の doc）。
+- scope 統合: トラックは `invalidate_scope` では**落とさない**（同じレイヤー
+  ネットワーク内の無関係な編集で落ちるため）。落とす経路は
+  `sim_prune_layer`（`set_document` が、ネットワークが変わったレイヤーと
+  削除されたレイヤーに対して呼ぶ。ノードがもう無いトラックだけを解放）と
+  `drop_sim_under`（shift / iteration スコープの退役。`PathId` の再発行前に
+  必須）。シェル側の編集（`layer_shell_changed`）はトラックに触れない。
+- トラックの鍵は `TimeShift` を除いたスコープ（`sim_scope`）。状態は
+  ノード・フレーム・上流の前提の関数で、シフトは見るフレームを変えるだけなので
+  シフトされた視点は 1 本のトラックを共有する。`Layer` / `Subnet` / `Comp` /
+  `Iteration` は上流そのものを変えるので別トラックのまま。
+
+### 単位 3（SIM-3）
+
+- 評価器側（`eval/sim.rs`）: `Evaluator::set_sim_provisional(Some(n))` を
+  立てると、`sim_state_or_provisional` が n フレームを超える前方ジャンプを
+  「トラックの最後の状態」で答え（`ProvisionalSim` を記録）、トラックが空なら
+  先に開始フレームだけ充填する。暫定で答えたノードと下流はノードキャッシュに
+  古いフレームの値を入れてしまうので、`settle_provisional` が
+  `mark_dirty_at` で落とす（確定の pull が実状態で再計算するため）。
+  `set_sim_cancel` は充填のフレーム間で問い合わせる中断判定で、中断時は
+  `EvalError::Cancelled`、計算済みのフレームはトラックに残る。
+- サービス側（`runtime/eval_service.rs`）: `EvalServiceConfig::sim_jump_frames`
+  （既定 `None` = 無効）。ワーカーは対象の評価を `run_targets` に括り出し、
+  暫定が出たら `EvalUpdate { provisional: true }` を先に publish →
+  `settle_provisional` → 新しい要求が来たら中断する判定を付けて同じ要求を
+  もう一度 `run_targets` で評価（充填の続き）→ 確定値を同じ世代で publish。
+  充填中に新しい要求が来たら確定値は publish せず、次の要求へ進む。
+  出力段フレームキャッシュへの insert は確定した pass の後（`Pass::finished`）
+  にだけ行うので、暫定の絵は入らない。投機（先読み）は暫定を使わない。
+- 「評価スレッドプール」: 充填は `ravel-eval-service`（評価ワーカー、UI と別
+  スレッド）上で走る。`EvalPool`（rayon）はサービスから使われていないので、
+  新たにプールへ載せ替えてはいない。
+- 消費側（`ravel-app` の `ProjectState`）: fence は（世代, 暫定か）の組。同じ
+  世代の確定値は暫定値を置き換え、逆はしない。世代を代入する fence
+  （`fence_at`）は暫定状態を消すので、fence された要求の確定値は通らない。
+  ビューアのサービスは `viewer_eval_config` で `sim_jump_frames = Some(24)`。
+  暫定フレームは通常のフレームと同じ経路で表示し、専用の表示は足していない
+  （既存のパターンが無い）。
+
+### 単位 4（SIM-4）
+
+- `procedural-geometry.md` の sim 節と既存コードへの影響表、`REQ-CORE.md` の
+  REQ-CORE-011 / REQ-CORE-006 の受入条件、`architecture.md`（キャッシュ節と
+  前提照合表）、`agent-api-reference.md`、`docs/dev/add-node.md` を実装に合わせた。
+
+### 単位 5（追補: チェックポイント・鍵・ハッシュ・アプリ配線）
+
+- `SimTrack` は保持フレームだけの疎な列（`Vec<(frame, Held)>`、覆う範囲は
+  `end` で持つ）と `stride` を持つ。1 件の課金は状態のバイト数 + 記帳分
+  （`ENTRY_OVERHEAD`）で、記帳のコストも保護枠に入り、間引きで返る。
+  `push` が前の最新フレームをチェックポイントでなければ捨て、`thin_to(cap)`
+  が `stride` を倍にしながら間引く。`cap` はトラック 1 本あたり
+  `CacheBudget` の sim 保護枠（`sim_reserved`）。予算の無い評価器は間引かない。
+  `SimCache::lookup` が `Hit` / `Thinned { from, state }` / `Beyond` を返し、
+  `Thinned` は `replay_sim_frames` が保存せずに `step` する。
+- 前提ハッシュは `bincode` による `parameters` の構造的な直列化（float は
+  生のビット）で、`Debug` 文字列ではない。範囲は変えていない。
+- 性能: `perf-baseline.md` の「ステートレス評価パスの退行確認」。

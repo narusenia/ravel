@@ -219,6 +219,9 @@ pub(super) struct Premise {
     fps: FrameRate,
     comp_resolution: (u32, u32),
     hash: u64,
+    /// `Evaluator::epoch_clock` when the hash was made: unchanged means no
+    /// node was invalidated since, so the hash cannot have moved on that axis.
+    clock: u64,
     external: Option<ExternalStamp>,
 }
 
@@ -262,8 +265,15 @@ impl Premise {
     /// Whether `hash` was made from `graph`, the frame axes of `ctx` and — when
     /// the upstream reads outside its scope — the external objects `live`
     /// names (`None` when the caller did not look them up).
-    fn describes(&self, graph: &Graph, ctx: &EvalContext, live: Option<&LiveExternal>) -> bool {
-        self.graph.ptr_eq(graph)
+    fn describes(
+        &self,
+        graph: &Graph,
+        ctx: &EvalContext,
+        clock: u64,
+        live: Option<&LiveExternal>,
+    ) -> bool {
+        self.clock == clock
+            && self.graph.ptr_eq(graph)
             && self.fps == ctx.fps
             && self.comp_resolution == ctx.comp_resolution
             && match (&self.external, live) {
@@ -439,10 +449,13 @@ impl SimCache {
         key: &NodeKey,
         graph: &Graph,
         ctx: &EvalContext,
+        clock: u64,
         live: Option<&LiveExternal>,
     ) -> Option<Premise> {
         let premise = &self.tracks.get(key)?.premise;
-        premise.describes(graph, ctx, live).then(|| premise.clone())
+        premise
+            .describes(graph, ctx, clock, live)
+            .then(|| premise.clone())
     }
 
     /// Whether `key`'s track was made from something outside its scope, so a
@@ -680,6 +693,7 @@ impl Evaluator {
             fps: ctx.fps,
             comp_resolution: ctx.comp_resolution,
             hash: hasher.finish(),
+            clock: self.epoch_clock,
             external,
         }
     }
@@ -702,6 +716,22 @@ impl Evaluator {
         LiveExternal {
             document: self.document.clone(),
             producers,
+        }
+    }
+
+    /// Hash when `node` — and every node of a subnet it holds — was last
+    /// invalidated or re-registered (see `Evaluator::node_epochs`).
+    ///
+    /// Only nodes that have an epoch contribute, so an added node nobody has
+    /// invalidated leaves the digest alone.
+    fn hash_epochs(&self, node: &Node, nested: bool, hasher: &mut impl Hasher) {
+        if let Some(epoch) = self.node_epochs.get(&node.id) {
+            (node.id, epoch).hash(hasher);
+        }
+        if let (true, Some(subnet)) = (nested, &node.subnet) {
+            for inner in subnet.nodes() {
+                self.hash_epochs(inner, true, hasher);
+            }
         }
     }
 
@@ -739,6 +769,8 @@ impl Evaluator {
                 // A dangling reference still changes the digest.
                 continue;
             };
+            // A producer's inner network is the sim's own scope, hashed there.
+            self.hash_epochs(reached, !(scope.producer && id == root), hasher);
             if scope.producer && id == root {
                 hash_node_header(reached, hasher);
             } else {
@@ -876,7 +908,10 @@ impl Evaluator {
         // document and the producing scopes are the very objects it was made
         // from (see [`ExternalStamp`]).
         let live = self.sim.has_external(&key).then(|| self.live_external());
-        let premise = match self.sim.known(&key, &graph, ctx, live.as_ref()) {
+        let premise = match self
+            .sim
+            .known(&key, &graph, ctx, self.epoch_clock, live.as_ref())
+        {
             Some(premise) => premise,
             None => self.sim_premise(&graph, node, ctx),
         };
@@ -1800,6 +1835,49 @@ mod tests {
             stale,
             "the seed change must reach the result or this proves nothing"
         );
+    }
+
+    #[test]
+    fn invalidating_or_replacing_an_upstream_node_discards_the_track() {
+        for replace in [false, true] {
+            let counter = Counter::default();
+            let graph = fed_graph();
+            let mut ev = fed_evaluator(&counter);
+            let node = NodeId::new(2);
+            ev.evaluate(&graph, node, &ctx_at(10)).unwrap();
+            assert_eq!(counter.initials.load(Ordering::Relaxed), 1);
+
+            // Nothing in the graph changes: a media reload or a swapped
+            // processor reaches the evaluator only through these.
+            if replace {
+                ev.register(NodeId::new(1), Arc::new(FrameSource));
+            } else {
+                ev.invalidate_node(NodeId::new(1));
+            }
+            ev.evaluate(&graph, node, &ctx_at(12)).unwrap();
+
+            assert_eq!(
+                counter.initials.load(Ordering::Relaxed),
+                2,
+                "the track outlived an invalidation upstream (replace: {replace})"
+            );
+        }
+    }
+
+    #[test]
+    fn invalidating_an_unrelated_node_keeps_the_track() {
+        let counter = Counter::default();
+        let graph = fed_graph();
+        let mut ev = fed_evaluator(&counter);
+        let node = NodeId::new(2);
+        ev.evaluate(&graph, node, &ctx_at(10)).unwrap();
+
+        ev.invalidate_node(NodeId::new(9));
+        ev.register(NodeId::new(9), Arc::new(FrameSource));
+        ev.evaluate(&graph, node, &ctx_at(12)).unwrap();
+
+        assert_eq!(counter.initials.load(Ordering::Relaxed), 1);
+        assert_eq!(counter.steps.load(Ordering::Relaxed), 12);
     }
 
     #[test]

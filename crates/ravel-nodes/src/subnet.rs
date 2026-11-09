@@ -762,4 +762,22 @@ mod tests {
             "an unrelated edit restarted the simulation"
         );
     }
+
+    #[test]
+    fn invalidating_what_feeds_a_pin_discards_the_inner_sims_track() {
+        let counter = Accumulate::default();
+        let graph = animated_pin_graph("test.sim");
+        let mut ev = pin_evaluator(
+            stateful_processor(counter.clone()),
+            &graph,
+            Evaluator::new(),
+        );
+        assert_eq!(starts(&mut ev, &graph, &counter, 6), 1);
+
+        // The pin's source node is invalidated (a media reload) with the
+        // graph untouched; only the producing scope's epochs can tell.
+        ev.invalidate_node(NodeId::new(SOURCE));
+
+        assert_eq!(starts(&mut ev, &graph, &counter, 8), 2);
+    }
 }

@@ -2145,6 +2145,14 @@ pub struct Evaluator {
     /// Simulation state of the stateful nodes (REQ-CORE-011), apart from
     /// `store` and keyed by the same [`NodeKey`] (see [`sim`]).
     sim: SimCache,
+    /// Per node, the value of `epoch_clock` when it was last invalidated or
+    /// re-registered. A sim's premise hashes the epochs of the nodes it reads,
+    /// because a swapped processor or a reloaded media file changes a state
+    /// without changing anything the structural hash can see.
+    node_epochs: HashMap<NodeId, u64>,
+    /// Bumped by every entry written to `node_epochs`; a premise records it so
+    /// the fast path can tell nothing was invalidated since.
+    epoch_clock: u64,
     /// Whether a stateful node is filling its track right now. A second one
     /// starting inside the fill is a simulation downstream of a simulation,
     /// which v1 refuses.
@@ -2435,6 +2443,8 @@ impl Evaluator {
             self.drop_scope_owner_caches(path);
         }
         self.pull_log.retain(|key, _| key.node != node);
+        self.epoch_clock += 1;
+        self.node_epochs.insert(node, self.epoch_clock);
         // A replaced or edited stateful node starts its simulation over: its
         // states were made by the processor and parameters it no longer has.
         self.sim.remove_node(node);

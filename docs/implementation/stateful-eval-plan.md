@@ -70,8 +70,13 @@ SimTrack { start_frame: u64, states: Vec<Arc<dyn Any + Send + Sync>>, input_hash
 **保護枠**（既定で総額の 25%、設定可変）を持ち、通常のフレームキャッシュの
 圧力では削られない。枠を超える長期保持は暗黙 LRU で守るのではなく、
 将来の明示キャッシュノードに寄せる（同計画の「将来方向」）。
-`SimTrack` 内部の退避は「区間の先頭側を捨てない」という sim 固有の規則に
-なる（再生の先頭が要るため）。
+`SimTrack` 内部の保持は**チェックポイント**で行う: トラックが保護枠
+（トラック 1 本あたりの上限）を超えたら、保持する状態を「開始フレーム + 最新
+フレーム + `stride` の倍数のフレーム」に間引き、収まるまで `stride` を倍にする。
+保持されていないフレームの pull は、直前の保持フレームから `step` で
+やり直す（`stride` 未満の step）。規則はフレーム番号と予算だけの関数なので
+状態は変わらず、近さだけが変わる。GPU 常駐の sim（PART-6）が VRAM 層で使う
+のも同じ規則。
 
 「同一ノードの複数結果を保持できない」という制約そのものは
 `evaluation-scope-plan.md` が `PathSegment` の拡張で解く。
@@ -210,7 +215,7 @@ spec の制約どおり。sim の下流に sim を繋いだ場合は評価エラ
   キャッシュヒットのたびに全フレーム分の再引きが走る。
 - バイト予算: トラック 1 本 = 予約 1 件で、伸びるたびに取り直す。追い出しは
   **トラック単位**（`SimCache::drop_evicted`）で、sim 同士でのみ起こる。
-  トラック内の先頭保持は、1 本が階層全体を超える場合を含め v1 では扱わない。
+  トラック内の保持はチェックポイント（単位 5 の項）。
 - 多段: `Evaluator::sim_active` が立っている間に別の sim が始まれば
   `EvalError::ProcessFailed`（下流に sim を繋いだ）。
 - `register` / `invalidate_node` は該当ノードのトラックを落とし、
@@ -232,8 +237,10 @@ spec の制約どおり。sim の下流に sim を繋いだ場合は評価エラ
   削除されたレイヤーに対して呼ぶ。ノードがもう無いトラックだけを解放）と
   `drop_sim_under`（shift / iteration スコープの退役。`PathId` の再発行前に
   必須）。シェル側の編集（`layer_shell_changed`）はトラックに触れない。
-- 既知の制約: `TimeShift` スコープの内側にある sim はスコープごとに別
-  トラックになる。
+- トラックの鍵は `TimeShift` を除いたスコープ（`sim_scope`）。状態は
+  ノード・フレーム・上流の前提の関数で、シフトは見るフレームを変えるだけなので
+  シフトされた視点は 1 本のトラックを共有する。`Layer` / `Subnet` / `Comp` /
+  `Iteration` は上流そのものを変えるので別トラックのまま。
 
 ### 単位 3（SIM-3）
 
@@ -256,14 +263,27 @@ spec の制約どおり。sim の下流に sim を繋いだ場合は評価エラ
 - 「評価スレッドプール」: 充填は `ravel-eval-service`（評価ワーカー、UI と別
   スレッド）上で走る。`EvalPool`（rayon）はサービスから使われていないので、
   新たにプールへ載せ替えてはいない。
-- 消費側の注意: `ProjectState::on_eval_update` は `generation <=
-  published_generation` を捨てるため、暫定更新が fence を進めると同じ世代の
-  確定値が捨てられる。アプリは `sim_jump_frames` を `None` のままにしており
-  （`spawn_viewer_eval_service`）、暫定フラグの扱いは最初のステートフルノードを
-  載せる単位（PART-1）で入れる。
+- 消費側（`ravel-app` の `ProjectState`）: fence は（世代, 暫定か）の組。同じ
+  世代の確定値は暫定値を置き換え、逆はしない。世代を代入する fence
+  （`fence_at`）は暫定状態を消すので、fence された要求の確定値は通らない。
+  ビューアのサービスは `viewer_eval_config` で `sim_jump_frames = Some(24)`。
+  暫定フレームは通常のフレームと同じ経路で表示し、専用の表示は足していない
+  （既存のパターンが無い）。
 
 ### 単位 4（SIM-4）
 
 - `procedural-geometry.md` の sim 節と既存コードへの影響表、`REQ-CORE.md` の
   REQ-CORE-011 / REQ-CORE-006 の受入条件、`architecture.md`（キャッシュ節と
   前提照合表）、`agent-api-reference.md`、`docs/dev/add-node.md` を実装に合わせた。
+
+### 単位 5（追補: チェックポイント・鍵・ハッシュ・アプリ配線）
+
+- `SimTrack` はフレームごとのスロット（`Option<Held>`）と `stride` を持つ。
+  `push` が前の最新フレームをチェックポイントでなければ捨て、`thin_to(cap)`
+  が `stride` を倍にしながら間引く。`cap` はトラック 1 本あたり
+  `CacheBudget` の sim 保護枠（`sim_reserved`）。予算の無い評価器は間引かない。
+  `SimCache::lookup` が `Hit` / `Thinned { from, state }` / `Beyond` を返し、
+  `Thinned` は `replay_sim_frames` が保存せずに `step` する。
+- 前提ハッシュは `bincode` による `parameters` の構造的な直列化（float は
+  生のビット）で、`Debug` 文字列ではない。範囲は変えていない。
+- 性能: `perf-baseline.md` の「ステートレス評価パスの退行確認」。

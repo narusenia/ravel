@@ -457,7 +457,10 @@ SimInputs { node: &Node, inputs: &[Option<Arc<dyn NodeData>>], params: &Resolved
     // no rand; no resolution or quality — they are not part of a track's premise)
 stateful_processor(p) -> Arc<dyn NodeProcessor>
 Evaluator
-    .sim_cached_frames(&[PathSegment], NodeId) -> Option<Range<u64>>  // the track
+    .sim_cached_frames(&[PathSegment], NodeId) -> Option<Range<u64>>  // frames the
+        // track COVERS; .sim_stored_states(..) = how many it stores (it thins to
+        // checkpoints past its share; a thinned frame re-steps < stride frames)
+        // Keyed by the scope minus TimeShift segments
     .sim_track_count() -> usize
     .set_sim_provisional(Option<u64>)   // jumps longer than N answer with the
         // last held state; must be followed by settle_provisional()
@@ -2120,8 +2123,9 @@ EvalServiceConfig { budget: Option<SharedCacheBudget>,
     // answered at once with EvalUpdate { provisional: true } and confirmed
     // (same generation, provisional: false) after the fill on the worker; a
     // newer request drops the fill's answer. None (default) = every update is
-    // final. A consumer must not let a provisional update advance its
-    // generation fence, or the confirmed one is dropped as stale
+    // final. A consumer fences on (generation, provisional): the final
+    // answer of a generation replaces its provisional one, never the reverse
+    // (ravel-app: ProjectState::fence_at clears the provisional state)
     // generation is where `request` starts counting: 0 for a session's first
     // worker, the retiring worker's latest_generation() for one replacing it
     // on a new GPU device epoch (GPULOSS-2). A replacement restarting at 0

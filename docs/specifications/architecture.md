@@ -464,7 +464,7 @@ coalesce された `Params` が求めたプロセッサ再構築が失われる�
 
 | 受け入れ地点 | 識別子 | 前提を変える側がすること |
 |---|---|---|
-| Viewer への publish（`ProjectState::on_eval_update`） | 評価の世代と fence（`published_generation`） | 結果を**誤り**にする変更（コンプ切替、表示チャンネル、ピクセル読み取り、プロジェクトの差し替え、素材の変更）は再要求の前に `fence_in_flight_results` を呼ぶ |
+| Viewer への publish（`ProjectState::on_eval_update`） | 評価の世代と fence（`published_generation`）。ステートフルノードの暫定更新があるので**（世代, 暫定か）の組**（`published_provisional`）で、同じ世代の確定値は暫定値を置き換え、逆はしない | 結果を**誤り**にする変更（コンプ切替、表示チャンネル、ピクセル読み取り、プロジェクトの差し替え、素材の変更）は再要求の前に `fence_in_flight_results` を呼ぶ |
 | 出力段フレームキャッシュへの insert（ワーカー） | insert epoch（`InsertTicket`。要求の取り出し時に取る） | `SharedFrameCache::clear` / `invalidate_comp` が epoch を進める（空でも）。暫定（`EvalUpdate::provisional`）の絵は別規則で、**そもそも insert しない**（そのフレームの絵ではない）。確定した絵だけが入る |
 | Timeline のキャッシュ帯（`publish_cache_band`） | 帯の鍵（frame cache version、コンプ、`viewer_eval_context`） | 何もしない。入力が変われば鍵が変わる |
 | 共有デコードキャッシュのヒット（`ravel-media` `FrameKey`）とリーダー | 素材の版（`MediaAssetEntry::content_revision`、セッション限り） | 素材の監視（`media/watch.rs`）が変更を検知したら `rederive` で版を進める。パスをキーにした音声デコードキャッシュとサムネイルも同時に捨てる |

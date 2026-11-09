@@ -3604,7 +3604,10 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   are the only writers. `painting::paint_port_label` draws the name tag a
   vertical node shows on port hover and at a dragged wire's snapped target.
 - Toolbar (`NGR-9`): `NodeEditorPanel::build_toolbar` renders flow direction,
-  edge style, align, parameter values and fit. Each button's `on_click` is a
+  edge style, align, parameter values and fit as icon-only buttons (tooltip +
+  accessibility label each; the stateful two pick their glyph from
+  `toolbar_flow_face` / `toolbar_edge_face`; `RavelIcon::{FlowHorizontal,
+  FlowVertical, AlignNodes, ParamValues}` were added for it). Each button's `on_click` is a
   plain closure (not `cx.listener`, which would hold the panel mid-update)
   that calls `focus_handle.dispatch_action(command_action(cmd))`, so the
   Action takes the same route a key or menu item does.

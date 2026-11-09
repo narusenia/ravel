@@ -656,6 +656,39 @@ pub struct NodeEditorPanel {
     settings_sub: Subscription,
 }
 
+/// The toolbar glyph and tooltip for the flow direction in force — the glyph
+/// shows the current direction, the tooltip names it.
+fn toolbar_flow_face(flow: FlowDirection) -> (RavelIcon, String) {
+    match flow {
+        FlowDirection::Horizontal => (
+            RavelIcon::FlowHorizontal,
+            t!("panel.node_graph_menu.flow_direction_horizontal"),
+        ),
+        FlowDirection::Vertical => (
+            RavelIcon::FlowVertical,
+            t!("panel.node_graph_menu.flow_direction_vertical"),
+        ),
+    }
+}
+
+/// The same for the edge style.
+fn toolbar_edge_face(style: EdgeStyle) -> (RavelIcon, String) {
+    match style {
+        EdgeStyle::Bezier => (
+            RavelIcon::InterpolationBezier,
+            t!("panel.node_graph_menu.edge_style_bezier"),
+        ),
+        EdgeStyle::Straight => (
+            RavelIcon::InterpolationLinear,
+            t!("panel.node_graph_menu.edge_style_straight"),
+        ),
+        EdgeStyle::Step => (
+            RavelIcon::InterpolationStep,
+            t!("panel.node_graph_menu.edge_style_step"),
+        ),
+    }
+}
+
 impl NodeEditorPanel {
     pub fn new(
         instance: ravel_ui::layout::PanelInstanceId,
@@ -3437,17 +3470,23 @@ impl NodeEditorPanel {
                 );
             }
         };
-        let flow_label = match self.flow_direction {
-            FlowDirection::Horizontal => "panel.node_graph_menu.flow_direction_horizontal",
-            FlowDirection::Vertical => "panel.node_graph_menu.flow_direction_vertical",
-        };
-        let edge_label = match self.edge_style {
-            EdgeStyle::Bezier => "panel.node_graph_menu.edge_style_bezier",
-            EdgeStyle::Straight => "panel.node_graph_menu.edge_style_straight",
-            EdgeStyle::Step => "panel.node_graph_menu.edge_style_step",
-        };
+        let (flow_icon, flow_label) = toolbar_flow_face(self.flow_direction);
+        let (edge_icon, edge_label) = toolbar_edge_face(self.edge_style);
         // Rule 6: with nothing drawn there is nothing to align or fit.
         let has_nodes = self.graph.nodes().any(|n| !n.metadata.synthetic);
+        // Icon-only buttons: the tooltip names the *current* value for the
+        // stateful ones, and doubles as the accessibility label (rule 7 — a
+        // glyph alone does not say what it does).
+        let icon_button = |id: &'static str, icon: RavelIcon, label: SharedString| {
+            Button::new(id)
+                // Test hook for `VisualTestContext::debug_bounds`.
+                .debug_selector(|| id.into())
+                .compact()
+                .ghost()
+                .icon(Icon::new(icon))
+                .tooltip(label.clone())
+                .accessibility_label(label)
+        };
         div()
             .flex()
             .flex_wrap()
@@ -3459,60 +3498,39 @@ impl NodeEditorPanel {
             .border_b_1()
             .border_color(cx.tokens().colors.border)
             .child(
-                Button::new("node-editor-flow-direction")
-                    // Test hook for `VisualTestContext::debug_bounds`.
-                    .debug_selector(|| "node-editor-flow-direction".into())
-                    .compact()
-                    .ghost()
-                    .label(SharedString::from(t!(flow_label)))
-                    .tooltip(t!(CommandId::ViewToggleNodeFlowDirection.label_key()))
+                icon_button("node-editor-flow-direction", flow_icon, flow_label.into())
                     .on_click(dispatch(CommandId::ViewToggleNodeFlowDirection)),
             )
             .child(
-                Button::new("node-editor-edge-style")
-                    // Test hook for `VisualTestContext::debug_bounds`.
-                    .debug_selector(|| "node-editor-edge-style".into())
-                    .compact()
-                    .ghost()
-                    .label(SharedString::from(t!(edge_label)))
-                    .tooltip(t!(CommandId::ViewCycleNodeEdgeStyle.label_key()))
+                icon_button("node-editor-edge-style", edge_icon, edge_label.into())
                     .on_click(dispatch(CommandId::ViewCycleNodeEdgeStyle)),
             )
             .child(
-                Button::new("node-editor-auto-layout")
-                    // Test hook for `VisualTestContext::debug_bounds`.
-                    .debug_selector(|| "node-editor-auto-layout".into())
-                    .disabled(!has_nodes)
-                    .compact()
-                    .ghost()
-                    .label(SharedString::from(
-                        t!(CommandId::NodeAutoLayout.label_key()),
-                    ))
-                    .on_click(dispatch(CommandId::NodeAutoLayout)),
+                icon_button(
+                    "node-editor-auto-layout",
+                    RavelIcon::AlignNodes,
+                    t!(CommandId::NodeAutoLayout.label_key()).into(),
+                )
+                .disabled(!has_nodes)
+                .on_click(dispatch(CommandId::NodeAutoLayout)),
             )
             .child(
-                Button::new("node-editor-param-values")
-                    // Test hook for `VisualTestContext::debug_bounds`.
-                    .debug_selector(|| "node-editor-param-values".into())
-                    .compact()
-                    .ghost()
-                    .selected(self.show_param_values)
-                    .label(SharedString::from(t!(
-                        CommandId::ViewToggleNodeParamValues.label_key()
-                    )))
-                    .on_click(dispatch(CommandId::ViewToggleNodeParamValues)),
+                icon_button(
+                    "node-editor-param-values",
+                    RavelIcon::ParamValues,
+                    t!(CommandId::ViewToggleNodeParamValues.label_key()).into(),
+                )
+                .selected(self.show_param_values)
+                .on_click(dispatch(CommandId::ViewToggleNodeParamValues)),
             )
             .child(
-                Button::new("node-editor-fit")
-                    // Test hook for `VisualTestContext::debug_bounds`.
-                    .debug_selector(|| "node-editor-fit".into())
-                    .disabled(!has_nodes)
-                    .compact()
-                    .ghost()
-                    .icon(Icon::new(RavelIcon::ZoomFit))
-                    .tooltip(t!(CommandId::ViewFit.label_key()))
-                    .accessibility_label(t!(CommandId::ViewFit.label_key()))
-                    .on_click(dispatch(CommandId::ViewFit)),
+                icon_button(
+                    "node-editor-fit",
+                    RavelIcon::ZoomFit,
+                    t!(CommandId::ViewFit.label_key()).into(),
+                )
+                .disabled(!has_nodes)
+                .on_click(dispatch(CommandId::ViewFit)),
             )
     }
 
@@ -7666,7 +7684,7 @@ mod tests {
     fn a_narrow_toolbar_wraps_instead_of_dropping_controls(cx: &mut TestAppContext) {
         let (window, _project, _path, _blur) = setup(cx);
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-        visual.simulate_resize(size(px(160.0), px(400.0)));
+        visual.simulate_resize(size(px(60.0), px(400.0)));
         visual.run_until_parked();
         let ys: Vec<_> = [
             "node-editor-flow-direction",
@@ -7688,6 +7706,30 @@ mod tests {
             ys.iter().any(|y| *y > ys[0]),
             "the buttons stayed on one row: {ys:?}"
         );
+    }
+
+    /// The toolbar is icon-only, so the glyph carries the current value and
+    /// the tooltip names it: every state of the two stateful buttons has its
+    /// own glyph and its own non-empty text, in the locale in force.
+    #[test]
+    fn the_stateful_toolbar_buttons_show_their_value_by_glyph_and_tooltip() {
+        let flows: Vec<_> = [FlowDirection::Horizontal, FlowDirection::Vertical]
+            .into_iter()
+            .map(toolbar_flow_face)
+            .collect();
+        let edges: Vec<_> = [EdgeStyle::Bezier, EdgeStyle::Straight, EdgeStyle::Step]
+            .into_iter()
+            .map(toolbar_edge_face)
+            .collect();
+        for faces in [&flows, &edges] {
+            for (i, (icon, tip)) in faces.iter().enumerate() {
+                assert!(!tip.is_empty());
+                for (other_icon, other_tip) in &faces[i + 1..] {
+                    assert_ne!(icon, other_icon, "one glyph for two states");
+                    assert_ne!(tip, other_tip);
+                }
+            }
+        }
     }
 
     /// The toolbar reads the same fields the canvas paints from, so a change

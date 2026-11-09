@@ -52,6 +52,7 @@ use ravel_core::eval::EvalContext;
 use ravel_core::exposed::{
     ExposedBinding, ExposedParameter, ExposedParameterError, ExposedParameters,
 };
+use ravel_core::expression::Span;
 use ravel_core::graph::{Node, ParameterValue};
 use ravel_core::id::{CompId, NodeId};
 use ravel_core::network::{CustomPortType, NetworkError};
@@ -1552,6 +1553,9 @@ struct ExpressionDraft {
     /// Why the draft does not compile, if it does not — recomputed on every
     /// keystroke, which is what puts the error on screen during editing.
     error: Option<String>,
+    /// Where in `source` it fails, as the compiler reported it — what an
+    /// editor underlines. Always set together with `error`.
+    error_span: Option<Span>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1564,6 +1568,8 @@ struct ExpressionComponent {
     /// author typed and spans of their own source, the same way the node
     /// description passes through untranslated.
     error: Option<String>,
+    /// Where in `source` it fails ([`ExpressionDraft::error_span`]).
+    error_span: Option<Span>,
 }
 
 /// The expression shape of every row, for the rebuild guard.
@@ -2799,6 +2805,7 @@ impl PropertiesGpuiPanel {
                             |stored| ExpressionComponent {
                                 source: stored.source().to_string(),
                                 error: stored.error().map(|error| error.to_string()),
+                                error_span: stored.error().map(|error| error.span),
                             },
                         )
                     })
@@ -4676,11 +4683,18 @@ impl PropertiesGpuiPanel {
         self.expression_drafts
             .retain(|(k, index, _)| !(k == key && *index == component));
         if self.committed_expression(key, component) != Some(source.as_str()) {
-            let error = expression::compile_error(&source);
+            let (error, error_span) = match expression::compile_diagnostic(&source) {
+                Some((message, span)) => (Some(message), Some(span)),
+                None => (None, None),
+            };
             self.expression_drafts.push((
                 key.to_string(),
                 component,
-                ExpressionDraft { source, error },
+                ExpressionDraft {
+                    source,
+                    error,
+                    error_span,
+                },
             ));
         }
         cx.notify();
@@ -10599,6 +10613,68 @@ mod tests {
             "1",
             "and the document must not have moved"
         );
+    }
+
+    /// The draft keeps *where* the source fails, not only the message, so an
+    /// editor can underline it; a draft that compiles has none, and fixing the
+    /// text drops it again.
+    #[gpui::test]
+    fn the_draft_keeps_the_error_position(cx: &mut TestAppContext) {
+        let (window, _editor, _project, _path, _node_id) =
+            setup_target_for_node(cx, expression_node());
+        let span_of = |window: &gpui::WindowHandle<PropertiesGpuiPanel>,
+                       cx: &mut TestAppContext| {
+            window
+                .read_with(cx, |panel, _| {
+                    panel
+                        .expression_draft("amount", 0)
+                        .map(|draft| (draft.error.clone(), draft.error_span))
+                })
+                .unwrap()
+        };
+
+        let source = "frame +\n  unknown_name";
+        type_expression(&window, "amount", 0, source, cx);
+        let (message, span) = span_of(&window, cx).expect("a draft");
+        let span = span.expect("a broken draft keeps its position");
+        assert!(message.is_some());
+        assert_eq!(
+            &source[span.start as usize..span.end as usize],
+            "unknown_name"
+        );
+        assert_eq!(
+            Some(span),
+            expression::compile_diagnostic(source).map(|(_, span)| span)
+        );
+
+        type_expression(&window, "amount", 0, "frame * 2", cx);
+        assert_eq!(
+            span_of(&window, cx),
+            Some((None, None)),
+            "a draft that compiles has no error and no position"
+        );
+    }
+
+    /// A broken source that was committed shows its position too, after a
+    /// reload or an undo, not only while it is being typed.
+    #[gpui::test]
+    fn a_stored_broken_expression_keeps_its_position(cx: &mut TestAppContext) {
+        let (window, _editor, _project, _path, _node_id) = setup_target_for_node(
+            cx,
+            node_with_amount(ChannelSource::Expression(ParameterExpression::new(
+                "frame $",
+            ))),
+        );
+        let row = expression_row(&window, "amount", cx);
+        let component = row.components[0].as_ref().expect("a driven component");
+        let span = component
+            .error_span
+            .expect("the stored error has a position");
+        assert_eq!(
+            &component.source[span.start as usize..span.end as usize],
+            "$"
+        );
+        assert!(component.error.is_some());
     }
 
     /// Blur commits the draft — including one that does not compile, which is

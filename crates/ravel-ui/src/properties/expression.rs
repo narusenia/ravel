@@ -43,6 +43,7 @@
 
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource, ParameterExpression};
 use ravel_core::eval::EvalContext;
+use ravel_core::expression::Span;
 use ravel_core::graph::ParameterValue;
 
 /// How many animation channels a parameter carries, or `None` when it carries
@@ -109,9 +110,18 @@ fn first_expression(source: &ChannelSource) -> Option<&ParameterExpression> {
 ///
 /// [`ExpressionError`]: ravel_core::expression::ExpressionError
 pub fn compile_error(source: &str) -> Option<String> {
+    compile_diagnostic(source).map(|(message, _)| message)
+}
+
+/// [`compile_error`] with where it went wrong.
+///
+/// The span is the compile error's own byte range, unchanged, so an editor can
+/// underline it. Resolve it to a line and column with `Span::line_column`
+/// against the same `source`.
+pub fn compile_diagnostic(source: &str) -> Option<(String, Span)> {
     ParameterExpression::new(source)
         .error()
-        .map(|error| error.to_string())
+        .map(|error| (error.to_string(), error.span))
 }
 
 /// Whether any component of the parameter is driven by an expression.
@@ -462,6 +472,28 @@ mod tests {
         assert_eq!(compile_error("frame * 2"), None);
         // Clearing the box is "no expression", not a syntax error.
         assert_eq!(compile_error(""), None);
+    }
+
+    /// The span is the one the compiler reported, so the editor can underline
+    /// the character the message names — and it agrees with the message's own
+    /// line and column.
+    #[test]
+    fn a_draft_error_carries_its_span() {
+        let source = "frame +\n  unknown_name";
+        let (message, span) = compile_diagnostic(source).expect("does not compile");
+        assert_eq!(
+            &source[span.start as usize..span.end as usize],
+            "unknown_name"
+        );
+        assert_eq!(compile_error(source), Some(message.clone()));
+        let (line, column) = span.line_column(source);
+        assert_eq!((line, column), (2, 3));
+        assert!(
+            message.contains("2:3") || message.contains("line 2"),
+            "{message}"
+        );
+        assert_eq!(compile_diagnostic("frame * 2"), None);
+        assert_eq!(compile_diagnostic(""), None);
     }
 
     #[test]

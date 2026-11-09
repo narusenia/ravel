@@ -456,6 +456,33 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
 - **2D の既存挙動が変わらないテスト**（`P` が Vec2 のときの回帰）
 - 上限超過が評価エラーになるテスト
 
+**実装メモ（単位 6）**
+
+- **優先関係はここで決めた**: 次元は `P` で分かれ（Vec2 → 2D の `InstanceColumns`、
+  Vec3 → 3D の `InstanceColumns3`）、3D では **`rot` / `scale` が `orient` / `scale3` に
+  負けず合成される**（回転 = `orient · Rz(rot)`、スケール = `scale3 ⊙ (scale, 1)`）。
+  上書きにしなかった理由は、`scatter.*` が `orient` を書いた途端に `rot` のフィールド
+  変調が無効になるのを避けるため。規則と式は仕様書「3D 複製」。2D 経路は
+  `InstanceColumns` のまま 1 行も触っていない
+- 3D 配置になる条件は**ソースが決める**（Mesh か Vec3 の `P`）か、ノードが 3 次元目を
+  求める（`count_z > 1` / `axis` ≠ `z` / `area_z > 0` / Vec3 のパス）。2D の出力は列も
+  数値も同じ（`the_planar_path_is_unchanged` が元の式で固定）。**既存パラメータの型は
+  変えていない**（`spacing` / `center` / `area` は Vec2 のまま、`count_z` /
+  `spacing_z` / `axis` / `area_z` を末尾に追加）ので `.ravprj` の移行は不要。z の位置は
+  トランスフォームセクションの `translate` が動かす
+- **既存テスト 2 件を置き換えた**: `center_input_rejects_a_three_dimensional_source` と
+  `path_array_rejects_a_three_dimensional_path` は単位 1a 時点の「3D は明示エラー」を
+  固定していて、この単位が解く対象そのものだった（計画の「`scatter.path_array` /
+  `scatter.scatter` を 3D ジオメトリ上で動かす」）。挙動を弱めたのではなく仕様が変わった
+  ので、新しい挙動の肯定テスト（3 軸の bbox 中心 / 3D の弧長と接線）に書き換えた。
+  メッシュのパスを拒む `path_array_rejects_a_mesh_path` は残している
+- `MAX_INSTANCES`（100 万）。2D の最大（1000 x 1000）が上限ちょうどで通る
+- **未着手（次の単位が要る）**: 3D 配置のインスタンスを**展開する**側。`expand_instances`
+  と `scene.render` は 2D の `InstanceTransform` だけを知っていて、Vec3 の `P` は
+  `RequiresPlanarP` で止まる。つまりボックスのグリッドは作れるが `scene.render` へは
+  まだ流せない。`InstanceColumns3::placement` が消費側の読み方を固定してあるので、
+  展開は点列の次元昇格（Vec2 のソースを z = 0 の Vec3 へ）と法線の回転が論点になる
+
 ### 単位 7: ライティング（REQ-3D-006）✅ 実装済み
 
 - `scene.light`（ディレクショナル / ポイント / アンビエント）

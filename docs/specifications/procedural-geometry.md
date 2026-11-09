@@ -121,8 +121,8 @@ CPU 経路は texel を読むので、GPU 常駐フレームで来た画像は�
 | `rot` | Instance | F32 | 回転（rad）。**2D のみ** | 0 |
 | `scale` | Instance | Vec2 | スケール。**2D のみ** | `(1, 1)` |
 | `shear` | Instance | F32 | 水平せん断（`x' = x + shear · y`、スケール前の形に対する係数）。**2D のみ**。**無ければ 0**。`rot` / `scale` と合わせて線形部分 `R(rot) · S(scale) · H(shear)` を表す。入れ子の合成が書く（下記）ので、組み込みノードは普段は作らず、列があるとき・非 0 のときだけ書かれる | 0 |
-| `orient` | Instance | Vec4 | 姿勢（クォータニオン）。**3D のみ**（REQ-3D-003） | —（3D は未配線） |
-| `scale3` | Instance | Vec3 | スケール。**3D のみ** | —（同上） |
+| `orient` | Instance | Vec4 | 姿勢（クォータニオン）。**3D のみ**（REQ-3D-003）。`scatter.*` の 3D 配置が書く。読み出しは正規化し、零クォータニオンは恒等 | 恒等（下記「3D 複製」の合成規則） |
+| `scale3` | Instance | Vec3 | スケール。**3D のみ**。`scatter.*` の 3D 配置が書く | `(1, 1, 1)` |
 | `N` | Point/Primitive | Vec3 | 法線。**3D のみ**。`scene.render` のライティングが読む。**Point 列の `N` を持つ Mesh だけが陰影を受け**、`N` の無い Mesh と Path は光の影響を受けず自分の色のまま描かれる（捏造した法線で恣意的に陰影が付くのを避ける）。シーン空間へはオブジェクト行列の逆転置で運ぶ（非一様スケール・ミラーで面に垂直なまま） | —（列が無ければ陰影なし） |
 | `uv` | Point | Vec2 | テクスチャ座標。**3D のみ**。`(0, 0)` が画像の左上で `v` は下向きに増える（FrameBuffer の行と同じ向き）。`scene.render` は画像を**この列で**サンプルし、暗黙の矩形 UV を持たない | —（列が無ければ `(0, 0)`） |
 | `Cd` | Point/Instance | Color | 色（＝塗り色。`style.fill` が書く）。**Point ドメインの `Cd` は、パスの頂点に書くと線の頂点色になる**（塗りには効かない。下記） | Instance: 白（色味）。Primitive: `rasterize` の `color`。Point: パスの頂点なら所属プリミティブの線色、それ以外は `color` |
@@ -233,8 +233,8 @@ CPU 経路は texel を読むので、GPU 常駐フレームで来た画像は�
 | 境界系（`Geometry::bounds` / `ops::drawn_bounds` / `bounds_center`） | 対応する。`bounds` は 2D の `Rect` なので xy 範囲を返す |
 | 属性系（`attribute.set` / `.promote` / `.transfer`、`field.apply`） | 次元非依存で素通しする |
 | 要素操作系（`geometry.merge`、`geometry.blast` / `sort` / `switch`） | 次元非依存 |
-| 複製系（`scatter.*`） | 3D 対応は 3D-6。3D の `P` を読むのは `center_input` の再センタリングだけで、そこは**明示エラー** |
-| 弧長・パス前提（`attribute.path_sample` / `scatter.path_array`、`geometry.resample` / `measure` の path 系、`attribute.curveu`） | **明示エラー**。黙って xy に射影しない |
+| 複製系（`scatter.*`） | 対応する（3D-6）。3D のソースまたは 3 次元目の指定で `P` が Vec3 の配置を出す。`center_input` は 3D ソースを 3 軸の bbox 中心で再センタリングし、`path_array` は Vec3 のパスを 3D の弧長で歩く。下記「3D 複製」 |
+| 弧長・パス前提（`attribute.path_sample`、`geometry.resample` / `measure` の path 系、`attribute.curveu`） | **明示エラー**。黙って xy に射影しない |
 | ラスタライズ（`rasterize`） | **明示エラー**。3D は `scene.render` で描く |
 
 **明示エラーは `GeometryError::RequiresPlanarP`**（`{操作名} requires 2D
@@ -261,8 +261,8 @@ positions: `P` is Vec3 …`）。「この操作は 2D の `P` を要求する�
 | `nodes/geometry.rs` transform: instance `P` | 3D 対応 | 同上。`rot` / `scale` / `shear` は 2D 専用属性のまま。node の変換は各インスタンスの配置へ `InstanceTransform::compose` で厳密に合成する |
 | `geometry/field.rs` `apply_field` | 次元非依存 | `P` は書き換えない。フィールドのサンプル位置は xy 射影（3D フィールドは将来拡張） |
 | `nodes/rasterize/mod.rs` × 4（GPU flatten / CPU raster、各 point + instance） | 明示エラー | 入口で検証し、インスタンスソースも再帰的に見る |
-| `nodes/scatter/mod.rs` `instance_source`（`center_input`） | 明示エラー | `anchor` が Vec2 のみのため 3D の基準点を表現できない |
-| `nodes/scatter/mod.rs` `path_array` | 明示エラー | 弧長前提 |
+| `nodes/scatter/mod.rs` `instance_source`（`center_input`） | 当初は明示エラー → **3D-6 で対応に変更** | `anchor` は Vec2 のみで 3D の基準点を持てないので、3D ソースは anchor を読み書きせず 3 軸の bbox 中心で再センタリングする |
+| `nodes/scatter/mod.rs` `path_array` | 当初は明示エラー → **3D-6 で対応に変更** | Vec3 のパスを 3D の弧長で歩く（Mesh は引き続き明示エラー） |
 
 テスト 20 箇所と例 2 箇所は**既存の 2D ケースをそのまま検証し続ける**ので
 変更しない（`P` が Vec2 のままなら `as_vec2` は今までどおり通る）。3D の
@@ -357,6 +357,58 @@ X / Y から掴める）と分割数を持つ。
 - **トランスフォームセクションは持たない**: `geometry.transform` は `N` を回さない
   ので、セクションを足すと回したプリミティブの法線が古いままになる。移動・回転は
   `center` と `scene.add` のオブジェクト変換（法線を正しく動かす）で行う
+
+### 3D 複製（REQ-3D-009）
+
+`scatter.*` は次のとき **3D で配置**する。それ以外は今までどおり 2D の列
+（`P`: Vec2、`rot`、`scale`）を、列の種類も数値も変えずに出す。
+
+- **3D のソースがつながっている**（Mesh を持つ、または点 / インスタンスの `P` が
+  Vec3）。3D カメラが見るものを平面の配置に載せても行き場が無いので、
+  ノードのパラメータに依らずソースが決める
+- **ノード自身が 3 次元目を求められている**: `scatter.grid` の `count_z > 1`、
+  `scatter.circular` の `axis` が `z` 以外、`scatter.scatter` の `area_z > 0`、
+  `scatter.path_array` の入力パスが Vec3
+
+3D 配置の出力は `index` / `P`（Vec3）/ `orient`（Vec4）/ `scale3`（Vec3）。
+`rot` / `scale` は書かない（無い列は恒等なので、書く意味が無い）。
+
+| ノード | 3D の配置 |
+|---|---|
+| `scatter.grid` | `count_x × count_y × count_z`、x → y → z の順（x が最速）、**z も原点を中心**にする。`spacing_z` が z の間隔。z の位置は `translate`（トランスフォームセクション）で動かす |
+| `scatter.circular` | `axis`（`z` / `x` / `y`）まわりの輪。`z` は XY 平面（2D の輪）、`y` は XZ 平面、`x` は YZ 平面。`align_rotation` が有効なら**どの軸でもコピーのローカル +X が外向き**になる（2D の `rot = angle` と同じ意味）。`y` の輪は +X から始まり右手系で −Z へ進む。`x` の輪は軸が +X なので +Y から始まる |
+| `scatter.scatter` | `area_z` の奥行きの体積（z は 0 中心）。x / y は同じ seed の 2D の散布と**同じ値**。各コピーの姿勢は一様ランダムなクォータニオン（Z まわりだけではない） |
+| `scatter.path_array` | Vec3 のパスを 3D の弧長で歩く。コピーの姿勢は +X を接線へ向ける最短回転（平面の接線では 2D の `rot = atan2` と同じ Z まわりの回転。真後ろの接線は Z まわり半回転） |
+
+**`center_input`**: 3D のソースは `anchor`（Vec2）を読み書きせず、**3 軸の bbox 中心**で
+再センタリングする。`anchor` に z を持たせる余地が無いため。
+
+**複製数の上限**: 1 ノードが置けるコピーは `MAX_INSTANCES`（1,000,000）まで。
+超える指定は評価エラー。個数は整数の積（1000³ は 10 億）なので、桁の打ち間違いが
+確保の失敗ではなく読めるエラーになるため。2D の最大（1000 × 1000）はちょうど上限で、
+今までどおり通る。
+
+#### `rot` / `orient`、`scale` / `scale3` の優先関係
+
+インスタンスの次元は `P` で分かれる。**`P` が Vec2 なら 2D の配置**（`InstanceColumns`、
+`rot` / `scale` / `shear` だけを読み、`orient` / `scale3` は見ない）、**Vec3 なら 3D の
+配置**（`InstanceColumns3`）。3D では 2D の列が `orient` / `scale3` に**負けず合成される**:
+
+```text
+回転   = orient · Rz(rot)            （rot は orient より先、ソースのローカルで効く）
+スケール = scale3 ⊙ (scale.x, scale.y, 1)
+配置   = offset + 回転 · (スケール ⊙ p)
+```
+
+無い列は恒等なので「両方あるのに片方が死ぬ」場合が無い。`orient` が `rot` を上書きする
+規則にしなかった理由は、**3D の複製に対しても `rot`（スカラー 1 本）をフィールドで
+変調できる**ようにするため。上書きにすると、`scatter.*` が `orient` を書いた瞬間に
+`field.apply` で `rot` を動かしても何も起きなくなる。`orient` は読むときに正規化する
+（フィールドが非正規化のクォータニオンを書いても姿勢になる）。`shear` は 3D では読まない。
+
+実装は `Geometry` の `InstanceColumns3::placement` / `InstancePlacement3::apply`。
+**3D 配置のインスタンスを展開する消費側**（`expand_instances`、`scene.render`）は
+まだ無く、今は 2D の配置だけを展開して Vec3 の `P` は `RequiresPlanarP` で止まる。
 
 ### 回転の表現（REQ-3D-003）
 

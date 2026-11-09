@@ -422,10 +422,10 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
 - テンプレートは `mesh_primitive`（出力と `center`）+ `mesh_segments`（分割数）の
   2 つの小関数で組む。`center` だけが `ParamRole::Position`。`size` / `radius` は
   スカラーまたは全幅なので `Size` の役割（中心からのオフセット）には当たらない
-- **トランスフォームセクションは宣言しない**（`geometry.transform` が `N` を回さない
-  ため）。`every_geometry_producing_built_in_decides_about_the_section` の
-  「持たない」側に載せた。`geometry.transform` 自体が法線を回すようになれば
-  再検討する
+- **トランスフォームセクションを宣言する**。当初は `geometry.transform` が `N` を
+  回さなかったので外していたが、単位 6 の追補で `geometry.transform` が `N` を逆転置で
+  回し、ミラーの巻きを反転するようになったため、`center`（掴める点）の上に
+  `with_transform_section()` を付けた。外していた理由はそれだけだった
 - アイコンは新規 SVG を足さず既存を割り当てた（box → `boxes`、sphere →
   `circle-dot`、cylinder → `layers`、plane → `square-square`）
 - ゴールデン画像は追加していない。数値（頂点数・面数・法線の向きと長さ・巻き・
@@ -477,11 +477,18 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
   ので、新しい挙動の肯定テスト（3 軸の bbox 中心 / 3D の弧長と接線）に書き換えた。
   メッシュのパスを拒む `path_array_rejects_a_mesh_path` は残している
 - `MAX_INSTANCES`（100 万）。2D の最大（1000 x 1000）が上限ちょうどで通る
-- **未着手（次の単位が要る）**: 3D 配置のインスタンスを**展開する**側。`expand_instances`
-  と `scene.render` は 2D の `InstanceTransform` だけを知っていて、Vec3 の `P` は
-  `RequiresPlanarP` で止まる。つまりボックスのグリッドは作れるが `scene.render` へは
-  まだ流せない。`InstanceColumns3::placement` が消費側の読み方を固定してあるので、
-  展開は点列の次元昇格（Vec2 のソースを z = 0 の Vec3 へ）と法線の回転が論点になる
+- **追補 1: 3D 配置の展開**。`expand_instances` が Vec3 の `P` を持つインスタンスを
+  `InstanceColumns3` の規則で展開する（Vec2 のソースは z = 0 へ昇格、`N` は逆転置で
+  回して正規化、ミラーは巻きを反転）。展開はコア（`ops.rs`）に閉じ、`scene.render` は
+  既に `expand_instances` を通っていたので**レンダラ側の変更は無い**（並行する
+  ライティングの変更と衝突しない）。接線を持つソースは明示エラー。27 個の
+  `mesh.box` が `scene.render`（CPU 参照）で手計算どおりの被覆と前後関係になる
+  テストで固定した
+- **追補 2: `geometry.transform` が `N` と 3D インスタンスを扱う**。`N` は逆転置、
+  ミラーは巻き反転。Vec3 のインスタンスは `orient` / `scale3` へ合成する（厳密になる
+  のは一様スケールか回っていないインスタンス。非一様 × 回転は明示エラー）。
+  「変換してから展開」と「展開してから変換」が一致することを不変条件として
+  テストに置いた。規則は仕様書「3D 配置の展開と法線」「変換と法線」
 
 ### 単位 7: ライティング（REQ-3D-006）✅ 実装済み
 

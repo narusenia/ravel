@@ -537,6 +537,50 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
 - 読み込んだ Mesh を破砕・変調できる結合テスト
 - 失敗が UI に出るテスト
 
+**実装メモ（単位 9）**
+
+- ローダは `ravel-nodes/src/model/`（`mod.rs` = 公開 API・基底変換・
+  `flatten_to_geometry`、`gltf.rs`、`obj.rs`、`node.rs` = `mesh.import`）。
+  依存は `gltf`（`import` を切り `names` / `utils` のみ。画像デコーダと
+  `base64` を引かない。GLB チャンク・`data:` URI・隣接 `.bin` はローダ側で
+  解決）と `tobj`（`ahash` なし）
+- **基底変換は回転であって鏡映ではない。** `(x, y, z) → (x, -y, -z)` は X 軸
+  まわりの半回転で行列式は +1。glTF / OBJ もシーン空間も右手系なので
+  **三角形の巻き順は変えない**し、法線は位置と同じ写像で足りる（巻きを
+  反転すると裏返る）。変換は `to_scene_space` の 1 箇所に閉じ、ノードの
+  平行移動・回転（クォータニオン `(x, -y, -z, w)`）もここを通る。スケールは
+  対角行列による共役で不変。テストは**位置の期待値を手計算**し、保存された
+  法線と変換後の巻きから求めた面法線が一致することも確かめる
+- 階層: 子を持つ glTF ノードは入れ子の `Scene`（メッシュ自身は恒等変換の
+  子）、子の無いメッシュノードは変換付きジオメトリ。同じ glTF mesh を
+  参照するノードは 1 つの `Arc<Geometry>` を共有する。ノード変換は
+  `decomposed()` の TRS を `Transform3D`（ZYX オイラー度 + pivot 0）へ。
+  ±90° Y のジンバル特異点でもポーズは保たれる（テスト済み）
+- **`mesh.import` は 2 出力**: `scene`（階層）と `geometry`（全メッシュを
+  シーン空間へ焼いて 1 つの Mesh ジオメトリにしたもの。法線は各オブジェクト
+  行列の逆転置で変換するので非一様スケールでも正しい）。`Scene` は
+  ジオメトリ / フィールドノードの入力になれないため、変調・変形は
+  `geometry` 出力から始まる
+- **アセット参照は `media` と同じ表**: `asset_id` は `AssetId` の 10 進、
+  `MEDIA_TYPE_KEYS` に `mesh.import` を加えたので、参照スキャン・
+  「どのレイヤーが使うか」・識別子規則（アニメ不可）・Exposed の media
+  バインディングが追加の配線なしで効く。ファイルは `resolved` から読むので
+  相対パス保存と再リンクもそのまま（`.ravprj` の形式変更なし）。
+  `AssetKind` は拡張していない — 拡張子から `Container` と推定されるだけで、
+  `mesh.import` は種別を読まない。**代償**: メディアビンの「レイヤーとして
+  追加」はモデルに `media` レイヤーを作る（透明フレームになる）
+- **失敗の表示**: 取り込み時に `probe_path` が `model::load` で全文を読み、
+  失敗は `ImportFailure`（`model load failed: …`）→
+  `ProjectEvent::MediaImportSkipped` → 既存の警告通知。評価時の失敗（ファイル
+  消失・オフライン）は `media` と同じく空出力 + アセットごとに 1 回の警告
+- 評価キャッシュはパス + `content_revision` で保持（上書きで再読込）
+- 非対象のまま: UV・頂点カラー・マテリアル・テクスチャ・`TRIANGLES` 以外の
+  プリミティブ・percent-encoded な外部 `.bin` URI・スパース以外の拡張
+- **「破砕」の結合テストは書けない**: 破砕ノードはまだ無い
+  （`geometry-fracture-plan.md` は Planned）。代わりに `mesh.import` →
+  `geometry.transform` → `field.apply`（`alpha`）→ `scene.render` で、
+  Mesh が既存の変形・変調ノードを通り描画まで届くことを検証した
+
 ### 単位 10: レジストリ / ロケール / 文書
 
 **この単位は縮んだ。** 各単位が自分の追加したノードと型について

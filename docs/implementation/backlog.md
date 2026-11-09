@@ -57,7 +57,10 @@
 | PSHADE-6 | 要素ごとのグラデーション塗り | `path-shading-plan.md` |
 | AUDIO-5 | 波形表示 | `audio-plan.md` |
 | AUDIO-6 | 解析ノード（RMS / ピーク。**FFT クレート追加は禁止**） | `audio-plan.md` |
-| 3D-4 | 三角形レンダラと `scene.render` | `3d-scene-plan.md` |
+| 3D-5 | 基本プリミティブ（box / sphere / cylinder / plane） | `3d-scene-plan.md` |
+| 3D-7 | ライティング | `3d-scene-plan.md` |
+| 3D-8 | 押し出しとベベル（`TYPE-2/4/5` で輪郭の形が確定、`PATH-0b` ✅） | `3d-scene-plan.md` |
+| 3D-9 | モデル読み込み（glTF / OBJ） | `3d-scene-plan.md` |
 | FRAC-2 | `geometry.cell_fracture`（2D） | `geometry-fracture-plan.md` |
 | FRAC-3 | `geometry.cell_fracture_3d`（`3D-1a` / `3D-1b` ✅ で依存が解けた） | `geometry-fracture-plan.md` |
 
@@ -1347,12 +1350,12 @@ CPU フィールド評価は 10 万で 1.17 ms しかないので、GPU-2 が効
 | 3D-1b | ✅ | **`Primitive::Mesh` の追加と網羅規約**（match 53 箇所。レンダラなし） | — |
 | 3D-2 | ✅ | `orient` / `scale3` / `N` 標準属性と回転ユーティリティ | 3D-1a |
 | 3D-3 | ✅ | `Scene` データ型とカメラ | 3D-1a, 3D-1b |
-| 3D-4 | 🟡 | 三角形レンダラと `scene.render` | 3D-3 |
-| 3D-5 | ⬜ | 基本プリミティブ（box / sphere / cylinder / plane） | 3D-4 |
+| 3D-4 | ✅ #640 | 三角形レンダラと `scene.render` | 3D-3 |
+| 3D-5 | 🟡 | 基本プリミティブ（box / sphere / cylinder / plane） | 3D-4 |
 | 3D-6 | ⬜ | 3D 複製（`scatter.*` の 3D 対応） | 3D-2, 3D-5 |
-| 3D-7 | ⬜ | ライティング | 3D-4 |
-| 3D-8 | ⬜ | 押し出しとベベル | 3D-4, TYPE-*, PATH-0b |
-| 3D-9 | ⬜ | モデル読み込み（glTF / OBJ） | 3D-4 |
+| 3D-7 | 🟡 | ライティング | 3D-4 |
+| 3D-8 | 🟡 | 押し出しとベベル | 3D-4, TYPE-*, PATH-0b |
+| 3D-9 | 🟡 | モデル読み込み（glTF / OBJ） | 3D-4 |
 | 3D-10 | ⬜ | レジストリ / ロケール / 文書 | 3D-1〜9 |
 
 **3D-1a / 3D-1b は早く入れるほど安い**。`as_vec2` 呼び出しが 58 箇所 /

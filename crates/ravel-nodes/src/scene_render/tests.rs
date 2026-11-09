@@ -1604,3 +1604,87 @@ fn a_curve_crossing_the_near_plane_is_clipped_as_a_curve() {
     assert_curve_only_in_front(&cpu_frame(&scene, 200, 200), "cpu");
     assert_curve_only_in_front(&Rig::new().frame(&scene, 200, 200), "gpu");
 }
+
+// ---------------------------------------------------------------------------
+// Concave closed paths cut by the near plane
+// ---------------------------------------------------------------------------
+
+/// A U-shaped floor polygon at `y = 20` whose two prongs run from behind the
+/// camera to `z = 100` and whose notch bottom (`z = -150`) is behind it. The
+/// near plane (`near = 90`, so at `z = -10`) cuts it into two pieces, which
+/// the clipped ring joins by edges along the plane.
+///
+/// On a 200 x 200 canvas the plane is 90 away, so those edges land on pixel
+/// row `100 + 20 * 214.45 / 90 = 147.7`, spanning the whole width; the prongs
+/// (`x in [-60, -30]` and `[30, 60]`) never reach `x in [80, 120]` between
+/// rows 140 and 156 (they are at most `100 - 30 * 214.45 / 90 = 28.5` and at
+/// least `100 + 30 * 214.45 / 200 = 132` pixels out there).
+fn u_shaped_floor() -> Geometry {
+    let points = [
+        (-60.0, -200.0),
+        (-60.0, 100.0),
+        (-30.0, 100.0),
+        (-30.0, -150.0),
+        (30.0, -150.0),
+        (30.0, 100.0),
+        (60.0, 100.0),
+        (60.0, -200.0),
+    ];
+    let mut geometry =
+        Geometry::from_points3(points.iter().map(|&(x, z)| Vec3(x, 20.0, z)).collect());
+    geometry.push_primitive(Primitive::Path {
+        verts: 0..points.len(),
+        closed: true,
+    });
+    geometry
+        .primitive_attrs_mut()
+        .insert(names::CD, AttributeArray::Color(vec![GREEN]))
+        .unwrap();
+    geometry
+        .primitive_attrs_mut()
+        .insert(names::STROKE_WIDTH, AttributeArray::F32(vec![6.0]))
+        .unwrap();
+    geometry
+}
+
+fn assert_u_floor_has_no_bridge(out: &FrameBuffer, label: &str) {
+    for y in 140..156 {
+        for x in 80..120 {
+            assert_eq!(
+                px(out, x, y)[3],
+                0.0,
+                "{label}: ({x}, {y}) is on the edge along the near plane"
+            );
+        }
+    }
+    // The fill is the prongs, unchanged: well inside the left one at row 130
+    // (pixels 10 to 55 there) and the right one (145 to 190).
+    assert!(px(out, 30, 130)[3] > 0.9, "{label}: left prong filled");
+    assert!(px(out, 170, 130)[3] > 0.9, "{label}: right prong filled");
+    assert_eq!(px(out, 100, 130)[3], 0.0, "{label}: the notch stays empty");
+    // The outline of the shape is stroked (6 units, about 9 pixels here, so
+    // 57 is outside the fill, which ends at 55)...
+    assert!(
+        px(out, 57, 130)[3] > 0.5,
+        "{label}: the real edge is stroked"
+    );
+    // ...but the cut along the near plane is not an edge of the shape: the
+    // fill ends at row 147.7, and a stroke along the cut would reach under it
+    // (row 150) across the whole prong, out to the screen edge.
+    for x in [10, 190] {
+        assert_eq!(
+            px(out, x, 150)[3],
+            0.0,
+            "{label}: ({x}, 150) strokes the cut"
+        );
+    }
+}
+
+#[test]
+fn a_concave_path_cut_by_the_near_plane_strokes_no_bridge_between_its_pieces() {
+    let camera =
+        Camera::looking_at([0.0, 0.0, -100.0], [0.0, 0.0, 0.0]).with_clip_range(90.0, 1000.0);
+    let scene = scene_of(camera, vec![u_shaped_floor()]);
+    assert_u_floor_has_no_bridge(&cpu_frame(&scene, 200, 200), "cpu");
+    assert_u_floor_has_no_bridge(&Rig::new().frame(&scene, 200, 200), "gpu");
+}

@@ -410,6 +410,25 @@ impl Projector {
     }
 }
 
+/// What a clipped piece of a path is drawn as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    /// Fill and stroke as the original path would.
+    Whole,
+    /// The clipped polygon of a closed path, filled only: its edge along the
+    /// near plane is not part of the shape's outline.
+    FillOnly,
+    /// A run of a closed path's outline that lies on the shape, stroked only.
+    StrokeOnly,
+}
+
+/// One piece of a clipped path.
+struct Piece {
+    rows: Vec<Row>,
+    closed: bool,
+    role: Role,
+}
+
 /// One row of a clipped point domain: an original point, or the point a
 /// fraction `t` of the way from one original point to another.
 #[derive(Clone, Copy, Debug)]
@@ -437,10 +456,13 @@ fn crossing(from: f32, to: f32) -> f32 {
 /// - **Fully behind**: nothing.
 /// - **Open and crossing**: the visible part, split into one open polyline per
 ///   run in front (a path that dips behind the camera and returns becomes two).
-/// - **Closed and crossing**: the polygon clipped to the half-space, which is
-///   again one closed polygon whose new edge lies on the near plane — fill is
-///   exact, and a stroke also runs along that edge (the cut is not a contour of
-///   the shape, but a closed path has no loose end to leave open).
+/// - **Closed and crossing**: the polygon clipped to the half-space. Clipping
+///   a concave shape can leave it in several visible pieces that the clipped
+///   ring joins by edges along the plane. Each piece is emitted twice, as a
+///   closed polygon for the **fill** ([`Role::FillOnly`]) and as an open
+///   polyline for the **stroke** ([`Role::StrokeOnly`]) without its edge along
+///   the plane, so neither a false bridge is stroked nor do two coincident,
+///   opposite edges leave an antialiasing seam in the fill.
 ///
 /// The shared rule for the CPU reference and the GPU renderer: both read the
 /// geometry this produces, so neither ever projects a point from behind the
@@ -449,31 +471,63 @@ fn clip_path(
     verts: std::ops::Range<usize>,
     closed: bool,
     depth: impl Fn(usize) -> f32,
-) -> Vec<(Vec<Row>, bool)> {
+) -> Vec<Piece> {
     let ring: Vec<usize> = verts.collect();
     if ring.iter().all(|&i| in_front(depth(i))) {
-        return vec![(ring.into_iter().map(Row::Original).collect(), closed)];
+        return vec![Piece {
+            rows: ring.into_iter().map(Row::Original).collect(),
+            closed,
+            role: Role::Whole,
+        }];
     }
     if ring.iter().all(|&i| !in_front(depth(i))) {
         return Vec::new();
     }
     if closed {
-        let mut polygon = Vec::new();
+        // `exits[i]`: row `i` is where the ring leaves the visible side, so
+        // the edge from row `i` to row `i + 1` runs along the plane.
+        let (mut polygon, mut exits) = (Vec::new(), Vec::new());
         for (position, &a) in ring.iter().enumerate() {
             let b = ring[(position + 1) % ring.len()];
             let (da, db) = (depth(a), depth(b));
             if in_front(da) {
                 polygon.push(Row::Original(a));
+                exits.push(false);
             }
             if in_front(da) != in_front(db) {
                 polygon.push(Row::Between(a, b, crossing(da, db)));
+                exits.push(in_front(da));
             }
         }
-        return if polygon.len() >= 3 {
-            vec![(polygon, true)]
-        } else {
-            Vec::new()
-        };
+        if polygon.len() < 3 {
+            return Vec::new();
+        }
+        let count = polygon.len();
+        let mut out = Vec::new();
+        // Start just after an on-plane edge and walk the ring once: each run
+        // between two on-plane edges is one visible piece of the shape.
+        let start = (exits.iter().position(|&e| e).unwrap_or(0) + 1) % count;
+        let mut run: Vec<Row> = Vec::new();
+        for step in 0..count {
+            let index = (start + step) % count;
+            run.push(polygon[index]);
+            if exits[index] {
+                let rows = std::mem::take(&mut run);
+                if rows.len() >= 3 {
+                    out.push(Piece {
+                        rows: rows.clone(),
+                        closed: true,
+                        role: Role::FillOnly,
+                    });
+                    out.push(Piece {
+                        rows,
+                        closed: false,
+                        role: Role::StrokeOnly,
+                    });
+                }
+            }
+        }
+        return out;
     }
     let mut pieces = Vec::new();
     let mut current: Vec<Row> = Vec::new();
@@ -497,7 +551,11 @@ fn clip_path(
     pieces
         .into_iter()
         .filter(|piece| piece.len() >= 2)
-        .map(|piece| (piece, false))
+        .map(|rows| Piece {
+            rows,
+            closed: false,
+            role: Role::Whole,
+        })
         .collect()
 }
 
@@ -583,7 +641,10 @@ fn gather(name: &str, column: &AttributeArray, rows: &[Row]) -> AttributeArray {
 /// primitives; primitive attributes follow the path they came from, and a path
 /// that is split passes its row to each piece. A loose point behind the near
 /// plane is dropped.
-fn near_clipped_paths(flat: &Geometry, clip_depth: &Mat4) -> anyhow::Result<Option<Geometry>> {
+fn near_clipped_paths(
+    flat: &Geometry,
+    clip_depth: &Mat4,
+) -> anyhow::Result<Option<(Geometry, Vec<Role>)>> {
     let Some(positions) = flat.positions(Domain::Point) else {
         return Ok(None);
     };
@@ -596,6 +657,7 @@ fn near_clipped_paths(flat: &Geometry, clip_depth: &Mat4) -> anyhow::Result<Opti
 
     let mut rows: Vec<Row> = Vec::new();
     let mut primitives = Vec::new();
+    let mut roles = Vec::new();
     let mut parents = Vec::new();
     let mut covered = vec![false; count];
     for (parent, prim) in flat.primitives().iter().enumerate() {
@@ -612,13 +674,14 @@ fn near_clipped_paths(flat: &Geometry, clip_depth: &Mat4) -> anyhow::Result<Opti
         if verts.end > count {
             continue;
         }
-        for (piece, closed) in clip_path(verts.clone(), *closed, depth) {
+        for piece in clip_path(verts.clone(), *closed, depth) {
             let start = rows.len();
-            rows.extend(piece);
+            rows.extend(piece.rows);
             primitives.push(Primitive::Path {
                 verts: start..rows.len(),
-                closed,
+                closed: piece.closed,
             });
+            roles.push(piece.role);
             parents.push(parent);
         }
     }
@@ -642,7 +705,10 @@ fn near_clipped_paths(flat: &Geometry, clip_depth: &Mat4) -> anyhow::Result<Opti
             ),
         })
         .collect();
-    materialize(flat, &rows, p, primitives, &parents, false).map(Some)
+    Ok(Some((
+        materialize(flat, &rows, p, primitives, &parents, false)?,
+        roles,
+    )))
 }
 
 fn lerp3(a: Vec3, b: Vec3, t: f32) -> Vec3 {
@@ -823,10 +889,11 @@ fn project_paths(
     flat: &Geometry,
     world: &Mat4,
     projector: &Projector,
+    paint: &PathPaint,
 ) -> anyhow::Result<Option<PathObject>> {
     let flattened = flatten_curves(flat, world, projector)?;
     let flat = flattened.as_ref().unwrap_or(flat);
-    let Some(flat) = near_clipped_paths(flat, &projector.view_proj.mul(world))? else {
+    let Some((flat, roles)) = near_clipped_paths(flat, &projector.view_proj.mul(world))? else {
         return Ok(None);
     };
     let flat = &flat;
@@ -879,6 +946,9 @@ fn project_paths(
             .primitive_attrs_mut()
             .insert(names::STROKE_WIDTH, AttributeArray::F32(scaled))?;
     }
+    if roles.iter().any(|&role| role != Role::Whole) {
+        apply_roles(&mut geometry, &roles, paint)?;
+    }
     geometry
         .points_mut()
         .insert(names::P, AttributeArray::Vec2(projected))?;
@@ -890,6 +960,47 @@ fn project_paths(
         ndc_depth: at_centroid[2],
         depth: extent.view_depth(world, &projector.view),
     }))
+}
+
+/// Make each clipped piece draw as its [`Role`]: a fill-only piece strokes at
+/// width 0, a stroke-only piece does not fill. Per-primitive `fill` and
+/// `stroke_width` columns carry it; a primitive without one of its own keeps
+/// what it inherited from the node's parameters (`paint`), which is the value
+/// written for it here. `stroke_width` is read **after** the pixel scaling.
+fn apply_roles(geometry: &mut Geometry, roles: &[Role], paint: &PathPaint) -> anyhow::Result<()> {
+    let attrs = geometry.primitive_attrs();
+    let fills: Vec<bool> = (0..roles.len())
+        .map(|i| {
+            attrs
+                .get(names::FILL)
+                .and_then(|c| c.as_bool(names::FILL).ok())
+                .and_then(|c| c.get(i).copied())
+                .unwrap_or(paint.fill)
+        })
+        .collect();
+    let widths: Vec<f32> = (0..roles.len())
+        .map(|i| {
+            attrs
+                .get(names::STROKE_WIDTH)
+                .and_then(|c| c.as_f32(names::STROKE_WIDTH).ok())
+                .and_then(|c| c.get(i).copied())
+                .unwrap_or(paint.stroke_width)
+        })
+        .collect();
+    let fills = fills
+        .into_iter()
+        .zip(roles)
+        .map(|(fill, role)| fill && *role != Role::StrokeOnly)
+        .collect();
+    let widths = widths
+        .into_iter()
+        .zip(roles)
+        .map(|(width, role)| if *role == Role::FillOnly { 0.0 } else { width })
+        .collect();
+    let attrs = geometry.primitive_attrs_mut();
+    attrs.insert(names::FILL, AttributeArray::Bool(fills))?;
+    attrs.insert(names::STROKE_WIDTH, AttributeArray::F32(widths))?;
+    Ok(())
 }
 
 /// Flatten `scene` into the draw list.
@@ -1011,7 +1122,7 @@ pub(super) fn prepare(
             }
         }
 
-        if let Some(path) = project_paths(&flat, &world, &projector)? {
+        if let Some(path) = project_paths(&flat, &world, &projector, &paint)? {
             prepared.paths.push(path);
             prepared
                 .blended
@@ -1041,6 +1152,13 @@ mod clip_tests {
 
     /// Depths by index; `clip_path` over `0..depths.len()`.
     fn clip(depths: &[f32], closed: bool) -> Vec<(Vec<Row>, bool)> {
+        pieces(depths, closed)
+            .into_iter()
+            .map(|piece| (piece.rows, piece.closed))
+            .collect()
+    }
+
+    fn pieces(depths: &[f32], closed: bool) -> Vec<Piece> {
         clip_path(0..depths.len(), closed, |i| depths[i])
     }
 
@@ -1092,16 +1210,47 @@ mod clip_tests {
     }
 
     #[test]
-    fn a_closed_path_crossing_the_plane_becomes_one_closed_polygon() {
+    fn a_closed_path_crossing_the_plane_fills_one_polygon_and_strokes_its_real_outline() {
         // A square with two corners behind: the clipped polygon is the two
-        // front corners plus the two plane crossings, closed.
-        let out = clip(&[1.0, 1.0, -1.0, -1.0], true);
-        assert_eq!(out.len(), 1);
-        let (polygon, closed) = &out[0];
-        assert!(closed);
+        // front corners plus the two plane crossings, closed, for the fill.
+        let out = pieces(&[1.0, 1.0, -1.0, -1.0], true);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].role, Role::FillOnly);
+        assert!(out[0].closed);
+        // The ring starts at the entry crossing and ends at the exit one.
+        let polygon = &out[0].rows;
         assert_eq!(polygon.len(), 4);
-        assert!(is_between(&polygon[2], 1, 2, 0.5));
-        assert!(is_between(&polygon[3], 3, 0, 0.5));
+        assert!(is_between(&polygon[0], 3, 0, 0.5));
+        assert!(is_between(&polygon[3], 1, 2, 0.5));
+        // The stroke is the same run, open: without the edge along the plane.
+        assert_eq!(out[1].role, Role::StrokeOnly);
+        assert!(!out[1].closed);
+        assert_eq!(out[1].rows.len(), 4);
+        assert!(is_between(&out[1].rows[0], 3, 0, 0.5));
+        assert!(is_between(&out[1].rows[3], 1, 2, 0.5));
+    }
+
+    #[test]
+    fn a_concave_closed_path_cut_in_two_strokes_no_bridge_between_the_pieces() {
+        // Depths round the ring: points 1 and 4 are behind the plane, so two
+        // runs (5, 0) and (2, 3) are visible and the clipped ring joins them
+        // by two edges that lie on the plane.
+        let out = pieces(&[1.0, -1.0, 1.0, 1.0, -1.0, 1.0], true);
+        let fills: Vec<_> = out.iter().filter(|p| p.role == Role::FillOnly).collect();
+        assert_eq!(fills.len(), 2, "one closed polygon per visible piece");
+        assert!(fills.iter().all(|p| p.closed && p.rows.len() == 4));
+        let strokes: Vec<_> = out.iter().filter(|p| p.role == Role::StrokeOnly).collect();
+        assert_eq!(strokes.len(), 2, "one stroke per visible piece");
+        for stroke in strokes {
+            assert!(!stroke.closed);
+            for pair in stroke.rows.windows(2) {
+                let on_plane = |row: &Row| matches!(row, Row::Between(..));
+                assert!(
+                    !(on_plane(&pair[0]) && on_plane(&pair[1])),
+                    "{pair:?} is an edge along the plane"
+                );
+            }
+        }
     }
 
     /// An open curve from `(-40, 0, 0)` to `(40, 0, 100)` with both handles

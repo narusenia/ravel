@@ -12,8 +12,8 @@ use thiserror::Error;
 use super::absent::{self, absent_column, absent_value};
 use super::{
     AttrName, AttributeArray, AttributeSet, AttributeType, Domain, Geometry, GeometryError,
-    InstanceColumns, InstanceSource, InstanceTransform, MAX_INSTANCE_DEPTH, Positions, Primitive,
-    names,
+    InstanceColumns, InstanceColumns3, InstancePlacement3, InstanceSource, InstanceTransform,
+    MAX_INSTANCE_DEPTH, Positions, Primitive, names,
 };
 use crate::types::{Color, Rect, Vec2, Vec3, Vec4};
 
@@ -75,6 +75,9 @@ pub enum GeometryOpError {
     HasInstances { operation: &'static str },
     #[error("the {name} attribute is required on the {domain:?} domain and cannot be deleted")]
     RequiredAttribute { name: &'static str, domain: Domain },
+    /// A source with bezier tangents was handed to a 3D placement.
+    #[error("{operation} cannot place a source with bezier tangents in 3D")]
+    TangentsIn3D { operation: &'static str },
 }
 
 pub fn attribute_set(
@@ -3133,8 +3136,23 @@ fn expand_at(geometry: &Geometry, depth: u32) -> Result<Geometry, GeometryOpErro
     let Some(offsets) = geometry.positions(Domain::Instance) else {
         return Ok(without_instances(geometry));
     };
-    let offsets = offsets?.require_planar("instance expansion")?.to_vec();
+    let offsets = offsets?;
+    // Instances placed in 3D (`P` is `Vec3`) take the 3D rule
+    // (`InstanceColumns3`); every other geometry goes through the planar one
+    // below untouched.
+    let spatial = matches!(offsets, Positions::D3(_));
+    let offsets3: Vec<Vec3> = if spatial {
+        offsets.iter3().collect()
+    } else {
+        Vec::new()
+    };
+    let offsets = if spatial {
+        Vec::new()
+    } else {
+        offsets.require_planar("instance expansion")?.to_vec()
+    };
     let columns = InstanceColumns::of(geometry.instances())?;
+    let columns3 = InstanceColumns3::of(geometry.instances())?;
     let source_indices = geometry
         .instances()
         .get(names::SOURCE_INDEX)
@@ -3145,15 +3163,26 @@ fn expand_at(geometry: &Geometry, depth: u32) -> Result<Geometry, GeometryOpErro
     // elements first, then one per instance. Nested instances are expanded
     // before their own placement is composed onto them, so a block is always
     // flat by the time it is appended.
-    let mut blocks: Vec<(Cow<'_, Geometry>, InstanceTransform, Option<usize>)> =
-        vec![(Cow::Borrowed(geometry), InstanceTransform::IDENTITY, None)];
+    let mut blocks: Vec<(Cow<'_, Geometry>, Placement, Option<usize>)> = vec![(
+        if spatial {
+            Cow::Owned(promote_to_3d(geometry))
+        } else {
+            Cow::Borrowed(geometry)
+        },
+        if spatial {
+            Placement::Spatial(InstancePlacement3::IDENTITY)
+        } else {
+            Placement::Planar(InstanceTransform::IDENTITY)
+        },
+        None,
+    )];
     if depth >= MAX_INSTANCE_DEPTH {
         tracing::warn!(
             "instance expansion: nesting deeper than {MAX_INSTANCE_DEPTH}, dropping {} instances",
-            offsets.len()
+            offsets.len().max(offsets3.len())
         );
     } else {
-        for (index, offset) in offsets.iter().enumerate() {
+        for index in 0..offsets.len().max(offsets3.len()) {
             // An image source has no contour to convert, so it cannot become
             // path geometry. Dropping it beats erroring: a `scatter` that
             // stamps both pictures and shapes still converts its shapes.
@@ -3165,12 +3194,18 @@ fn expand_at(geometry: &Geometry, depth: u32) -> Result<Geometry, GeometryOpErro
                 );
                 continue;
             };
-            let placement = columns.placement(index, *offset);
-            blocks.push((
-                Cow::Owned(expand_at(source, depth + 1)?),
-                placement,
-                Some(index),
-            ));
+            let (block, placement) = if spatial {
+                (
+                    promote_to_3d(&expand_at(source, depth + 1)?),
+                    Placement::Spatial(columns3.placement(index, offsets3[index])),
+                )
+            } else {
+                (
+                    expand_at(source, depth + 1)?,
+                    Placement::Planar(columns.placement(index, offsets[index])),
+                )
+            };
+            blocks.push((Cow::Owned(block), placement, Some(index)));
         }
     }
 
@@ -3188,7 +3223,17 @@ fn expand_at(geometry: &Geometry, depth: u32) -> Result<Geometry, GeometryOpErro
         primitive_attrs.push(block, inherited, block.primitive_count())?;
         point_ranges.push((start..start + point_count, *placement));
 
-        let index_offset = out.extend_indices(block.indices());
+        let index_offset = if placement.mirrors() {
+            // A mirrored placement turns the winding around, so the triangles
+            // are flipped to keep agreeing with the (outward) normals.
+            let mut flipped = block.indices().to_vec();
+            for triangle in flipped.chunks_exact_mut(3) {
+                triangle.swap(1, 2);
+            }
+            out.extend_indices(&flipped)
+        } else {
+            out.extend_indices(block.indices())
+        };
         for primitive in block.primitives() {
             out.push_primitive(primitive.shifted(start, index_offset));
         }
@@ -3273,14 +3318,32 @@ fn source_slot(source_count: usize, source_indices: Option<&[i32]>, index: usize
 /// zero, which is what a corner point means.
 fn bake_placements(
     points: &mut AttributeSet,
-    blocks: &[(Range<usize>, InstanceTransform)],
-) -> Result<(), GeometryError> {
-    if blocks
-        .iter()
-        .all(|(_, placement)| *placement == InstanceTransform::IDENTITY)
-    {
+    blocks: &[(Range<usize>, Placement)],
+) -> Result<(), GeometryOpError> {
+    if blocks.iter().all(|(_, placement)| placement.is_identity()) {
         return Ok(());
     }
+    if blocks
+        .iter()
+        .any(|(_, placement)| matches!(placement, Placement::Spatial(_)))
+    {
+        return bake_placements3(points, blocks);
+    }
+    let blocks: Vec<(Range<usize>, InstanceTransform)> = blocks
+        .iter()
+        .filter_map(|(range, placement)| match placement {
+            Placement::Planar(transform) => Some((range.clone(), *transform)),
+            Placement::Spatial(_) => None,
+        })
+        .collect();
+    Ok(bake_planar_placements(points, &blocks)?)
+}
+
+/// The planar half of [`bake_placements`]: what it has always done.
+fn bake_planar_placements(
+    points: &mut AttributeSet,
+    blocks: &[(Range<usize>, InstanceTransform)],
+) -> Result<(), GeometryError> {
     if points.get(names::P).is_some() {
         let column = points.make_mut(names::P)?;
         let values = column.as_vec2_mut(names::P)?;
@@ -3299,6 +3362,100 @@ fn bake_placements(
         for (range, placement) in blocks {
             for value in &mut values[range.clone()] {
                 *value = placement.apply_vector(*value);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// How one block of an expansion is placed: by the planar rule every geometry
+/// has always used, or — when the instance domain's `P` is `Vec3` — by the 3D
+/// one ([`InstanceColumns3`]). One expansion is one or the other, never mixed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Placement {
+    Planar(InstanceTransform),
+    Spatial(InstancePlacement3),
+}
+
+impl Placement {
+    fn is_identity(&self) -> bool {
+        match self {
+            Self::Planar(transform) => *transform == InstanceTransform::IDENTITY,
+            Self::Spatial(placement) => *placement == InstancePlacement3::IDENTITY,
+        }
+    }
+
+    /// Whether the placement reverses handedness, so the triangles it places
+    /// must be wound the other way. A planar placement cannot make a mesh
+    /// face the other way in any way the 2D renderer reads.
+    fn mirrors(&self) -> bool {
+        matches!(self, Self::Spatial(placement) if placement.mirrors())
+    }
+}
+
+/// `geometry` with its point `P` widened to `Vec3` (`z = 0`), the shape a
+/// block needs to join a 3D expansion: a planar source stamped by 3D instances
+/// sits in the `z = 0` plane before its placement turns it. A geometry whose
+/// points are already 3D, or that has none, is cloned unchanged.
+fn promote_to_3d(geometry: &Geometry) -> Geometry {
+    let mut out = geometry.clone();
+    let planar = matches!(
+        out.points().get(names::P).map(|column| column.as_ref()),
+        Some(AttributeArray::Vec2(_))
+    );
+    if planar {
+        let widened: Vec<Vec3> = match out.points().get(names::P).map(|c| c.as_ref()) {
+            Some(AttributeArray::Vec2(values)) => {
+                values.iter().map(|v| Vec3(v.0, v.1, 0.0)).collect()
+            }
+            _ => unreachable!("checked planar above"),
+        };
+        out.points_mut()
+            .insert(names::P, AttributeArray::Vec3(widened))
+            .expect("same length as the column it replaces");
+    }
+    out
+}
+
+/// [`bake_placements`] for a 3D expansion: `P` takes the full placement and
+/// `N` the inverse-transpose of its linear part. A source that carries bezier
+/// tangents is refused: the column is `Vec2`, a 3D placement would take it
+/// out of its plane, and keeping only the planar part would draw the curve
+/// wrong without saying so.
+fn bake_placements3(
+    points: &mut AttributeSet,
+    blocks: &[(Range<usize>, Placement)],
+) -> Result<(), GeometryOpError> {
+    for name in [names::IN_TAN, names::OUT_TAN] {
+        if points.get(name).is_some() {
+            return Err(GeometryOpError::TangentsIn3D {
+                operation: "instance expansion",
+            });
+        }
+    }
+    let placement_of = |placement: &Placement| match placement {
+        Placement::Spatial(placement) => *placement,
+        Placement::Planar(_) => InstancePlacement3::IDENTITY,
+    };
+    if points.get(names::P).is_some() {
+        let values = points.make_mut(names::P)?.as_vec3_mut(names::P)?;
+        for (range, placement) in blocks {
+            let placement = placement_of(placement);
+            for value in &mut values[range.clone()] {
+                *value = placement.apply(*value);
+            }
+        }
+    }
+    let has_normals = matches!(
+        points.get(names::N).map(|column| column.as_ref()),
+        Some(AttributeArray::Vec3(_))
+    );
+    if has_normals {
+        let values = points.make_mut(names::N)?.as_vec3_mut(names::N)?;
+        for (range, placement) in blocks {
+            let placement = placement_of(placement);
+            for value in &mut values[range.clone()] {
+                *value = placement.apply_normal(*value);
             }
         }
     }
@@ -3523,7 +3680,7 @@ fn placed(geometry: &Geometry, placement: InstanceTransform) -> Result<Geometry,
     }
     let mut out = geometry.clone();
     let point_count = out.point_count();
-    bake_placements(out.points_mut(), &[(0..point_count, placement)])?;
+    bake_planar_placements(out.points_mut(), &[(0..point_count, placement)])?;
     // `anchor` is a position in the same space as the points, so it moves
     // with them. Leaving it behind would matter the moment somebody reads
     // it: `scatter.*`'s `center_input` recentres a piece on its anchor, and
@@ -8522,5 +8679,226 @@ mod tests {
             split_by_piece(&with_instances, names::PIECE),
             Err(GeometryOpError::HasInstances { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod expand3_tests {
+    use super::*;
+    use std::f32::consts::FRAC_PI_2;
+
+    fn near(a: Vec3, b: Vec3) {
+        assert!(
+            (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4 && (a.2 - b.2).abs() < 1e-4,
+            "{a:?} != {b:?}"
+        );
+    }
+
+    /// A triangle with a normal attribute, the source every test stamps.
+    fn triangle(normal: Vec3) -> Geometry {
+        let mut geo = Geometry::from_points3(vec![
+            Vec3(1.0, 0.0, 0.0),
+            Vec3(0.0, 1.0, 0.0),
+            Vec3(0.0, 0.0, 1.0),
+        ]);
+        geo.points_mut()
+            .insert(names::N, AttributeArray::Vec3(vec![normal; 3]))
+            .unwrap();
+        geo.push_mesh(0..3, &[0, 1, 2]);
+        geo
+    }
+
+    /// A quarter turn about Z as an `orient` element: x → y, y → −x.
+    fn quarter_z() -> Vec4 {
+        let h = FRAC_PI_2 / 2.0;
+        Vec4(0.0, 0.0, h.sin(), h.cos())
+    }
+
+    /// One instance of `source` at `offset` with the given columns.
+    fn stamped(
+        source: Geometry,
+        offset: Vec3,
+        orient: Option<Vec4>,
+        scale3: Option<Vec3>,
+    ) -> Geometry {
+        let mut host = Geometry::new();
+        let set = host.instances_mut();
+        set.insert(names::P, AttributeArray::Vec3(vec![offset]))
+            .unwrap();
+        if let Some(q) = orient {
+            set.insert(names::ORIENT, AttributeArray::Vec4(vec![q]))
+                .unwrap();
+        }
+        if let Some(s) = scale3 {
+            set.insert(names::SCALE3, AttributeArray::Vec3(vec![s]))
+                .unwrap();
+        }
+        host.set_instance_source(Some(Arc::new(source)));
+        host
+    }
+
+    fn points(g: &Geometry, name: &str) -> Vec<Vec3> {
+        g.points()
+            .get(name)
+            .unwrap()
+            .as_vec3(name)
+            .unwrap()
+            .to_vec()
+    }
+
+    /// Hand-worked: scale `(2, 1, 1)`, quarter turn about Z, move by
+    /// `(10, 20, 30)`. `A = (1, 0, 0)` → `(2, 0, 0)` → `(0, 2, 0)` → `(10, 22, 30)`.
+    #[test]
+    fn a_3d_instance_places_every_point_with_the_full_placement() {
+        let host = stamped(
+            triangle(Vec3(1.0, 0.0, 0.0)),
+            Vec3(10.0, 20.0, 30.0),
+            Some(quarter_z()),
+            Some(Vec3(2.0, 1.0, 1.0)),
+        );
+        let out = expand_instances(&host).unwrap();
+        let p = points(&out, names::P);
+        near(p[0], Vec3(10.0, 22.0, 30.0));
+        near(p[1], Vec3(9.0, 20.0, 30.0));
+        near(p[2], Vec3(10.0, 20.0, 31.0));
+        assert_eq!(out.indices(), &[0, 1, 2], "a rotation keeps the winding");
+        assert_eq!(out.validate(), Ok(()));
+        assert!(out.instances().get(names::P).is_none());
+    }
+
+    /// The normal of a 45° face under `x`-stretch by 2 is the inverse
+    /// transpose, `(1/2, 1, 0)` normalised — not the rotated input — and the
+    /// quarter turn then takes `(x, y)` to `(−y, x)`. Hand-worked:
+    /// `(0.5, 1) / √1.25 = (0.4472, 0.8944)` → `(−0.8944, 0.4472)`.
+    #[test]
+    fn normals_take_the_inverse_transpose_and_are_renormalised() {
+        let diagonal = 0.5_f32.sqrt();
+        let host = stamped(
+            triangle(Vec3(diagonal, diagonal, 0.0)),
+            Vec3(0.0, 0.0, 0.0),
+            Some(quarter_z()),
+            Some(Vec3(2.0, 1.0, 1.0)),
+        );
+        let out = expand_instances(&host).unwrap();
+        for n in points(&out, names::N) {
+            near(n, Vec3(-0.894_427_2, 0.447_213_6, 0.0));
+        }
+
+        // A pure rotation is the rotation of the normal.
+        let host = stamped(
+            triangle(Vec3(1.0, 0.0, 0.0)),
+            Vec3(0.0, 0.0, 0.0),
+            Some(quarter_z()),
+            None,
+        );
+        for n in points(&expand_instances(&host).unwrap(), names::N) {
+            near(n, Vec3(0.0, 1.0, 0.0));
+        }
+    }
+
+    /// A mirror keeps the normal pointing out of the solid and turns the
+    /// winding around to agree: `x → −x` sends the normal `(1, 0, 0)` to
+    /// `(−1, 0, 0)` (still outward on the mirrored side) and `[0, 1, 2]` to
+    /// `[0, 2, 1]`.
+    #[test]
+    fn a_mirrored_instance_flips_its_winding_and_reflects_its_normals() {
+        let host = stamped(
+            triangle(Vec3(1.0, 0.0, 0.0)),
+            Vec3(0.0, 0.0, 0.0),
+            None,
+            Some(Vec3(-1.0, 1.0, 1.0)),
+        );
+        let out = expand_instances(&host).unwrap();
+        assert_eq!(out.indices(), &[0, 2, 1]);
+        near(points(&out, names::P)[0], Vec3(-1.0, 0.0, 0.0));
+        for n in points(&out, names::N) {
+            near(n, Vec3(-1.0, 0.0, 0.0));
+        }
+        // The geometric normal of the flipped triangle agrees with the
+        // reflected one: (b - a) × (c - a) for indices (0, 2, 1) of the
+        // mirrored points A' = (−1,0,0), C' = (0,0,1), B' = (0,1,0).
+        let p = points(&out, names::P);
+        let (a, b, c) = (p[0], p[2], p[1]);
+        let (u, v) = (
+            Vec3(b.0 - a.0, b.1 - a.1, b.2 - a.2),
+            Vec3(c.0 - a.0, c.1 - a.1, c.2 - a.2),
+        );
+        let cross_x = u.1 * v.2 - u.2 * v.1;
+        assert!(cross_x < 0.0, "winding disagrees with the reflected normal");
+    }
+
+    /// A planar source is lifted onto `z = 0` before it is placed, and two
+    /// instances (one rotated) place independently.
+    #[test]
+    fn a_planar_source_is_promoted_to_z_zero_before_the_placement() {
+        let mut path = Geometry::from_points(vec![Vec2(1.0, 0.0), Vec2(2.0, 0.0)]);
+        path.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        let mut host = Geometry::new();
+        host.instances_mut()
+            .insert(
+                names::P,
+                AttributeArray::Vec3(vec![Vec3(0.0, 0.0, 5.0), Vec3(0.0, 0.0, -5.0)]),
+            )
+            .unwrap();
+        host.instances_mut()
+            .insert(
+                names::ORIENT,
+                AttributeArray::Vec4(vec![Vec4(0.0, 0.0, 0.0, 1.0), quarter_z()]),
+            )
+            .unwrap();
+        host.set_instance_source(Some(Arc::new(path)));
+        let out = expand_instances(&host).unwrap();
+        let p = points(&out, names::P);
+        assert_eq!(p.len(), 4);
+        near(p[0], Vec3(1.0, 0.0, 5.0));
+        near(p[1], Vec3(2.0, 0.0, 5.0));
+        near(p[2], Vec3(0.0, 1.0, -5.0));
+        near(p[3], Vec3(0.0, 2.0, -5.0));
+        assert_eq!(out.validate(), Ok(()));
+    }
+
+    #[test]
+    fn a_curved_source_is_refused_in_3d_rather_than_flattened() {
+        let mut path = Geometry::from_points(vec![Vec2(1.0, 0.0), Vec2(2.0, 0.0)]);
+        path.points_mut()
+            .insert(
+                names::OUT_TAN,
+                AttributeArray::Vec2(vec![Vec2(0.0, 1.0), Vec2(0.0, 0.0)]),
+            )
+            .unwrap();
+        path.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        let host = stamped(path, Vec3(0.0, 0.0, 1.0), None, None);
+        assert!(matches!(
+            expand_instances(&host),
+            Err(GeometryOpError::TangentsIn3D { .. })
+        ));
+    }
+
+    /// The unit-level rule behind it, with the awkward cases: a zero scale
+    /// flattens the normal onto the collapsed axis instead of dividing by
+    /// zero, and a point inversion flips the normal.
+    #[test]
+    fn apply_normal_handles_degenerate_and_inverting_scales() {
+        let placement = |scale| InstancePlacement3 {
+            scale,
+            ..InstancePlacement3::IDENTITY
+        };
+        // Collapsing x: the surface becomes the plane x = 0, normal ±x.
+        near(
+            placement(Vec3(0.0, 1.0, 1.0)).apply_normal(Vec3(0.6, 0.8, 0.0)),
+            Vec3(1.0, 0.0, 0.0),
+        );
+        near(
+            placement(Vec3(-1.0, -1.0, -1.0)).apply_normal(Vec3(0.0, 0.0, 1.0)),
+            Vec3(0.0, 0.0, -1.0),
+        );
+        assert!(placement(Vec3(-1.0, 1.0, 1.0)).mirrors());
+        assert!(!placement(Vec3(-1.0, -1.0, 1.0)).mirrors());
     }
 }

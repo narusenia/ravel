@@ -632,6 +632,40 @@ impl InstancePlacement3 {
             v.2 * self.scale.2,
         ))
     }
+
+    /// A surface normal placed: the inverse-transpose of the linear part
+    /// `R · S`, which is `R · S⁻¹`, renormalised.
+    ///
+    /// Written with the cofactors of `S` (`n ⊙ (sy·sz, sx·sz, sx·sy)`) rather
+    /// than a division, so a scale of zero on an axis flattens the normal onto
+    /// that axis instead of producing infinity. The cofactor form is
+    /// `det(S) · S⁻¹`, so it is multiplied by the sign of the determinant: a
+    /// mirror (an odd number of negative scales) keeps the normal pointing out
+    /// of the solid it was pointing out of, and [`Self::mirrors`] says the
+    /// triangles' winding has to be flipped to agree with it. A normal that
+    /// flattens to nothing (two zero scales) falls back to the turned input.
+    pub fn apply_normal(&self, n: Vec3) -> Vec3 {
+        let (sx, sy, sz) = (self.scale.0, self.scale.1, self.scale.2);
+        let sign = if self.mirrors() { -1.0 } else { 1.0 };
+        let cofactor = Vec3(
+            n.0 * sy * sz * sign,
+            n.1 * sx * sz * sign,
+            n.2 * sx * sy * sign,
+        );
+        let unit = |v: Vec3| {
+            let length = (v.0 * v.0 + v.1 * v.1 + v.2 * v.2).sqrt();
+            (length > 1e-20).then(|| Vec3(v.0 / length, v.1 / length, v.2 / length))
+        };
+        unit(self.rotation.rotate(cofactor))
+            .or_else(|| unit(self.rotation.rotate(n)))
+            .unwrap_or(n)
+    }
+
+    /// Whether the linear part reverses handedness (an odd number of negative
+    /// scales), so a mesh it places needs its winding flipped.
+    pub fn mirrors(&self) -> bool {
+        self.scale.0 * self.scale.1 * self.scale.2 < 0.0
+    }
 }
 
 /// The instance columns a 3D placement is read from (REQ-3D-009).
@@ -918,6 +952,24 @@ impl Geometry {
         let start = self.indices.len();
         Arc::make_mut(&mut self.indices).extend_from_slice(extra);
         start
+    }
+
+    /// Reverses the winding of every triangle of mesh primitive `primitive`
+    /// (swaps the second and third index of each). A no-op for a path or an
+    /// out-of-range run. For a placement that mirrors the mesh: the normals
+    /// keep pointing out of the solid, so the order of the corners has to turn
+    /// around to still agree with them.
+    pub fn flip_mesh_winding(&mut self, primitive: usize) {
+        let Some(Primitive::Mesh { indices, .. }) = self.primitives.get(primitive) else {
+            return;
+        };
+        let run = indices.clone();
+        if run.end > self.indices.len() {
+            return;
+        }
+        for triangle in Arc::make_mut(&mut self.indices)[run].chunks_exact_mut(3) {
+            triangle.swap(1, 2);
+        }
     }
 
     /// The triangle indices of one mesh primitive, or `None` for a path or an

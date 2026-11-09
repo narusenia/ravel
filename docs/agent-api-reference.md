@@ -625,6 +625,8 @@ attach(&ParameterValue, frame, &ctx) -> Option<ParameterValue>
     // attaching does not move the picture
 set_source(&ParameterValue, component, source) -> Option<ParameterValue>
     // stores the source WHETHER OR NOT IT COMPILES
+compile_error(source) -> Option<String>                // draft message
+compile_diagnostic(source) -> Option<(String, Span)>   // + the compiler's own byte span
 detach(&ParameterValue, frame, &ctx) -> Option<ParameterValue>
     // freezes each driven component; leaves the others' keyframes alone
 ```
@@ -3284,6 +3286,14 @@ ExpressionEditor::new(&Entity<EditorState>).compact() / .invalid(..)
     // kit's `IndentInline` / `Enter{shift}` / `Paste` actions caught in the
     // capture phase on the field; Shift+Enter inserts nothing, a paste with line
     // breaks is flattened by `single_line`.
+set_expression_error(&Entity<EditorState>, Option<(Span, &str)>, &mut App)
+    // Danger underline at the span (widened to one visible character when the
+    // span is empty); `None` clears. Positions come from `Span::line_column`
+    // (1-based there, the kit's `Position` is 0-based). The kit drops the
+    // underline on any edit, so the host sets it again after each `Change`.
+    // Writes the state: call from an event handler, not `render`.
+underline_range(text, Span) -> Option<Range<usize>>  / diagnostic_positions(text, &Range<usize>) -> Range<Position>
+diagnostic_colors(&Colors) -> DiagnosticColors   // error = danger; projected by `expression_editor_state`
 expression_completion::complete(&Vocabulary, text, caret) -> Option<(Word, Vec<Candidate>)>
 expression_completion::word_at(text, caret) -> Option<Word>   // { range, attribute }
     // Pure. After `@` only attributes; else functions, constants, variables.

@@ -134,6 +134,18 @@ struct GalleryInputs {
 
 impl GalleryInputs {
     fn new(window: &mut Window, cx: &mut App) -> Self {
+        let inputs = Self::build(window, cx);
+        // The invalid editor underlines where its source fails to compile;
+        // editing it clears the underline, as fixing the text should.
+        let [_, bad, ..] = &inputs.expression;
+        let source = bad.read(cx).value().to_string();
+        if let Err(error) = ravel_core::expression::compile(&source, &Scope::parameter_context()) {
+            ravel_widgets::set_expression_error(bad, Some((error.span, &error.to_string())), cx);
+        }
+        inputs
+    }
+
+    fn build(window: &mut Window, cx: &mut App) -> Self {
         Self {
             text: StateRow::new("Ravel", window, cx),
             text_compact: StateRow::new("Ravel", window, cx),

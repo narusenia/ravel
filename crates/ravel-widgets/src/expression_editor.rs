@@ -49,8 +49,9 @@ use gpui::{
     prelude::FluentBuilder as _, px, relative,
 };
 use gpui_base::input::{
-    EditorState, Enter, Escape, FoldRange, HighlightStyleResolver, IndentInline, InputEdit,
-    InputHighlighter, InputOverlayKind, MoveDown, MoveUp, Paste, Rope,
+    Diagnostic, DiagnosticColors, DiagnosticSeverity, EditorState, Enter, Escape, FoldRange,
+    HighlightStyleResolver, IndentInline, InputEdit, InputEditorStyle, InputHighlighter,
+    InputOverlayKind, MoveDown, MoveUp, Paste, Position, Rope,
 };
 use gpui_base::{InputBase, StyledExt as _};
 use lsp_types::CompletionItem;
@@ -163,7 +164,23 @@ impl InputHighlighter for ExpressionHighlighter {
     }
 }
 
+/// The colours an error underline and its siblings are drawn in. The kit leaves
+/// them transparent unless the host projects some, so without this the
+/// underline would be there and invisible.
+pub fn diagnostic_colors(colors: &Colors) -> DiagnosticColors {
+    DiagnosticColors {
+        error: colors.danger,
+        warning: colors.danger,
+        info: colors.info,
+        hint: colors.muted_foreground,
+    }
+}
+
 fn install_highlighter(state: &mut EditorState, cx: &mut Context<EditorState>) {
+    state.set_editor_style(InputEditorStyle {
+        diagnostics: diagnostic_colors(&cx.tokens().colors),
+        ..InputEditorStyle::default()
+    });
     state.set_highlighter_factory(
         Rc::new(|_| {
             Some(Box::new(ExpressionHighlighter {
@@ -405,6 +422,75 @@ impl Render for CompletionPopup {
 /// it must not run from `render`.
 pub fn refresh_expression_colours(state: &Entity<EditorState>, cx: &mut App) {
     state.update(cx, install_highlighter);
+}
+
+/// The bytes an error underline covers for `span` in `text`.
+///
+/// A span can be empty (an expression that ends too soon is reported *at* the
+/// end), and an empty underline cannot be seen, so it widens to the character
+/// after it, or the one before when it is at the end. `None` only for empty text.
+pub fn underline_range(text: &str, span: Span) -> Option<Range<usize>> {
+    let clamp = |at: u32| {
+        let mut at = (at as usize).min(text.len());
+        while !text.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
+    };
+    let (start, end) = (clamp(span.start), clamp(span.end));
+    if start < end {
+        return Some(start..end);
+    }
+    if let Some(next) = text[start..].chars().next() {
+        return Some(start..start + next.len_utf8());
+    }
+    let previous = text[..start].chars().next_back()?;
+    Some(start - previous.len_utf8()..start)
+}
+
+/// Where `range` sits as the kit's line / character positions.
+///
+/// Worked out with [`Span::line_column`] — the same rule the error message's
+/// line and column use — so a multi-line expression underlines the character
+/// the message names. `line_column` is 1-based, the kit's `Position` 0-based.
+pub fn diagnostic_positions(text: &str, range: &Range<usize>) -> Range<Position> {
+    let position = |offset: usize| {
+        let (line, column) = Span::empty_at(offset as u32).line_column(text);
+        Position::new(line - 1, column - 1)
+    };
+    position(range.start)..position(range.end)
+}
+
+/// Underline where an expression fails to compile, or clear the underline.
+///
+/// `error` is the span from the compile error and its message. The underline is
+/// the danger colour and the message stays wherever the host shows it (under
+/// the field); the editor clears the underline itself on the next edit, so the
+/// host calls this again after each `Change` with the new compile result.
+/// It writes the state, so call it from an event handler, never from `render`.
+pub fn set_expression_error(
+    state: &Entity<EditorState>,
+    error: Option<(Span, &str)>,
+    cx: &mut App,
+) {
+    state.update(cx, |state, cx| {
+        let text = state.text().clone();
+        let source = text.to_string();
+        let Some(diagnostics) = state.diagnostics_mut() else {
+            return;
+        };
+        diagnostics.reset(&text);
+        if let Some((span, message)) = error
+            && let Some(range) = underline_range(&source, span)
+        {
+            let positions = diagnostic_positions(&source, &range);
+            diagnostics.push(
+                Diagnostic::new(positions, message.to_string())
+                    .with_severity(DiagnosticSeverity::Error),
+            );
+        }
+        cx.notify();
+    });
 }
 
 /// A single-line expression field with syntax colouring.
@@ -1020,6 +1106,109 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(cx.debug_bounds("ravel-expression-completions").is_none());
         let _ = state;
+    }
+
+    #[test]
+    fn an_empty_span_widens_to_a_character_you_can_see() {
+        let at = |text: &str, offset: u32| underline_range(text, Span::empty_at(offset));
+        assert_eq!(at("1 +", 3), Some(2..3), "at the end: the last character");
+        assert_eq!(at("1 + 2", 2), Some(2..3), "inside: the next character");
+        assert_eq!(at("é+", 2), Some(2..3), "on a boundary of a wide character");
+        assert_eq!(
+            at("é", 1),
+            Some(0..2),
+            "inside a wide character: snapped back"
+        );
+        assert_eq!(at("", 0), None);
+        assert_eq!(
+            underline_range("sin(1 + $)", Span { start: 8, end: 9 }),
+            Some(8..9)
+        );
+        assert_eq!(
+            underline_range("ab", Span { start: 1, end: 99 }),
+            Some(1..2),
+            "a span past the end is clamped"
+        );
+    }
+
+    #[test]
+    fn positions_use_the_same_rule_as_the_error_message() {
+        // `Span::line_column` is 1-based; the kit's `Position` is 0-based.
+        let text = "1 +\n  $ * αβ";
+        let dollar = text.find('$').unwrap();
+        let positions = diagnostic_positions(text, &(dollar..dollar + 1));
+        assert_eq!(positions.start, Position::new(1, 2));
+        assert_eq!(positions.end, Position::new(1, 3));
+        let (line, column) = Span::empty_at(dollar as u32).line_column(text);
+        assert_eq!(
+            (line - 1, column - 1),
+            (positions.start.line, positions.start.character)
+        );
+        // Columns count characters, not bytes.
+        let beta = text.find('β').unwrap();
+        assert_eq!(
+            diagnostic_positions(text, &(beta..beta + 2)).start,
+            Position::new(1, 7)
+        );
+    }
+
+    #[test]
+    fn the_underline_is_the_danger_colour_in_both_palettes() {
+        for colors in [Colors::light(), Colors::dark()] {
+            let diagnostics = diagnostic_colors(&colors);
+            assert_eq!(diagnostics.error, colors.danger);
+            assert!(diagnostics.error.alpha > 0.0, "an invisible underline");
+        }
+    }
+
+    fn underlined(cx: &mut VisualTestContext, state: &Entity<EditorState>) -> Vec<Range<usize>> {
+        cx.update(|_, cx| {
+            let state = state.read(cx);
+            let len = state.text().len();
+            state
+                .diagnostics()
+                .expect("a code-editor state has diagnostics")
+                .range(0..len)
+                .map(|entry| entry.range.clone())
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    fn an_error_underlines_its_span_and_editing_or_clearing_removes_it(cx: &mut TestAppContext) {
+        let (cx, state, _) = built_with(cx, "sin(1 + $)");
+        assert!(underlined(cx, &state).is_empty());
+
+        cx.update(|_, cx| {
+            set_expression_error(&state, Some((Span { start: 8, end: 9 }, "bad")), cx);
+        });
+        assert_eq!(underlined(cx, &state), vec![Range { start: 8, end: 9 }]);
+        let severity = cx.update(|_, cx| {
+            state
+                .read(cx)
+                .diagnostics()
+                .unwrap()
+                .range(0..10)
+                .next()
+                .unwrap()
+                .severity
+        });
+        assert_eq!(severity, DiagnosticSeverity::Error);
+
+        // Fixing the text clears it (the host then sets the new result).
+        cx.simulate_keystrokes("left backspace backspace");
+        cx.run_until_parked();
+        assert!(
+            underlined(cx, &state).is_empty(),
+            "stale underline after an edit"
+        );
+
+        cx.update(|_, cx| {
+            set_expression_error(&state, Some((Span { start: 0, end: 3 }, "bad")), cx);
+        });
+        assert_eq!(underlined(cx, &state), vec![Range { start: 0, end: 3 }]);
+        cx.update(|_, cx| set_expression_error(&state, None, cx));
+        assert!(underlined(cx, &state).is_empty());
     }
 
     struct NoStyles;

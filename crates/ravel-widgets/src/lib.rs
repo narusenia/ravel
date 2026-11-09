@@ -77,8 +77,9 @@ pub use icon::{Icon, IconPath, UiIcon};
 
 pub use expression_completion::{Candidate, CandidateKind, Word, complete, word_at};
 pub use expression_editor::{
-    EXPRESSION_LANGUAGE, ExpressionEditor, expression_editor_state, refresh_expression_colours,
-    single_line, style_runs, token_color,
+    EXPRESSION_LANGUAGE, ExpressionEditor, diagnostic_colors, diagnostic_positions,
+    expression_editor_state, refresh_expression_colours, set_expression_error, single_line,
+    style_runs, token_color, underline_range,
 };
 
 /// The expression editor's state, re-exported.

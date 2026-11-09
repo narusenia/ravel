@@ -248,6 +248,18 @@ kit フォークの改造は要らない。検証は kit（rev `7eafdc2`）の�
 - `Span` が保持されるヘッドレステスト（ドラフトに位置が残る）
 - 既存の「確定を妨げない」テストが無改変で通る
 
+#### EXED-5 実装メモ
+
+- Properties はまだ素の `Input` なので、`Span` は `ExpressionDraft` /
+  `ExpressionComponent` に保持するだけ（`compile_diagnostic` が文言と `Span` を返す。
+  `compile_error` は従来どおり）。ウィジェット側は `set_expression_error(state,
+  Some((span, message)), cx)`。実機確認は gallery の「invalid」の欄。EXED-6 が
+  `Change` のたびにドラフトの `Span` を渡す
+- kit は**編集のたびに診断を消す**ので、古い位置に下線が残ることは無い。ホストは
+  各 `Change` の後、新しい結果で呼び直す
+- 空の `Span`（式が途中で終わる）は 1 文字へ広げる。下線の色は
+  `diagnostic_colors`（`expression_editor_state` が kit へ渡す。渡さないと透明）
+
 ### EXED-6 ロールアウトと文書
 
 依存: EXED-4, EXED-5

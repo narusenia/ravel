@@ -170,3 +170,67 @@ spec の制約どおり。sim の下流に sim を繋いだ場合は評価エラ
 - **GPU でのシミュレーション**。CPU SoA（rayon）のみ
   （`procedural-geometry.md` の GPU 方針に従う）。
 - **グラフ内反復**（REQ-CORE-013）。spec が v1 で採用しないと明記。
+
+## 実装メモ
+
+計画の起草（2026-07-27）後にコードが動いたので、計画が引いている位置は
+次に読み替える（行番号は腐るので関数名で書く）。
+
+- ノード結果キャッシュ: `eval.rs:457` の `HashMap` ではなく、`eval.rs` の
+  `cache_store` モジュールの `CacheStore`（`Evaluator::store`）。
+- scope 無効化: `eval.rs:490-511` ではなく `Evaluator::invalidate_scope` /
+  `drop_scope_owner_caches` / `prune_scope_state`。`PathSegment` のスコープ
+  次元（SCOPE-1）は実装済みで、sim トラックはその `NodeKey` を共有する。
+- `EvalRequest` / `EvalUpdate` は `runtime/eval_service.rs`。複数ターゲット化
+  （属性スプレッドシート単位 1）は実装済みで、その上に暫定フラグを足す。
+- バイト予算: `cache_budget.rs` の `CacheKind::Sim`（保護枠 =
+  `sim_reserve_ratio`）が既にあり、sim はそこへ `reserve` する。予算の
+  追加実装は無い。
+
+### 単位 1（SIM-1）
+
+- 実装は `crates/ravel-core/src/eval/sim.rs`（`eval.rs` の子モジュール。
+  `Evaluator` の private フィールドと `NodeKey` をそのまま使うため）。
+- `StatefulProcessor`（`initial` / `step` / `output` / `byte_size`）。計画の
+  スケッチに **`output`** を足した。型消去アダプタは状態を `NodeData` へ
+  戻す手段が要るため。`SimStepper`（型消去）→ `StatefulAdapter<P>`
+  （`NodeProcessor`。`is_time_dependent` と `pulls_inputs_itself` は真）。
+  登録は `stateful_processor(p)`（`ProcessorRegistry` からも使える）。
+- `SimCache`（`NodeKey → SimTrack`）。`Evaluator::sim_state_at`
+  （`EvalScope::sim_state` の実装）が `fill_sim_track` で
+  `[last+1, t]` を埋める。1 フレームごとに状態を格納するので、失敗や中断で
+  もそこまでの充填は残る。
+- 入力とパラメータは**要求フレームではなく各 step のフレーム**で引く
+  （`sim_inputs_at`。入力は `TimeShift(node, frame)` スコープ、パラメータは
+  `resolve_channel_params` + `materialize_params` + `parameter_overlays`）。
+  そうしないと状態が「どのフレームで要求されたか」に依存する。
+  `parameter_overlays` は `eval_node` のパラメータポート処理を括り出した
+  もので、両者が同じ規則を読む。`pull_input_at` は `evaluate_input_at` の
+  本体（`pull_log` へ記録するかを選べる）。sim は記録しない — 記録すると
+  キャッシュヒットのたびに全フレーム分の再引きが走る。
+- バイト予算: トラック 1 本 = 予約 1 件で、伸びるたびに取り直す。追い出しは
+  **トラック単位**（`SimCache::drop_evicted`）で、sim 同士でのみ起こる。
+  トラック内の先頭保持は、1 本が階層全体を超える場合を含め v1 では扱わない。
+- 多段: `Evaluator::sim_active` が立っている間に別の sim が始まれば
+  `EvalError::ProcessFailed`（下流に sim を繋いだ）。
+- `register` / `invalidate_node` は該当ノードのトラックを落とし、
+  `invalidate_all` / `reset` は全部落とす。
+
+### 単位 2（SIM-2）
+
+- 無効化の権威は**引く時点の前提照合**（`SimCache::discard_if_stale`）。
+  `Evaluator::sim_premise_hash` が上流サブグラフ（配線と `NodeOutput`
+  バインディングで届くノード）の構造・種別・bypass・ポート・全パラメータ
+  （キーフレーム・式を含む）と fps・コンプ基準をハッシュする。位置・ラベル・
+  色・z と上流でないノードは入れない。`Premise` が直近のグラフを
+  `Graph::ptr_eq` で覚え、同じグラフなら再計算しない。
+- 解像度・品質はハッシュに入れない（プレビュー ↔ 最終の切替で全破棄に
+  なるため）。`step` はこれらを読まない契約（`StatefulProcessor` の doc）。
+- scope 統合: トラックは `invalidate_scope` では**落とさない**（同じレイヤー
+  ネットワーク内の無関係な編集で落ちるため）。落とす経路は
+  `sim_prune_layer`（`set_document` が、ネットワークが変わったレイヤーと
+  削除されたレイヤーに対して呼ぶ。ノードがもう無いトラックだけを解放）と
+  `drop_sim_under`（shift / iteration スコープの退役。`PathId` の再発行前に
+  必須）。シェル側の編集（`layer_shell_changed`）はトラックに触れない。
+- 既知の制約: `TimeShift` スコープの内側にある sim はスコープごとに別
+  トラックになる。

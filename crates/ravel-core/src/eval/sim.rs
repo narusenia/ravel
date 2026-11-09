@@ -844,7 +844,7 @@ impl Evaluator {
     /// Inputs are pulled as the scope `TimeShift(node, frame)`; parameters are
     /// resolved here with the same rules the evaluator applies at the
     /// requested frame (parameter ports, identifier parameters, channels).
-    fn sim_inputs_at(
+    pub(super) fn sim_inputs_at(
         &mut self,
         graph: &Graph,
         node: &Node,
@@ -955,7 +955,7 @@ fn collect_node_ids(graph: &Graph, out: &mut HashSet<NodeId>) {
 mod tests {
     use super::*;
     use crate::cache_budget::{CacheBudgetConfig, Tier};
-    use crate::eval::NodeProcessor;
+    use crate::eval::{Bindings, NodeProcessor};
     use crate::graph::ParameterValue;
     use crate::id::{DataTypeId, EdgeId, InputPortIndex, OutputPortIndex};
     use crate::types::{FrameRate, Scalar};
@@ -1499,7 +1499,7 @@ mod tests {
                 network,
                 NodeId::new(2),
                 &ctx_at(frame),
-                Vec::new(),
+                Bindings::default(),
             )
             .unwrap();
         value_of(&out)
@@ -1835,7 +1835,7 @@ mod tests {
                     &graph,
                     node,
                     &ctx_at(frame),
-                    Vec::new(),
+                    Bindings::default(),
                 )
                 .unwrap();
             value_of(&out)
@@ -1867,7 +1867,7 @@ mod tests {
                 &graph,
                 node,
                 &ctx_at(4),
-                Vec::new(),
+                Bindings::default(),
             )
             .unwrap();
         }

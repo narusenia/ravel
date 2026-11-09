@@ -36,6 +36,8 @@ pub mod scatter;
 pub mod scene;
 pub mod scene_render;
 pub mod shape;
+#[cfg(test)]
+mod sim_test_util;
 pub mod style;
 pub mod subnet;
 pub mod text;

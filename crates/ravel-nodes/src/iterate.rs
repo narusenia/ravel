@@ -21,7 +21,10 @@
 //! iteration, or more pieces than `max_iterations`, is an evaluation error —
 //! never a truncation.
 
-use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, PathSegment, ResolvedParams};
+use ravel_core::eval::{
+    BindingValues, Bindings, EvalContext, EvalError, EvalScope, NodeProcessor, PathSegment, Rebind,
+    ResolvedParams,
+};
 use ravel_core::geometry::{Geometry, names, ops};
 use ravel_core::graph::Node;
 use ravel_core::network as net;
@@ -69,17 +72,7 @@ impl NodeProcessor for IterateProcessor {
             .position(|port| port.name == net::ITERATE_PORT_GEOMETRY)
             .unwrap_or(0);
 
-        let empty = Geometry::new();
-        let input = inputs.first().and_then(Option::as_ref);
-        let source = match input {
-            Some(value) => value
-                .downcast_ref::<Geometry>()
-                .ok_or_else(|| anyhow::anyhow!("geometry.iterate: input is not a geometry"))?,
-            None => &empty,
-        };
-        let attribute = params.str_or("attribute", names::PIECE);
-        let pieces = ops::split_by_piece(source, attribute)
-            .map_err(|error| anyhow::anyhow!("geometry.iterate: {error}"))?;
+        let pieces = split_input(inputs, params)?;
         let max = params
             .i32_or("max_iterations", MAX_ITERATIONS_DEFAULT)
             .max(0) as usize;
@@ -92,16 +85,8 @@ impl NodeProcessor for IterateProcessor {
 
         let mut results: Vec<Arc<dyn NodeData>> = Vec::with_capacity(pieces.len());
         for (index, piece) in pieces.into_iter().enumerate() {
-            let bindings = vec![
-                (
-                    net::ITERATE_PORT_GEOMETRY.to_owned(),
-                    Arc::new(piece) as Arc<dyn NodeData>,
-                ),
-                (
-                    net::ITERATE_PORT_INDEX.to_owned(),
-                    Arc::new(Scalar(index as f32)) as Arc<dyn NodeData>,
-                ),
-            ];
+            let bindings =
+                Bindings::rebindable(piece_bindings(piece, index), Arc::new(PieceAt { index }));
             let record = scope.evaluate_sub(
                 PathSegment::Iteration(node.id, index as u32),
                 &inner,
@@ -124,6 +109,64 @@ impl NodeProcessor for IterateProcessor {
     fn is_time_dependent(&self) -> bool {
         // The body may be time-driven; its nodes keep their own scoped caches.
         true
+    }
+}
+
+/// The input geometry cut into its pieces, ascending by attribute value.
+fn split_input(
+    inputs: &[Option<Arc<dyn NodeData>>],
+    params: &ResolvedParams,
+) -> anyhow::Result<Vec<Geometry>> {
+    let empty = Geometry::new();
+    let source = match inputs.first().and_then(Option::as_ref) {
+        Some(value) => value
+            .downcast_ref::<Geometry>()
+            .ok_or_else(|| anyhow::anyhow!("geometry.iterate: input is not a geometry"))?,
+        None => &empty,
+    };
+    let attribute = params.str_or("attribute", names::PIECE);
+    ops::split_by_piece(source, attribute)
+        .map_err(|error| anyhow::anyhow!("geometry.iterate: {error}"))
+}
+
+/// What the body's `net.in` is offered for piece number `index`.
+fn piece_bindings(piece: Geometry, index: usize) -> BindingValues {
+    vec![
+        (
+            net::ITERATE_PORT_GEOMETRY.to_owned(),
+            Arc::new(piece) as Arc<dyn NodeData>,
+        ),
+        (
+            net::ITERATE_PORT_INDEX.to_owned(),
+            Arc::new(Scalar(index as f32)) as Arc<dyn NodeData>,
+        ),
+    ]
+}
+
+/// Piece number `index` at another frame: the node's input is pulled for that
+/// frame and cut again. A piece the geometry no longer has at that frame is
+/// empty (the body of an iteration that does not exist there is not run, so
+/// nothing reads it, but a shifted pull from a sibling iteration may ask).
+struct PieceAt {
+    index: usize,
+}
+
+impl Rebind for PieceAt {
+    fn rebind(
+        &self,
+        scope: &mut dyn EvalScope,
+        at: &EvalContext,
+    ) -> Result<BindingValues, EvalError> {
+        let args = scope.process_args_at(at)?;
+        let node = args.node.id;
+        let mut pieces = split_input(&args.inputs, &args.params)
+            .map_err(|source| EvalError::ProcessFailed { node, source })?;
+        let piece = if self.index < pieces.len() {
+            pieces.swap_remove(self.index)
+        } else {
+            Geometry::new()
+        };
+        Ok(piece_bindings(piece, self.index))
     }
 }
 
@@ -653,5 +696,72 @@ mod tests {
                 samples[4], samples[0], samples[8]
             );
         }
+    }
+
+    /// Two pieces whose points all sit at `x = frame`: the geometry shows
+    /// which frame it was pulled at.
+    struct FramePieces;
+    impl NodeProcessor for FramePieces {
+        fn process(
+            &self,
+            _node: &Node,
+            ctx: &EvalContext,
+            _inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            let mut geometry = Geometry::from_points(
+                (0..4)
+                    .map(|i| Vec2(ctx.frame as f32, (i / 2) as f32))
+                    .collect(),
+            );
+            for i in 0..2 {
+                geometry.push_primitive(Primitive::Path {
+                    verts: (2 * i)..(2 * i + 2),
+                    closed: false,
+                });
+            }
+            geometry
+                .primitive_attrs_mut()
+                .insert(names::PIECE, AttributeArray::I32(vec![0, 1]))
+                .unwrap();
+            Ok(Arc::new(geometry))
+        }
+
+        fn is_time_dependent(&self) -> bool {
+            true
+        }
+    }
+
+    /// A time shift inside the body reads the iteration's geometry at the
+    /// shifted frame: the piece is re-cut from the input pulled at that frame.
+    #[test]
+    fn a_time_shift_in_the_body_reads_the_piece_at_the_shifted_frame() {
+        use crate::sim_test_util::ShiftBack;
+        let shift = Node::new(NodeId::new(TAG), "test.shift")
+            .with_input("geometry", &[DataTypeId::GEOMETRY])
+            .with_input("index", &[DataTypeId::SCALAR])
+            .with_output("geometry", DataTypeId::GEOMETRY);
+        let body = body_through(shift);
+        let (mut ev, graph, _) = setup(Geometry::new(), body, 16);
+        ev.register(NodeId::new(SOURCE), Arc::new(FramePieces));
+        ev.register(NodeId::new(TAG), Arc::new(ShiftBack(4)));
+
+        let at_ten = EvalContext::new(10, FrameRate::new(30, 1), (64, 64));
+        let out = ev.evaluate(&graph, NodeId::new(ITERATE), &at_ten).unwrap();
+
+        let geometry = out.downcast_ref::<Geometry>().unwrap();
+        assert_eq!(geometry.point_count(), 4, "both pieces come back");
+        // The body reads frame 10 - 4 = 6, not the frame it was entered at.
+        let xs: Vec<f32> = geometry
+            .points()
+            .get(names::P)
+            .unwrap()
+            .as_vec2(names::P)
+            .unwrap()
+            .iter()
+            .map(|p| p.0)
+            .collect();
+        assert_eq!(xs, [6.0; 4]);
     }
 }

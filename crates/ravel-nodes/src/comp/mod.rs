@@ -56,7 +56,10 @@ pub use transform::{CompTransformGpuProcessor, CompTransformProcessor};
 
 use ravel_core::composition::compile::{NodeRole, decode_deterministic_node_id};
 use ravel_core::composition::{Composition, Layer};
-use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, PathSegment, ResolvedParams};
+use ravel_core::eval::{
+    BindingValues, Bindings, EvalContext, EvalError, EvalScope, NodeProcessor, PathSegment, Rebind,
+    ResolvedParams,
+};
 use ravel_core::graph::Node;
 use ravel_core::network as net;
 use ravel_core::types::{FrameBuffer, NodeData, PortRecord};
@@ -191,6 +194,43 @@ fn layer_network_context_remapped(
 // comp.network — layer network boundary (REQ-LAYER-006/007)
 // ===========================================================================
 
+/// The `source` binding of an adjustment layer's network, if the lower stack
+/// has anything.
+fn source_binding(source: Option<Arc<dyn NodeData>>) -> BindingValues {
+    source
+        .map(|source| (net::PORT_SOURCE.to_string(), source))
+        .into_iter()
+        .collect()
+}
+
+/// The composited lower stack an adjustment layer reads, at another frame.
+///
+/// `at` is in the layer network's own time, so it is mapped back to
+/// composition time by the same frame offset the layer network sits at.
+/// **Shortcut:** a layer with a time remap has no inverse, so under one the
+/// offset is applied as a plain frame delta; revisit if a remapped adjustment
+/// layer ever needs a shifted `source` that follows the remap.
+struct LowerStack {
+    /// The context the shell node was processed under (composition time).
+    outer: EvalContext,
+    /// The context the layer's network was entered with (layer-local time).
+    inner: EvalContext,
+}
+
+impl Rebind for LowerStack {
+    fn rebind(
+        &self,
+        scope: &mut dyn EvalScope,
+        at: &EvalContext,
+    ) -> Result<BindingValues, EvalError> {
+        let delta = at.frame as i64 - self.inner.frame as i64;
+        let frame = (self.outer.frame as i64 + delta).max(0) as u64;
+        let outer = self.outer.at_frame(frame);
+        let args = scope.process_args_at(&outer)?;
+        Ok(source_binding(args.inputs.first().and_then(|i| i.clone())))
+    }
+}
+
 /// Evaluates the owning layer's network under layer-local time and returns
 /// the network's `frame` output. Outside the layer's display interval the
 /// network is not evaluated and a transparent frame is produced.
@@ -235,12 +275,19 @@ impl NodeProcessor for CompNetworkProcessor {
 
         let local = layer_network_context_remapped(&comp, layer, local_frame, ctx, resolution);
 
-        let mut bindings: Vec<(String, Arc<dyn NodeData>)> = Vec::new();
-        if layer.adjustment
-            && let Some(source) = inputs.first().and_then(|i| i.clone())
-        {
-            bindings.push((net::PORT_SOURCE.to_string(), source));
-        }
+        // An adjustment layer's network receives the composited lower stack.
+        let bindings = if layer.adjustment {
+            let source = inputs.first().and_then(|i| i.clone());
+            Bindings::rebindable(
+                source_binding(source),
+                Arc::new(LowerStack {
+                    outer: *ctx,
+                    inner: local,
+                }),
+            )
+        } else {
+            Bindings::default()
+        };
 
         let comp_id = comp.id;
         let value = scope.evaluate_sub(
@@ -329,5 +376,112 @@ mod tests {
         // A layer starting at comp frame 12 sees its own frame 8.5.
         let local = layer_network_context(&comp, 20 - 12, &parent, (1920, 1080));
         assert!((local.sample_frame() - 8.5).abs() < 1e-9);
+    }
+
+    // ---- an adjustment layer's `source`, read at the frame being pulled -----
+
+    use crate::net::{NetInProcessor, NetOutProcessor};
+    use crate::sim_test_util::{Accumulate, FrameBufferValue, number_of};
+    use ravel_core::composition::Document;
+    use ravel_core::eval::{Evaluator, stateful_processor};
+    use ravel_core::graph::Graph;
+    use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+
+    const LOWER: u64 = 1;
+    const IN: u64 = 10;
+    const OUT: u64 = 11;
+    const SIM: u64 = 12;
+
+    fn edge(graph: Graph, id: u64, from: u64, to: u64) -> Graph {
+        graph
+            .add_edge(
+                EdgeId::new(id),
+                NodeId::new(from),
+                OutputPortIndex(0),
+                NodeId::new(to),
+                InputPortIndex(0),
+            )
+            .unwrap()
+    }
+
+    /// `net.in(source) -> sim -> net.out(frame)`.
+    fn adjustment_network() -> Graph {
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(IN), net::NET_IN_TYPE_KEY)
+                    .with_output(net::PORT_SOURCE, DataTypeId::FRAME_BUFFER),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(SIM), "test.sim")
+                    .with_input("a", &[DataTypeId::FRAME_BUFFER])
+                    .with_output("out", DataTypeId::FRAME_BUFFER),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(OUT), net::NET_OUT_TYPE_KEY)
+                    .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+            )
+            .unwrap();
+        edge(edge(graph, 100, IN, SIM), 101, SIM, OUT)
+    }
+
+    /// The root graph `lower -> comp.network` of a composition holding one
+    /// adjustment layer starting at comp frame `start`, an evaluator that
+    /// knows it, and the network node to pull.
+    fn adjustment_setup(start: i64, ev: Evaluator) -> (Graph, NodeId, Evaluator) {
+        let comp_id = ravel_core::id::CompId::new(1);
+        let layer_id = ravel_core::id::LayerId::new(1);
+        let mut layer =
+            Layer::new(layer_id, "Adjust", adjustment_network()).with_time(start, 0, 300);
+        layer.adjustment = true;
+        let document = Document::default()
+            .with_composition(Composition::new(comp_id, "C", (1, 1), FPS, 300).add_layer(layer));
+        let network_id = ravel_core::composition::compile::deterministic_node_id(
+            comp_id,
+            layer_id,
+            NodeRole::Network,
+        );
+        let network_node = Node::new(network_id, "comp.network")
+            .with_input("source", &[DataTypeId::FRAME_BUFFER])
+            .with_output("output", DataTypeId::FRAME_BUFFER);
+        let root = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(LOWER), "test.frame")
+                    .with_output("out", DataTypeId::FRAME_BUFFER),
+            )
+            .unwrap()
+            .add_node(network_node)
+            .unwrap();
+        let root = edge(root, 1, LOWER, network_id.raw());
+
+        let mut ev = ev;
+        ev.register(NodeId::new(LOWER), Arc::new(FrameBufferValue(10.0)));
+        ev.register(network_id, Arc::new(CompNetworkProcessor));
+        ev.register(NodeId::new(IN), Arc::new(NetInProcessor));
+        ev.register(NodeId::new(OUT), Arc::new(NetOutProcessor));
+        ev.register(
+            NodeId::new(SIM),
+            stateful_processor(Accumulate {
+                as_frame: true,
+                ..Accumulate::default()
+            }),
+        );
+        ev.set_document(Arc::new(document));
+        (root, network_id, ev)
+    }
+
+    #[test]
+    fn a_sim_reading_the_adjustment_source_gets_the_layer_under_it_at_each_step() {
+        let (root, network, mut ev) = adjustment_setup(4, Evaluator::new());
+
+        // Comp frame 9 is the layer's local frame 5, so the sim's steps 0..=5
+        // are comp frames 4..=9 and the lower layer there is 10 * frame.
+        let ctx = EvalContext::new(9, FPS, (1, 1));
+        let out = ev.evaluate(&root, network, &ctx).unwrap();
+
+        // Every step reading frame 9's stack would give 6 * 90 = 540.
+        let expected: f32 = (4..=9).map(|f| 10.0 * f as f32).sum();
+        assert_eq!(number_of(out.as_ref()), expected);
     }
 }

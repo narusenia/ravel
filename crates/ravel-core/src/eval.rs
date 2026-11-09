@@ -604,9 +604,117 @@ struct NodeKey {
     node: NodeId,
 }
 
+/// The named values of a scope's [`Bindings`].
+pub type BindingValues = Vec<(String, Arc<dyn NodeData>)>;
+
 /// Named input bindings offered to a nested scope's interface node
 /// (e.g. the `source` frame of an adjustment layer's `net.in`).
-pub type Bindings = Vec<(String, Arc<dyn NodeData>)>;
+///
+/// A binding is a value **and, optionally, a way to produce it again at another
+/// frame** ([`Rebind`]). The values are materialised at the frame the scope was
+/// entered at; a scope reached through a time shift
+/// ([`EvalScope::evaluate_time_shifted`]) must not read them, because they are
+/// the wrong frame's — it asks [`EvalScope::bindings_at`], which re-pulls them
+/// in the scope that produced them. Producers that attach no [`Rebind`] (a
+/// `layer.ref`, which binds nothing) keep the plain "carried over" behaviour.
+#[derive(Clone, Default)]
+pub struct Bindings {
+    values: BindingValues,
+    source: Option<BindingSource>,
+}
+
+impl Bindings {
+    /// Plain values, with no way to produce them at another frame.
+    pub fn new(values: BindingValues) -> Self {
+        Self {
+            values,
+            source: None,
+        }
+    }
+
+    /// `values`, produced for the scope entry's frame by something that can
+    /// produce them again for any other one.
+    pub fn rebindable(values: BindingValues, rebind: Arc<dyn Rebind>) -> Self {
+        Self {
+            values,
+            source: Some(BindingSource {
+                rebind,
+                anchor: None,
+                at: None,
+            }),
+        }
+    }
+
+    /// The named values.
+    pub fn values(&self) -> &[(String, Arc<dyn NodeData>)] {
+        &self.values
+    }
+
+    /// Whether these bindings can be produced at another frame.
+    pub fn is_rebindable(&self) -> bool {
+        self.source.is_some()
+    }
+}
+
+impl From<BindingValues> for Bindings {
+    fn from(values: BindingValues) -> Self {
+        Self::new(values)
+    }
+}
+
+/// How a scope's bindings are produced again at another frame.
+///
+/// Implemented by the processor that opens the scope. [`Self::rebind`] runs
+/// **in the scope that opened it** — the evaluator positions itself on the
+/// producer's node, graph and path first — with `at` in the *inner* scope's
+/// time domain (the context a shifted pull of the inner scope carries). A
+/// producer whose inner time is not its outer time (a layer network) maps `at`
+/// back itself. Pull what it needs through [`EvalScope::process_args_at`] and
+/// build the values with the same function it used the first time, so there is
+/// one rule for both.
+pub trait Rebind: Send + Sync {
+    /// The values for `at`.
+    fn rebind(
+        &self,
+        scope: &mut dyn EvalScope,
+        at: &EvalContext,
+    ) -> Result<BindingValues, EvalError>;
+}
+
+/// What a node's `process` is given, produced for an arbitrary frame
+/// ([`EvalScope::process_args_at`]).
+pub struct ProcessArgs {
+    /// The node being processed.
+    pub node: Arc<Node>,
+    /// One slot per declared input port; parameter ports are stripped.
+    pub inputs: Vec<Option<Arc<dyn NodeData>>>,
+    /// Parameters resolved for the frame.
+    pub params: ResolvedParams,
+}
+
+#[derive(Clone)]
+struct BindingSource {
+    rebind: Arc<dyn Rebind>,
+    /// Where the producer sits on the evaluation stacks. Set when the scope is
+    /// first entered and carried by every shifted copy.
+    anchor: Option<Anchor>,
+    /// The `(frame, time bits)` the values were produced for.
+    at: Option<(u64, u64)>,
+}
+
+/// The depth of each evaluation stack at the moment a scope was opened by its
+/// producer: enough to stand where the producer stood and pull again.
+///
+/// Stacks are strictly LIFO and a binding lives above its producer, so these
+/// lengths name live entries for as long as the bindings are reachable.
+#[derive(Clone, Copy)]
+struct Anchor {
+    path_len: usize,
+    active_len: usize,
+    bindings_len: usize,
+    processing_len: usize,
+    path_id: PathId,
+}
 
 /// Binding names whose value is not the same `Arc` in `old` and `new`,
 /// including names present in only one of the two.
@@ -947,7 +1055,8 @@ pub trait EvalScope {
     /// `bindings` are named values offered to the inner graph's interface
     /// node (e.g. the `source` frame of an adjustment layer's `net.in`).
     /// Re-entering a scope that is already on the evaluation stack yields
-    /// [`EvalError::CycleDetected`].
+    /// [`EvalError::CycleDetected`]. Call it from inside `process`: the scope
+    /// the bindings are produced in is the node being processed.
     fn evaluate_sub(
         &mut self,
         segment: PathSegment,
@@ -963,8 +1072,13 @@ pub trait EvalScope {
     /// `shift_node` is the calling node. The shifted pull keeps its own cache
     /// entries, so the same upstream node can hold values for `ctx.frame` and
     /// `frame` at once, and dirtying `shift_node` drops every shifted scope.
-    /// The enclosing scope's bindings carry over. This is a time remap only:
-    /// not motion blur, and not a layer shell's `time_remap`.
+    /// The enclosing scope's bindings are **read at `frame`**, not carried over
+    /// from `ctx.frame`: a `net.in` under the shift gets the subnet pin / the
+    /// adjustment layer's `source` / the iteration piece as they are at the
+    /// shifted frame, re-pulled in the scope that produced them
+    /// ([`Self::bindings_at`]). Bindings with no way to be produced again are
+    /// carried over unchanged. This is a time remap only: not motion blur, and
+    /// not a layer shell's `time_remap`.
     fn evaluate_time_shifted(
         &mut self,
         shift_node: NodeId,
@@ -974,7 +1088,7 @@ pub trait EvalScope {
         ctx: &EvalContext,
     ) -> Result<Arc<dyn NodeData>, EvalError> {
         let shifted = ctx.at_frame(frame);
-        let bindings = self.bindings().to_vec();
+        let bindings = self.bindings_at(&shifted)?;
         self.evaluate_sub(
             PathSegment::TimeShift(shift_node, frame),
             graph,
@@ -1024,8 +1138,35 @@ pub trait EvalScope {
         })
     }
 
-    /// Bindings offered by the caller of the innermost active scope.
+    /// Bindings offered by the caller of the innermost active scope, as they
+    /// are at the frame the scope was entered at.
     fn bindings(&self) -> &[(String, Arc<dyn NodeData>)];
+
+    /// The innermost scope's bindings produced for `at` instead.
+    ///
+    /// Bindings that can be produced again ([`Rebind`]) are re-pulled in the
+    /// scope that opened this one, as a pull of `at` — its own cache entries,
+    /// under a time-shift scope of the producing node. The result carries the
+    /// same re-pull, so a shift inside a shift reads the right frame too. The
+    /// default (and bindings with no [`Rebind`], or already produced for `at`)
+    /// returns the values it has.
+    fn bindings_at(&mut self, at: &EvalContext) -> Result<Bindings, EvalError> {
+        let _ = at;
+        Ok(Bindings::new(self.bindings().to_vec()))
+    }
+
+    /// The inputs and parameters of the node being processed, resolved for
+    /// `at` instead of the frame `process` was called at: every input pulled as
+    /// a shifted pull and every parameter port, identifier and channel read at
+    /// `at`. A [`Rebind`] uses this to produce its producer's bindings again.
+    /// The default refuses: only a scope that is inside a `process` can answer.
+    fn process_args_at(&mut self, at: &EvalContext) -> Result<ProcessArgs, EvalError> {
+        let _ = at;
+        Err(EvalError::ProcessFailed {
+            node: NodeId::new(0),
+            source: anyhow::anyhow!("this evaluation scope cannot pull a node's arguments"),
+        })
+    }
 
     /// The document being evaluated, if the evaluator was given one.
     fn document(&self) -> Option<Arc<Document>>;
@@ -2860,6 +3001,52 @@ impl Evaluator {
         self.graph_index(graph, self.path_id)
     }
 
+    /// Run `pull` standing where a binding's producer stood: the evaluation
+    /// stacks cut back to `anchor`, then restored.
+    ///
+    /// The producer's `process` is still running further down the real stack;
+    /// what a re-pull needs is its view — its path, graph, node and bindings —
+    /// so the pull's cache entries land in the producer's scope
+    /// (`<producer scope>/TimeShift(producer, frame)`) and not under whatever
+    /// inner scope asked. Everything cut off is put back whatever `pull`
+    /// returns, because the stacks are balanced by construction and a missed
+    /// restore would corrupt the evaluation that is still in flight.
+    fn at_anchor<T>(
+        &mut self,
+        anchor: Anchor,
+        pull: impl FnOnce(&mut Self) -> Result<T, EvalError>,
+    ) -> Result<T, EvalError> {
+        if anchor.path_len > self.path.len()
+            || anchor.active_len > self.active_scopes.len()
+            || anchor.bindings_len > self.bindings_stack.len()
+            || anchor.processing_len > self.processing.len()
+            || anchor.processing_len > self.processing_graphs.len()
+        {
+            return Err(EvalError::ProcessFailed {
+                node: NodeId::new(0),
+                source: anyhow::anyhow!("the scope that produced these bindings is gone"),
+            });
+        }
+        let path = self.path.split_off(anchor.path_len);
+        let active = self.active_scopes.split_off(anchor.active_len);
+        let bindings = self.bindings_stack.split_off(anchor.bindings_len);
+        let changes = self.binding_changes.split_off(anchor.bindings_len);
+        let processing = self.processing.split_off(anchor.processing_len);
+        let graphs = self.processing_graphs.split_off(anchor.processing_len);
+        let path_id = std::mem::replace(&mut self.path_id, anchor.path_id);
+
+        let result = pull(self);
+
+        self.path_id = path_id;
+        self.path.extend(path);
+        self.active_scopes.extend(active);
+        self.bindings_stack.extend(bindings);
+        self.binding_changes.extend(changes);
+        self.processing.extend(processing);
+        self.processing_graphs.extend(graphs);
+        result
+    }
+
     // ----- evaluation ------------------------------------------------------
 
     /// Pull-evaluate `output` for `ctx` at the root scope, returning its
@@ -2896,7 +3083,7 @@ impl Evaluator {
         self.path_id = self.paths.intern(path);
         self.active_scopes = path.to_vec();
         self.bindings_stack.clear();
-        self.bindings_stack.push(Vec::new());
+        self.bindings_stack.push(Bindings::default());
         self.binding_changes.clear();
         self.binding_changes.push(Vec::new());
         // Per-port freshness only describes the pull that recorded it.
@@ -3700,7 +3887,7 @@ impl EvalScope for Evaluator {
         graph: &Graph,
         output: NodeId,
         ctx: &EvalContext,
-        bindings: Bindings,
+        mut bindings: Bindings,
     ) -> Result<Arc<dyn NodeData>, EvalError> {
         if self.active_scopes.len() >= MAX_EVALUATION_DEPTH {
             return Err(EvalError::DepthLimitExceeded {
@@ -3710,6 +3897,22 @@ impl EvalScope for Evaluator {
         }
         if self.active_scopes.contains(&segment) {
             return Err(EvalError::CycleDetected(output));
+        }
+        // A producer's first entry records where it stands, so a later pull
+        // can come back to it (see [`Anchor`]); a shifted copy already has it.
+        // Without a node being processed there is no producer to come back to.
+        if let Some(source) = &mut bindings.source
+            && source.anchor.is_none()
+            && !self.processing.is_empty()
+        {
+            source.anchor = Some(Anchor {
+                path_len: self.path.len(),
+                active_len: self.active_scopes.len(),
+                bindings_len: self.bindings_stack.len(),
+                processing_len: self.processing.len(),
+                path_id: self.path_id,
+            });
+            source.at = Some((ctx.frame, ctx.time.to_bits()));
         }
         self.active_scopes.push(segment);
         self.path.push(segment);
@@ -3742,8 +3945,8 @@ impl EvalScope for Evaluator {
         // what makes an adjustment layer's static generators cacheable
         // across frames (MED-CORE-02).
         let changed = match self.scope_bindings.get(&self.path_id) {
-            Some(old) => binding_delta(old, &bindings),
-            None => binding_delta(&[], &bindings),
+            Some(old) => binding_delta(&old.values, &bindings.values),
+            None => binding_delta(&[], &bindings.values),
         };
         if !changed.is_empty() {
             self.invalidate_changed_bindings(graph, &changed);
@@ -3784,8 +3987,51 @@ impl EvalScope for Evaluator {
     fn bindings(&self) -> &[(String, Arc<dyn NodeData>)] {
         self.bindings_stack
             .last()
-            .map(|v| v.as_slice())
+            .map(|b| b.values.as_slice())
             .unwrap_or(&[])
+    }
+
+    fn bindings_at(&mut self, at: &EvalContext) -> Result<Bindings, EvalError> {
+        let current = self.bindings_stack.last().cloned().unwrap_or_default();
+        let Some(source) = &current.source else {
+            return Ok(current);
+        };
+        let (Some(anchor), Some(made_at)) = (source.anchor, source.at) else {
+            return Ok(current);
+        };
+        if made_at == (at.frame, at.time.to_bits()) {
+            return Ok(current);
+        }
+        let rebind = source.rebind.clone();
+        let values = self.at_anchor(anchor, |evaluator| rebind.rebind(evaluator, at))?;
+        let mut shifted = current;
+        shifted.values = values;
+        if let Some(source) = &mut shifted.source {
+            source.at = Some((at.frame, at.time.to_bits()));
+        }
+        Ok(shifted)
+    }
+
+    fn process_args_at(&mut self, at: &EvalContext) -> Result<ProcessArgs, EvalError> {
+        let (Some(graph), Some((key, _))) = (
+            self.processing_graphs.last().cloned(),
+            self.processing.last(),
+        ) else {
+            return Err(EvalError::ProcessFailed {
+                node: NodeId::new(0),
+                source: anyhow::anyhow!("process_args_at called outside process"),
+            });
+        };
+        let node = graph
+            .node(key.node)
+            .cloned()
+            .ok_or(EvalError::NodeNotFound(key.node))?;
+        let (inputs, params) = self.sim_inputs_at(&graph, &node, at)?;
+        Ok(ProcessArgs {
+            node,
+            inputs,
+            params,
+        })
     }
 
     fn document(&self) -> Option<Arc<Document>> {
@@ -4443,7 +4689,7 @@ mod tests {
                 &reads_network,
                 NodeId::new(7),
                 &ctx_at(0),
-                Vec::new(),
+                Bindings::default(),
             )
             .unwrap();
             ev.evaluate_sub(
@@ -4451,7 +4697,7 @@ mod tests {
                 &plain_network,
                 NodeId::new(8),
                 &ctx_at(0),
-                Vec::new(),
+                Bindings::default(),
             )
             .unwrap();
             (
@@ -6831,7 +7077,7 @@ mod tests {
                 &self.inner,
                 self.inner_output,
                 &local,
-                Vec::new(),
+                Bindings::default(),
             )?;
             Ok(Arc::new(ScopeWrap(value)))
         }
@@ -6865,7 +7111,7 @@ mod tests {
                 &self.inner,
                 self.inner_output,
                 ctx,
-                Vec::new(),
+                Bindings::default(),
             )?;
             Ok(Arc::new(ScopeWrap(value)))
         }
@@ -7020,7 +7266,8 @@ mod tests {
             ) -> anyhow::Result<Arc<dyn NodeData>> {
                 // Re-enter the same segment → must be rejected.
                 let segment = PathSegment::Layer(CompId::new(1), LayerId::new(1));
-                let value = scope.evaluate_sub(segment, &Graph::new(), node.id, ctx, Vec::new());
+                let value =
+                    scope.evaluate_sub(segment, &Graph::new(), node.id, ctx, Bindings::default());
                 match value {
                     Err(EvalError::CycleDetected(_)) => Ok(Arc::new(Scalar(1.0))),
                     other => anyhow::bail!("expected cycle error, got {:?}", other.is_ok()),
@@ -7043,7 +7290,13 @@ mod tests {
         );
 
         // Wrap the outer node in a scope push via evaluate_sub directly.
-        let result = ev.evaluate_sub(segment, &outer, NodeId::new(1), &ctx_at(0), Vec::new());
+        let result = ev.evaluate_sub(
+            segment,
+            &outer,
+            NodeId::new(1),
+            &ctx_at(0),
+            Bindings::default(),
+        );
         // The inner Reentrant node re-enters the same segment → CycleDetected
         // is produced inside and converted to Scalar(1.0) by the processor.
         let v = result.unwrap();
@@ -7147,7 +7400,8 @@ mod tests {
             let bindings: Bindings = vec![(
                 network::PORT_SOURCE.to_string(),
                 Arc::new(Scalar(value)) as Arc<dyn NodeData>,
-            )];
+            )]
+            .into();
             let produced =
                 scope.evaluate_sub(self.segment, &self.inner, self.inner_output, ctx, bindings)?;
             Ok(Arc::new(ScopeWrap(produced)))
@@ -7413,6 +7667,7 @@ mod tests {
                 network::PORT_SOURCE.to_string(),
                 stable.clone() as Arc<dyn NodeData>,
             )]
+            .into()
         };
 
         ev.evaluate_sub(segment, &inner, NodeId::new(14), &ctx_at(0), bindings())
@@ -7457,6 +7712,7 @@ mod tests {
                 "nowhere".to_string(),
                 Arc::new(Scalar(value)) as Arc<dyn NodeData>,
             )]
+            .into()
         };
         ev.evaluate_sub(segment, &inner, NodeId::new(7), &ctx_at(0), bound(1.0))
             .unwrap();
@@ -7626,7 +7882,7 @@ mod tests {
                     &self.inner,
                     self.inner_output,
                     ctx,
-                    Vec::new(),
+                    Bindings::default(),
                 )?;
                 sum += value.downcast_ref::<Scalar>().unwrap().0;
             }
@@ -8513,20 +8769,38 @@ mod tests {
         );
 
         ev.set_document(doc1.clone());
-        ev.evaluate_sub(segment, &inner1, NodeId::new(7), &ctx_at(0), Vec::new())
-            .unwrap();
+        ev.evaluate_sub(
+            segment,
+            &inner1,
+            NodeId::new(7),
+            &ctx_at(0),
+            Bindings::default(),
+        )
+        .unwrap();
         assert_eq!(calls7.load(Ordering::Relaxed), 1);
 
         // Same snapshot again: nothing changed → cache kept.
         ev.set_document(doc1.clone());
-        ev.evaluate_sub(segment, &inner1, NodeId::new(7), &ctx_at(0), Vec::new())
-            .unwrap();
+        ev.evaluate_sub(
+            segment,
+            &inner1,
+            NodeId::new(7),
+            &ctx_at(0),
+            Bindings::default(),
+        )
+        .unwrap();
         assert_eq!(calls7.load(Ordering::Relaxed), 1);
 
         // Changed layer network: scope invalidated and re-evaluated.
         ev.set_document(doc2);
         let v = ev
-            .evaluate_sub(segment, &inner2, NodeId::new(8), &ctx_at(0), Vec::new())
+            .evaluate_sub(
+                segment,
+                &inner2,
+                NodeId::new(8),
+                &ctx_at(0),
+                Bindings::default(),
+            )
             .unwrap();
         assert!((v.downcast_ref::<Scalar>().unwrap().0 - 2.0).abs() < f32::EPSILON);
     }
@@ -8860,14 +9134,26 @@ mod tests {
         );
 
         ev.set_document(Arc::new(make_doc(true)));
-        ev.evaluate_sub(segment, &inner, NodeId::new(7), &ctx_at(0), Vec::new())
-            .unwrap();
+        ev.evaluate_sub(
+            segment,
+            &inner,
+            NodeId::new(7),
+            &ctx_at(0),
+            Bindings::default(),
+        )
+        .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 1);
 
         // Layer removed in the new snapshot: the scope cache is dropped.
         ev.set_document(Arc::new(make_doc(false)));
-        ev.evaluate_sub(segment, &inner, NodeId::new(7), &ctx_at(0), Vec::new())
-            .unwrap();
+        ev.evaluate_sub(
+            segment,
+            &inner,
+            NodeId::new(7),
+            &ctx_at(0),
+            Bindings::default(),
+        )
+        .unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 2);
     }
 
@@ -10114,7 +10400,7 @@ mod tests {
             &inner,
             NodeId::new(14),
             &ctx_at(0),
-            vec![(network::PORT_SOURCE.to_string(), source)],
+            vec![(network::PORT_SOURCE.to_string(), source)].into(),
         )
         .unwrap();
         let scope = ev.paths.id_of(&[segment]).expect("the scope was entered");
@@ -10172,7 +10458,8 @@ mod tests {
             vec![(
                 network::PORT_SOURCE.to_string(),
                 Arc::new(Scalar(1.0)) as Arc<dyn NodeData>,
-            )],
+            )]
+            .into(),
         )
         .unwrap();
         assert!(!ev.scope_bindings.is_empty());

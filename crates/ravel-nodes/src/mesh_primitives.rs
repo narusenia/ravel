@@ -139,10 +139,10 @@ impl MeshBuilder {
     }
 }
 
-/// Refuses a mesh of more than [`MAX_MESH_VERTICES`] vertices (`vertices` is
+/// Refuses (in `u128`, so no product of typed counts can wrap past it) a mesh of more than [`MAX_MESH_VERTICES`] vertices (`vertices` is
 /// the count the node computed from its divisions).
-fn check_budget(node: &str, vertices: usize) -> anyhow::Result<()> {
-    if vertices > MAX_MESH_VERTICES {
+fn check_budget(node: &str, vertices: u128) -> anyhow::Result<()> {
+    if vertices > MAX_MESH_VERTICES as u128 {
         bail!("{node} would build {vertices} vertices; the limit is {MAX_MESH_VERTICES}");
     }
     Ok(())
@@ -165,8 +165,9 @@ impl BoxProcessor {
 }
 
 /// Vertex count of a box divided `(sx, sy, sz)` ways: six independent grids.
-pub fn box_vertex_count(sx: usize, sy: usize, sz: usize) -> usize {
-    2 * ((sx + 1) * (sy + 1) + (sx + 1) * (sz + 1) + (sy + 1) * (sz + 1))
+pub fn box_vertex_count(sx: usize, sy: usize, sz: usize) -> u128 {
+    let (x, y, z) = (sx as u128 + 1, sy as u128 + 1, sz as u128 + 1);
+    2 * (x * y + x * z + y * z)
 }
 
 impl NodeProcessor for BoxProcessor {
@@ -245,7 +246,7 @@ impl NodeProcessor for PlaneProcessor {
             divisions(params, "segments_x", 1, 1),
             divisions(params, "segments_y", 1, 1),
         );
-        check_budget("mesh.plane", (sx + 1) * (sy + 1))?;
+        check_budget("mesh.plane", (sx as u128 + 1) * (sy as u128 + 1))?;
 
         // In the XY plane facing the camera (normal −Z), the same orientation
         // and uv as the unit quad `scene.render` stamps images on.
@@ -277,8 +278,9 @@ impl SphereProcessor {
 /// Vertex count of a UV sphere: each pole is `segments` separate vertices (one
 /// per triangle of its fan, so `uv.u` can sit mid-segment), and every ring
 /// between them repeats its first vertex to close the `uv` seam.
-pub fn sphere_vertex_count(segments: usize, rings: usize) -> usize {
-    2 * segments + (rings - 1) * (segments + 1)
+pub fn sphere_vertex_count(segments: usize, rings: usize) -> u128 {
+    let (s, r) = (segments as u128, rings as u128);
+    2 * s + (r - 1) * (s + 1)
 }
 
 impl NodeProcessor for SphereProcessor {
@@ -377,8 +379,9 @@ impl CylinderProcessor {
 
 /// Vertex count of a cylinder: the side is `(segments + 1) × (rows + 1)`
 /// (seam duplicated), and each cap is a centre plus `segments` rim vertices.
-pub fn cylinder_vertex_count(segments: usize, rows: usize, caps: bool) -> usize {
-    (segments + 1) * (rows + 1) + if caps { 2 * (segments + 1) } else { 0 }
+pub fn cylinder_vertex_count(segments: usize, rows: usize, caps: bool) -> u128 {
+    let s = segments as u128 + 1;
+    s * (rows as u128 + 1) + if caps { 2 * s } else { 0 }
 }
 
 impl NodeProcessor for CylinderProcessor {
@@ -909,5 +912,58 @@ mod tests {
         for (point, normal) in p.iter().zip(&n) {
             assert!(dot(*point, *normal) > 0.0);
         }
+    }
+
+    /// Division counts are `i32`s a user types, and the vertex count is a
+    /// product of them: at the extremes it must be the same evaluation error as
+    /// any other too-large mesh, not a wrapped number that passes the cap (or a
+    /// debug-build overflow panic).
+    #[test]
+    fn extreme_division_counts_are_an_error_for_every_primitive() {
+        let max = int(i32::MAX);
+        let huge = |keys: &[&'static str]| -> Vec<(&'static str, ResolvedValue)> {
+            keys.iter().map(|k| (*k, max.clone())).collect()
+        };
+        type Case<'a> = (
+            &'a str,
+            &'a dyn NodeProcessor,
+            Vec<(&'a str, ResolvedValue)>,
+        );
+        let cases: [Case; 4] = [
+            (
+                "mesh.box",
+                &BoxProcessor,
+                huge(&["segments_x", "segments_y", "segments_z"]),
+            ),
+            (
+                "mesh.plane",
+                &PlaneProcessor,
+                huge(&["segments_x", "segments_y"]),
+            ),
+            (
+                "mesh.sphere",
+                &SphereProcessor,
+                huge(&["segments", "rings"]),
+            ),
+            (
+                "mesh.cylinder",
+                &CylinderProcessor,
+                huge(&["segments", "height_segments"]),
+            ),
+        ];
+        for (name, processor, params) in cases {
+            let error = run(processor, &params).expect_err(name);
+            assert!(error.to_string().contains(name), "{name}: {error}");
+        }
+        // A product that wraps a 64-bit count to zero: (2^31-1)^2 * 2^30 exceeds 2^64.
+        let wraps = run(
+            &BoxProcessor,
+            &[
+                ("segments_x", int(i32::MAX)),
+                ("segments_y", int(i32::MAX)),
+                ("segments_z", int(1 << 30)),
+            ],
+        );
+        assert!(wraps.is_err());
     }
 }

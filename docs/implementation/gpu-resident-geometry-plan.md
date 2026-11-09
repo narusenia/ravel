@@ -339,9 +339,14 @@ REQ-GPU-003 の「フィールドの WGSL 評価」に相当。
   で CPU は 1 万 0.5 ms / 5 万 1.8 ms / 10 万 3.4 ms / 100 万 36.7 ms、GPU は
   CPU 入出力込みで 1.6 / 1.6 / 1.8 / 5.7 ms（常駐なら 100 万でも 1.7 ms）。
   単純な木ほど交差が遅いので、5 万の交差の少し上に置いた。
-  GPU が受けない呼び出し（`Detail` ドメイン、無いターゲット＝作成が要る、
-  型の合わないターゲット、Bool でない group）は `Ok(None)` で CPU の
-  `apply_field` が答える（エラーも警告も列の作成も CPU が基準）。
+  **無いターゲットは GPU 経路が作る**（`create_if_missing` が既定で `true` なので
+  初回変調が普通のケース）。型は `created_column_type`、中身は `created_column`
+  と、CPU の作成規則を**共有**する（定数を写さない）。CPU 入力はホストで作って
+  アップロード、常駐入力はホストで作る（導出色 = 点の `Cd` がパスの色に従う場合
+  だけ、従う色列を読み戻す。定数の既定なら読み戻しなし）。
+  GPU が受けない呼び出し（`Detail` ドメイン、型の合わないターゲット、作成して
+  `amount == 0`、`create_if_missing` オフの無いターゲット、Bool でない group）は
+  `Ok(None)` で CPU の `apply_field` が答える（エラーと警告は CPU が基準）。
   `amount == 0` は dispatch せず入力をそのまま返す（「変調なし」はビット一致）。常駐入力が CPU に
   落ちたときは読み戻して `Geometry` を返す（「読み戻し境界」）。
   `GpuApplyFieldProcessor` が `ApplyFieldProcessor`（CPU の基準実装、常駐入力は
@@ -356,6 +361,11 @@ REQ-GPU-003 の「フィールドの WGSL 評価」に相当。
   `FieldProgram::wgsl(first_binding)` を入れ、`params()` と属性列を宣言された
   バインドに渡し、要素ごとに `FieldProgram::root_call("p", "i")` を呼ぶ。
   `field.apply` のカーネル（`apply_kernel`）はその最小の利用例。
+- **NaN / 非有限入力**（レビューで発覚して修正）: `curve_eval` / `ramp_eval` は
+  CPU が NaN で末尾の出力 / 色を返し、点 / 停止点が 1 つなら範囲外を引かない。
+  WGSL はコンパイラが NaN を仮定しなくてよいので `x != x` ではなく
+  `(bitcast<u32>(x) & 0x7fffffff) > 0x7f800000` で判定する（`is_nan_bits` /
+  `is_finite_bits`、`unit_vector` の有限判定も同様）。
 - **許容誤差と残る不一致**: 各フィールドの許容誤差は
   `tests/gpu_field_parity.rs` の表に明記（相対 1e-6〜5e-3。属性読み出しは 0 =
   ビット一致、`curl_noise` / `gradient` は有限差分が GPU の `sin` 等の誤差を

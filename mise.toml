@@ -2,7 +2,8 @@
 #
 # `mise run check` is the canonical verification entry point; CI and the
 # lefthook pre-commit hook run the same tasks. Run `mise run hooks:install`
-# once after cloning to enable the git hooks.
+# once after cloning to enable the git hooks, and `mise run worktrees:setup`
+# once to let `.worktrees/` checkouts share the main `target/`.
 
 [tools]
 rust = { version = "1.95", components = "rustfmt,clippy", profile = "minimal" }
@@ -60,6 +61,20 @@ depends = ["fmt", "lint:patterns", "clippy", "test"]
 [tasks."hooks:install"]
 description = "Install lefthook git hooks"
 run = "lefthook install"
+
+# Every worktree under `.worktrees/` builds into the main checkout's `target/`.
+# Cargo reads `.cargo/config.toml` from each parent directory, so one file at
+# `.worktrees/.cargo/config.toml` (gitignored with the worktrees) covers every
+# cargo call — `mise run`, a bare `cargo`, rust-analyzer. Without it a fresh
+# worktree recompiles every dependency into its own ~18 GB `target/`.
+# Concurrent builds in two worktrees take turns on cargo's lock.
+[tasks."worktrees:setup"]
+description = "Share the main checkout's target/ with every .worktrees/ checkout"
+run = """
+root="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+mkdir -p "$root/.worktrees/.cargo"
+printf '[build]\ntarget-dir = "../target"\n' > "$root/.worktrees/.cargo/config.toml"
+"""
 
 [tasks."docs:search"]
 description = "Search the docs by role (see scripts/docs.sh for subcommands)"

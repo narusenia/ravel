@@ -33,6 +33,10 @@ pub const MAX_ITERATIONS_DEFAULT: i32 = 256;
 pub const TRANSFORM_SECTION_NODES: &[&str] = &[
     "geometry.from_image",
     "geometry.merge",
+    "mesh.box",
+    "mesh.cylinder",
+    "mesh.plane",
+    "mesh.sphere",
     "scatter.circular",
     "scatter.grid",
     "scatter.path_array",
@@ -2930,9 +2934,10 @@ fn shape_star() -> NodeTemplate {
 /// What every `mesh.*` primitive declares: a geometry output and a 3D
 /// `center` the Viewer can grab (X and Y; the canvas is two-dimensional).
 ///
-/// No transform section: `geometry.transform` does not rotate `N`, so a
-/// section here would let a rotated primitive carry stale normals. The
-/// object transform of `scene.add` is the placement that moves them.
+/// Each template ends with the transform section (`geometry.transform` turns
+/// `N` by the inverse-transpose and flips the winding of a mirror, so a
+/// rotated or scaled primitive keeps correct normals). `center` stays the
+/// grabbable point; the section is the extra move.
 fn mesh_primitive(type_key: &str, label: &str) -> NodeTemplate {
     NodeTemplate::new(type_key, label, NodeCategory::Geometry)
         .with_output(OutputPort {
@@ -2962,6 +2967,11 @@ fn mesh_box() -> NodeTemplate {
     let template = mesh_segments(template, "segments_x", 1, 1.0);
     let template = mesh_segments(template, "segments_y", 1, 1.0);
     mesh_segments(template, "segments_z", 1, 1.0)
+        .with_param_group(
+            "shape",
+            ["center", "size", "segments_x", "segments_y", "segments_z"],
+        )
+        .with_transform_section()
 }
 
 /// `mesh.sphere`: a UV sphere about the Y axis.
@@ -2974,6 +2984,8 @@ fn mesh_sphere() -> NodeTemplate {
         .with_param_range("radius", 0.0..=1e5, 0.0..=500.0);
     let template = mesh_segments(template, "segments", 32, 3.0);
     mesh_segments(template, "rings", 16, 2.0)
+        .with_param_group("shape", ["center", "radius", "segments", "rings"])
+        .with_transform_section()
 }
 
 /// `mesh.cylinder`: a cylinder about the Y axis, optionally capped.
@@ -2997,6 +3009,7 @@ fn mesh_cylinder() -> NodeTemplate {
     mesh_segments(template, "height_segments", 1, 1.0)
         .with_param_group("shape", ["center", "radius", "height"])
         .with_param_group("divisions", ["segments", "height_segments", "caps"])
+        .with_transform_section()
 }
 
 /// `mesh.plane`: a rectangle in the XY plane facing the camera.
@@ -3006,6 +3019,8 @@ fn mesh_plane() -> NodeTemplate {
         .with_param_range("size", 0.0..=1e5, 0.0..=1000.0);
     let template = mesh_segments(template, "segments_x", 1, 1.0);
     mesh_segments(template, "segments_y", 1, 1.0)
+        .with_param_group("shape", ["center", "size", "segments_x", "segments_y"])
+        .with_transform_section()
 }
 
 fn scatter_grid() -> NodeTemplate {
@@ -4794,10 +4809,6 @@ mod tests {
             "geometry.switch",
             "geometry.transform",
             "geometry.twist",
-            "mesh.box",
-            "mesh.cylinder",
-            "mesh.plane",
-            "mesh.sphere",
             "style.dash",
             "style.fill",
             "style.stroke",

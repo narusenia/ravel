@@ -21,10 +21,11 @@
 //!   extrusion that will need to agree with it.
 //! * Faces that meet at a hard edge do not share vertices (a box has 24 for one
 //!   division per side), because a vertex carries one normal and one `uv`.
-//! * The primitives carry no transform section: `N` is not rotated by
-//!   `geometry.transform`, so a rotated box would light wrongly. Placement is
-//!   `center` here and the object transform of `scene.add` (or an instance
-//!   placement), both of which move normals correctly.
+//! * Each primitive carries the transform section: `geometry.transform`
+//!   turns `N` by the inverse-transpose and flips the winding of a mirror, so a
+//!   rotated, scaled or mirrored primitive keeps outward normals and a winding
+//!   that agrees with them. `center` is the grabbable point; the section is the
+//!   extra move.
 
 use std::f32::consts::{PI, TAU};
 use std::sync::Arc;
@@ -871,5 +872,42 @@ mod tests {
         // The mesh itself is untouched by the modulation.
         assert_eq!(g.indices().len(), 2 * 32 * 15 * 3);
         assert!(g.has_mesh());
+    }
+
+    /// The declared transform section reaches the primitive's normals: turned a
+    /// quarter about Z, the +X face (third face of a box, points 8..12)
+    /// faces +Y, and a mirror keeps the faces outward.
+    #[test]
+    fn the_transform_section_carries_the_normals() {
+        let node = Node::new(NodeId::new(1), "mesh.box");
+        let wrapped = crate::transform_section::wrap(&node, Arc::new(BoxProcessor));
+        let ctx = EvalContext::new(0, FrameRate::new(30, 1), (100, 100));
+        let run_with = |extra: &[(&str, ResolvedValue)]| {
+            let mut params = ResolvedParams::default();
+            for (key, value) in extra {
+                params.set(key, value.clone());
+            }
+            let out = wrapped
+                .process(&node, &ctx, &[], &params, &mut Evaluator::new())
+                .unwrap();
+            out.downcast_ref::<Geometry>().unwrap().clone()
+        };
+        let turned = run_with(&[("rotation", ResolvedValue::Vec3([0.0, 0.0, 90.0]))]);
+        let n = normals(&turned);
+        for (got, want) in [(n[8], Vec3(0.0, 1.0, 0.0)), (n[0], Vec3(0.0, 0.0, -1.0))] {
+            assert!(length(sub(got, want)) < 1e-4, "{got:?} != {want:?}");
+        }
+
+        // Mirrored in x: every triangle is still wound along its normals, and
+        // every normal still points away from the middle.
+        let mirrored = run_with(&[("scale", ResolvedValue::Vec3([-1.0, 1.0, 1.0]))]);
+        let (p, n) = (positions(&mirrored), normals(&mirrored));
+        for t in triangles(&mirrored) {
+            let hint = add(add(n[t[0]], n[t[1]]), n[t[2]]);
+            assert!(dot(face_normal(&mirrored, t), hint) > 0.0);
+        }
+        for (point, normal) in p.iter().zip(&n) {
+            assert!(dot(*point, *normal) > 0.0);
+        }
     }
 }

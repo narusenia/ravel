@@ -1676,6 +1676,14 @@ size = "幅・高さ・奥行き。"
 segments_x = "X 方向の分割数。"
 segments_y = "Y 方向の分割数。"
 segments_z = "Z 方向の分割数。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
+[node."mesh.box".group]
+shape = "形状"
+transform = "トランスフォーム"
 
 [node."mesh.sphere"]
 label = "球"
@@ -1685,6 +1693,14 @@ center = "球の中心。"
 radius = "半径。"
 segments = "Y 軸まわりの分割数（3 以上）。"
 rings = "極から極への分割数（2 以上）。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
+[node."mesh.sphere".group]
+shape = "形状"
+transform = "トランスフォーム"
 
 [node."mesh.cylinder"]
 label = "円柱"
@@ -1696,9 +1712,15 @@ height = "Y 方向の高さ。"
 segments = "軸まわりの分割数（3 以上）。"
 height_segments = "高さ方向の分割数。"
 caps = "両端を円盤で塞ぐ。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."mesh.cylinder".group]
 shape = "形状"
 divisions = "分割"
+transform = "トランスフォーム"
 
 [node."mesh.plane"]
 label = "平面"
@@ -1708,6 +1730,14 @@ center = "平面の中心。"
 size = "幅と高さ。"
 segments_x = "X 方向の分割数。"
 segments_y = "Y 方向の分割数。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
+[node."mesh.plane".group]
+shape = "形状"
+transform = "トランスフォーム"
 
 [node."scatter.grid"]
 label = "グリッド"

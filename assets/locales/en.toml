@@ -1688,6 +1688,14 @@ size = "Width, height and depth."
 segments_x = "Divisions along X."
 segments_y = "Divisions along Y."
 segments_z = "Divisions along Z."
+translate = "Moves the output after this node has built it."
+rotation = "Euler angles in degrees applied to the output; 2D rotation is about Z."
+scale = "Scale factor per axis applied to the output."
+use_centroid = "Rotate and scale about the output's bounding-box center instead of the pivot."
+pivot = "Origin of the rotation and scale while use_centroid is off."
+[node."mesh.box".group]
+shape = "Shape"
+transform = "Transform"
 
 [node."mesh.sphere"]
 label = "Sphere"
@@ -1697,6 +1705,14 @@ center = "Center of the sphere."
 radius = "Radius."
 segments = "Divisions around the Y axis (at least 3)."
 rings = "Divisions from pole to pole (at least 2)."
+translate = "Moves the output after this node has built it."
+rotation = "Euler angles in degrees applied to the output; 2D rotation is about Z."
+scale = "Scale factor per axis applied to the output."
+use_centroid = "Rotate and scale about the output's bounding-box center instead of the pivot."
+pivot = "Origin of the rotation and scale while use_centroid is off."
+[node."mesh.sphere".group]
+shape = "Shape"
+transform = "Transform"
 
 [node."mesh.cylinder"]
 label = "Cylinder"
@@ -1708,9 +1724,15 @@ height = "Height along Y."
 segments = "Divisions around the axis (at least 3)."
 height_segments = "Divisions along the height."
 caps = "Close both ends with a disc."
+translate = "Moves the output after this node has built it."
+rotation = "Euler angles in degrees applied to the output; 2D rotation is about Z."
+scale = "Scale factor per axis applied to the output."
+use_centroid = "Rotate and scale about the output's bounding-box center instead of the pivot."
+pivot = "Origin of the rotation and scale while use_centroid is off."
 [node."mesh.cylinder".group]
 shape = "Shape"
 divisions = "Divisions"
+transform = "Transform"
 
 [node."mesh.plane"]
 label = "Plane"
@@ -1720,6 +1742,14 @@ center = "Center of the plane."
 size = "Width and height."
 segments_x = "Divisions along X."
 segments_y = "Divisions along Y."
+translate = "Moves the output after this node has built it."
+rotation = "Euler angles in degrees applied to the output; 2D rotation is about Z."
+scale = "Scale factor per axis applied to the output."
+use_centroid = "Rotate and scale about the output's bounding-box center instead of the pivot."
+pivot = "Origin of the rotation and scale while use_centroid is off."
+[node."mesh.plane".group]
+shape = "Shape"
+transform = "Transform"
 
 [node."scatter.grid"]
 label = "Grid"

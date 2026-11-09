@@ -4,6 +4,7 @@
 //! Node-graph adapters for the headless field implementations in `ravel-core`.
 
 use crate::gpu_util::ensure_cpu_geometry;
+use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams, ResolvedValue};
 use ravel_core::geometry::{
     AddField, AngleField, AttributeField, BlendField, CombineMode, ComponentField, ComponentMask,
@@ -590,8 +591,8 @@ impl NodeProcessor for ApplyFieldProcessor {
     ) -> anyhow::Result<Arc<dyn NodeData>> {
         let input = geometry_input(inputs)?;
         let field = field_input(inputs, 1, "field.apply")?;
-        let geometry = ensure_cpu_geometry(input.as_ref())
-            .map_err(|_| anyhow::anyhow!("field.apply: input 0 is not Geometry"))?;
+        // Keeps the readback error of a resident input rather than calling it a type error.
+        let geometry = ensure_cpu_geometry(input.as_ref()).context("field.apply: input 0")?;
         Ok(Arc::new(apply_field(
             &geometry,
             &apply_spec(params),

@@ -348,6 +348,37 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
   使い回したこと）を観測する形にする。動的バッファ側は毎フレーム更新されて
   よいので、カウンタは静的バッファに限定する
 
+**実装メモ（単位 4）**
+
+- 構成は `scene_render/{prepare,cpu,gpu}.rs`。`prepare` が「何を・どのパスで・
+  どの順に」を決め、CPU リファレンスと GPU はその一覧を実行するだけなので、
+  両者が食い違いうるのは画素の計算だけ（許容誤差は
+  `gpu_matches_cpu_for_every_kind_of_piece` の doc に実測値つき）
+- GPU は `ravel_gpu::ScenePass`（新規 `scene_pass.rs`）。1 本の render pass に
+  カラー（`rasterize` と同じ premultiplied `Rgba16Float`）と `Depth32Float`、
+  続けて `rasterize` の `unpremultiply`。Path は `rasterize.wgsl` を深度テスト
+  付き（書かない）パイプラインで使い回し、`RasterParams._pad.y` がオブジェクト
+  単位の深度
+- **静的 / 動的の分離**: 静的 = `MeshBuffers`（頂点 32 B・インデックス・頂点色）、
+  動的 = 160 B の `ObjectRecord`（`mvp` / `model` / 色 / フラグ）。変換は
+  シェーダで適用し頂点に焼かない。再利用の鍵は `MeshKey`（各列の `Arc`
+  アドレス + インデックス blob + 範囲）。変換・色・カメラは鍵に入らない。
+  確保は `StaticMeshCache::allocate` の 1 箇所で、GPU-1 の汎用バッファ
+  プールへの移行はそこだけ。16 フレーム使われない鍵は捨てる
+- **代表深度**: オブジェクトの頂点平均を view 空間へ移した `z`（大きいほど
+  遠い）、同値は bbox の最遠角、それも同値なら挿入順。Path は点の平均
+- 画像インスタンスは**共有の単位正方形 Mesh**（`uv` 列つき、頂点 `±0.5`）に
+  貼り、モデル行列で画像の画素サイズ・配置を与える。サンプラは `uv × 画素数`
+  を双線形で読む（`rasterize` の画像経路と同じ premultiplied 加重・端クランプ）
+- **新しい予約属性 `uv`**（Point, Vec2）。画像矩形に暗黙の UV は無い
+- **未対応と制約**（`scene_render/mod.rs` と仕様書に明記）: カリングなし、
+  Path は制御多角形の投影・線幅は重心位置で一律・cap/join/dash 無効、
+  3D 配置のインスタンスは未対応、メッシュへのテクスチャ入力ポートは無い
+  （`MeshObject::texture` は画像インスタンスだけが埋める）
+- ゴールデン画像は追加していない。完了条件の「単一 Mesh」は、手計算した
+  画素範囲・カバレッジ・遠近の縁（`a_perspective_quad_lands_where_the_lens_puts_it`
+  ほか）で固定した
+
 ### 単位 5: 基本プリミティブ（REQ-3D-005）
 
 - `mesh.box` / `mesh.sphere` / `mesh.cylinder` / `mesh.plane`

@@ -300,7 +300,7 @@ Path 前提のノードが `Mesh` を受けたときの挙動は種別ごとに�
 | `geometry.sort` | Primitive / Instance ドメインは種別非依存。**Point ドメインの並べ替えは Mesh で明示エラー**（`RequiresPathPrimitives`） |
 | 属性系（`attribute.set` / `.promote` / `.transfer`、`field.apply`） | 種別非依存で素通しする。列だけを触りトポロジを見ない |
 | 弧長・パス前提（`attribute.path_sample` / `scatter.path_array`、`geometry.resample` / `measure` の path 系、`attribute.curveu`） | **明示エラー**。Mesh に弧長は定義されない。黙って読み飛ばさない |
-| ラスタライズ（`rasterize`） | **明示エラー**。三角形は `scene.render` が描く（3D-4） |
+| ラスタライズ（`rasterize`） | **明示エラー**。三角形は `scene.render` が描く |
 
 **明示エラーは `GeometryError::RequiresPathPrimitives`**（`{操作名}
 requires path primitives: …`）。`RequiresPlanarP` と同じ粒度で、「この操作は
@@ -389,6 +389,15 @@ Path を要求する」ことがメッセージだけで分かる形にする。
 - **`Scene → FrameBuffer` は `scene.render` のみが行う**（REQ-3D-001）。
   Mesh を含むジオメトリは `rasterize` ではなく Scene 経由で描く。
   `Geometry → Scene` は `scene.add` が 3D 変換と組にして行う。
+  描画は不透明 Mesh の深度パスと、半透明 Mesh・画像インスタンス・Path を
+  オブジェクト単位の view 空間重心 `z` で back-to-front に並べる第 2 パスの
+  2 段で、第 2 パスは深度を**読むが書かない**。**交差する半透明同士は
+  保証しない**（オブジェクト単位のソートの帰結）。面は両面描画（カリング
+  しない）。Path オブジェクトは `P` をカメラで画素へ投影してから `rasterize`
+  と同じ解析的な経路で描く — 曲線は制御多角形の投影、線幅・スプライト半径は
+  オブジェクトの重心位置での画素 / 単位で一律に拡縮し、cap / join / dash は
+  効かない。画像インスタンスは `uv` 付きの単位正方形に貼った Mesh として
+  描かれ、サンプラは Mesh の `uv` 列だけを読む。
 - 既存 Layer ソース `Shape` はコンパイル時（composition/compile.rs）に
   `ShapeGeometry → Rasterize` チェーンへ展開する。
 - `Table`（REQ-DATA-001）は行×型付き列。`Table → Geometry` はバインディング

@@ -68,6 +68,14 @@ observe-global crates/ravel-app/src/panels/properties.rs CollapsedParamGroupsSta
 # it did not perform, because `node_sizes` is what every hit test reads. Same
 # lifecycle and same reason as CollapsedParamGroupsState above.
 observe-global crates/ravel-app/src/panels/node_editor.rs ShowNodeParamValuesState
+# Durable shared settings state (node-graph-readability-plan NGR-5/NGR-9): the
+# edge style and the flow direction are global preferences written by the View
+# menu command, the context menu and the toolbar — never only by the panel that
+# shows them. Every Node Editor instance has to re-measure and repaint from a
+# write it did not make (`node_sizes` is what every hit test reads), and the
+# toolbar must follow a change made from the menu or a key. Same lifecycle and
+# same reason as ShowNodeParamValuesState above.
+observe-global crates/ravel-app/src/panels/node_editor.rs AppSettings
 # The Node Editor opens the network of the shared layer selection (REQ-UI-013
 # unit 3). Timeline and Outliner both write that selection, so observing the
 # durable state replaces per-writer pushes into this panel.

@@ -38,6 +38,7 @@ use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::FrameRate;
 use ravel_i18n::t;
 use ravel_ui::document::{NetworkPath, replace_network_renaming_pin, resolve_network};
+use ravel_ui::node_editor::FlowDirection;
 use ravel_ui::properties::expression;
 use ravel_widgets::ActiveTokens as _;
 use ravel_widgets::{Enter, Escape, Input, InputEvent, InputState};
@@ -52,7 +53,7 @@ use crate::node_editor::hover_popover::{
     HOVER_DWELL, HoverPopover, hover_info, hover_popover_element,
 };
 use crate::node_editor::layout::{LayoutAxis, auto_layout};
-use crate::node_editor::painting::{self, EvalReadout, PortHit, compute_node_size, node_width};
+use crate::node_editor::painting::{self, EvalReadout, PortHit, compute_node_size};
 use crate::node_editor::palette::{PaletteEvent, SearchPalette, retain_connectable};
 use crate::node_editor::viewport::Viewport;
 use crate::project_state::ProjectState;
@@ -588,6 +589,13 @@ pub struct NodeEditorPanel {
     /// Localized display label per node, rebuilt with [`Self::node_sizes`].
     node_labels: HashMap<NodeId, String>,
     edge_style: EdgeStyle,
+    /// Which way the graph flows, mirrored from the settings global (see the
+    /// observer in [`Self::new`]) so the sizes, hit tests and painting of one
+    /// frame all read the same value.
+    flow_direction: FlowDirection,
+    /// The port dot under the pointer while idle, drawn with its name in
+    /// top-down flow (which has no port-name rows). `None` in horizontal flow.
+    hovered_port: Option<PortHit>,
     clipboard: Option<ClipboardContent>,
     drag: DragMode,
     pointer_hint: PointerHint,
@@ -642,6 +650,10 @@ pub struct NodeEditorPanel {
     /// perform.
     #[allow(dead_code)]
     param_values_sub: Subscription,
+    /// Follows the edge style and flow direction settings, whichever route
+    /// wrote them.
+    #[allow(dead_code)]
+    settings_sub: Subscription,
 }
 
 impl NodeEditorPanel {
@@ -754,6 +766,28 @@ impl NodeEditorPanel {
                 cx.notify();
             });
 
+        // The edge style and flow direction are settings: whichever route
+        // wrote them (menu command, context menu, toolbar, another editor),
+        // this instance follows the settings global.
+        let settings_sub =
+            cx.observe_global::<crate::app_settings::AppSettings>(|this: &mut Self, cx| {
+                let resolved = crate::app_settings::resolved(cx);
+                let mut changed = false;
+                if resolved.node_editor_edge_style != this.edge_style {
+                    this.edge_style = resolved.node_editor_edge_style;
+                    changed = true;
+                }
+                if resolved.node_editor_flow_direction != this.flow_direction {
+                    this.flow_direction = resolved.node_editor_flow_direction;
+                    this.hovered_port = None;
+                    this.refresh_node_sizes();
+                    changed = true;
+                }
+                if changed {
+                    cx.notify();
+                }
+            });
+
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = super::track_panel_focus(instance, &focus_handle, window, cx);
 
@@ -781,6 +815,8 @@ impl NodeEditorPanel {
             node_categories: HashMap::new(),
             node_labels: HashMap::new(),
             edge_style: crate::app_settings::resolved(cx).node_editor_edge_style,
+            flow_direction: super::node_flow_direction(cx),
+            hovered_port: None,
             clipboard: None,
             drag: DragMode::None,
             pointer_hint: PointerHint::default(),
@@ -803,6 +839,7 @@ impl NodeEditorPanel {
             timings_sub,
             visibility_sub,
             param_values_sub,
+            settings_sub,
         }
     }
 
@@ -978,7 +1015,12 @@ impl NodeEditorPanel {
             return;
         };
         // Measured sizes are zoomed; the fallback matches `fit_view`'s.
-        let (w, h) = self.node_sizes.get(&node).copied().unwrap_or((160.0, 60.0));
+        let (w, h) = painting::node_size_or_default(
+            &self.node_sizes,
+            target,
+            self.viewport.zoom,
+            self.flow_direction,
+        );
         let (canvas_w, canvas_h) = self.canvas_size.get();
         let rect = (
             target.metadata.position.0,
@@ -2330,7 +2372,10 @@ impl NodeEditorPanel {
             &self.graph,
             &Self::selected_nodes(cx),
             &sizes,
-            LayoutAxis::Horizontal,
+            match self.flow_direction {
+                FlowDirection::Horizontal => LayoutAxis::Horizontal,
+                FlowDirection::Vertical => LayoutAxis::Vertical,
+            },
         );
 
         let mut changed = false;
@@ -2365,7 +2410,12 @@ impl NodeEditorPanel {
             .nodes()
             .filter(|n| !n.metadata.synthetic)
             .map(|n| {
-                let (w, h) = self.node_sizes.get(&n.id).copied().unwrap_or((160.0, 60.0));
+                let (w, h) = painting::node_size_or_default(
+                    &self.node_sizes,
+                    n,
+                    self.viewport.zoom,
+                    self.flow_direction,
+                );
                 let unzoomed_w = w / self.viewport.zoom;
                 let unzoomed_h = h / self.viewport.zoom;
                 (
@@ -2445,9 +2495,21 @@ impl NodeEditorPanel {
         cx.notify();
     }
 
+    /// Adopt `flow` through the settings layer; the settings observer in
+    /// [`Self::new`] re-measures and repaints every Node Editor, this one
+    /// included. Positions are untouched — an alignment is a separate,
+    /// undoable command.
+    fn set_flow_direction(&mut self, flow: FlowDirection, cx: &mut Context<Self>) {
+        super::set_node_flow_direction(flow, cx);
+    }
+
     fn refresh_node_sizes(&mut self) {
-        self.node_sizes =
-            Self::compute_all_sizes(&self.graph, self.viewport.zoom, self.show_param_values);
+        self.node_sizes = Self::compute_all_sizes(
+            &self.graph,
+            self.viewport.zoom,
+            self.show_param_values,
+            self.flow_direction,
+        );
     }
 
     /// Rebuild everything derived from the displayed graph. Called from the
@@ -2472,8 +2534,12 @@ impl NodeEditorPanel {
     /// switch, so nothing invalidates them today; a future switch has to
     /// call this (see the note in `node_locale`).
     fn refresh_graph_caches(&mut self, cx: &App) {
-        self.node_sizes =
-            Self::compute_all_sizes(&self.graph, self.viewport.zoom, self.show_param_values);
+        self.node_sizes = Self::compute_all_sizes(
+            &self.graph,
+            self.viewport.zoom,
+            self.show_param_values,
+            self.flow_direction,
+        );
         // Nodes without a registered template (and synthetic ones) get no
         // header tint, so they are simply absent from the map.
         self.node_categories = self
@@ -2531,27 +2597,43 @@ impl NodeEditorPanel {
         graph: &Graph,
         zoom: f32,
         show_param_values: bool,
+        flow: FlowDirection,
     ) -> HashMap<NodeId, (f32, f32)> {
         graph
             .nodes()
-            .map(|n| (n.id, compute_node_size(n, zoom, show_param_values)))
+            .map(|n| (n.id, compute_node_size(n, zoom, show_param_values, flow)))
             .collect()
     }
 
     fn node_at_local_pos(&self, lx: f32, ly: f32) -> Option<NodeId> {
-        Self::node_hit_at(&self.graph, &self.viewport, &self.node_sizes, lx, ly)
+        Self::node_hit_at(
+            &self.graph,
+            &self.viewport,
+            self.flow_direction,
+            &self.node_sizes,
+            lx,
+            ly,
+        )
     }
 
     /// The frontmost port at the point, unless a higher-painted node body
     /// occludes it. Ports still win over their own node body.
     fn port_at_local_pos(&self, lx: f32, ly: f32) -> Option<PortHit> {
-        Self::port_hit_at(&self.graph, &self.viewport, &self.node_sizes, lx, ly)
+        Self::port_hit_at(
+            &self.graph,
+            &self.viewport,
+            self.flow_direction,
+            &self.node_sizes,
+            lx,
+            ly,
+        )
     }
 
     fn pointer_hint_at(&self, lx: f32, ly: f32) -> PointerHint {
         Self::pointer_hint_at_in(
             &self.graph,
             &self.viewport,
+            self.flow_direction,
             &self.node_sizes,
             self.edge_style,
             lx,
@@ -2562,19 +2644,41 @@ impl NodeEditorPanel {
     fn pointer_hint_at_in(
         graph: &Graph,
         viewport: &Viewport,
+        flow: FlowDirection,
         node_sizes: &HashMap<NodeId, (f32, f32)>,
         edge_style: EdgeStyle,
         lx: f32,
         ly: f32,
     ) -> PointerHint {
-        if Self::port_hit_at(graph, viewport, node_sizes, lx, ly).is_some() {
+        if Self::port_hit_at(graph, viewport, flow, node_sizes, lx, ly).is_some() {
             PointerHint::Port
-        } else if Self::node_hit_at(graph, viewport, node_sizes, lx, ly).is_some() {
+        } else if Self::node_hit_at(graph, viewport, flow, node_sizes, lx, ly).is_some() {
             PointerHint::Node
-        } else if painting::edge_at_local_pos(graph, viewport, lx, ly, 5.0, edge_style).is_some() {
+        } else if painting::edge_at_local_pos(
+            graph, viewport, lx, ly, 5.0, edge_style, flow, node_sizes,
+        )
+        .is_some()
+        {
             PointerHint::Edge
         } else {
             PointerHint::Empty
+        }
+    }
+
+    /// Track the port dot under the idle pointer for its name tag. Only the
+    /// top-down flow needs it (horizontal nodes print their port names), and
+    /// a repaint is asked for only when the dot changed.
+    fn update_hovered_port(&mut self, lx: f32, ly: f32, cx: &mut Context<Self>) {
+        let next = if self.flow_direction == FlowDirection::Vertical {
+            self.port_at_local_pos(lx, ly)
+        } else {
+            None
+        };
+        let key =
+            |hit: &Option<PortHit>| hit.as_ref().map(|h| (h.node_id, h.is_output, h.port_index));
+        if key(&next) != key(&self.hovered_port) {
+            self.hovered_port = next;
+            cx.notify();
         }
     }
 
@@ -2611,12 +2715,13 @@ impl NodeEditorPanel {
     fn port_hit_at(
         graph: &Graph,
         viewport: &Viewport,
+        flow: FlowDirection,
         node_sizes: &HashMap<NodeId, (f32, f32)>,
         lx: f32,
         ly: f32,
     ) -> Option<PortHit> {
-        let port = painting::port_at_local_pos(graph, viewport, lx, ly)?;
-        let Some(body) = Self::node_hit_at(graph, viewport, node_sizes, lx, ly) else {
+        let port = painting::port_at_local_pos(graph, viewport, flow, node_sizes, lx, ly)?;
+        let Some(body) = Self::node_hit_at(graph, viewport, flow, node_sizes, lx, ly) else {
             return Some(port);
         };
         if body == port.node_id {
@@ -2638,6 +2743,7 @@ impl NodeEditorPanel {
     fn node_hit_at(
         graph: &Graph,
         viewport: &Viewport,
+        flow: FlowDirection,
         node_sizes: &HashMap<NodeId, (f32, f32)>,
         lx: f32,
         ly: f32,
@@ -2646,10 +2752,7 @@ impl NodeEditorPanel {
         for node in painting::z_ordered(graph) {
             let (sx, sy) =
                 viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-            let (w, h) = node_sizes
-                .get(&node.id)
-                .copied()
-                .unwrap_or((node_width(viewport.zoom), 60.0));
+            let (w, h) = painting::node_size_or_default(node_sizes, node, viewport.zoom, flow);
             if lx >= sx && lx <= sx + w && ly >= sy && ly <= sy + h {
                 hit = Some(node.id);
             }
@@ -2707,6 +2810,8 @@ impl NodeEditorPanel {
                 ly,
                 5.0,
                 self.edge_style,
+                self.flow_direction,
+                &self.node_sizes,
             )
             .is_none()
         {
@@ -2765,9 +2870,16 @@ impl NodeEditorPanel {
                 node_origins: origins,
                 moved: false,
             };
-        } else if let Some(edge_id) =
-            painting::edge_at_local_pos(&self.graph, &self.viewport, lx, ly, 5.0, self.edge_style)
-        {
+        } else if let Some(edge_id) = painting::edge_at_local_pos(
+            &self.graph,
+            &self.viewport,
+            lx,
+            ly,
+            5.0,
+            self.edge_style,
+            self.flow_direction,
+            &self.node_sizes,
+        ) {
             if !event.modifiers.shift {
                 self.selected_edges.clear();
                 self.clear_selected_nodes(cx);
@@ -2923,7 +3035,15 @@ impl NodeEditorPanel {
                 cx.notify();
             }
             DragMode::Connect { from, .. } => {
-                let snap = painting::find_snap_target(&self.graph, &self.viewport, from, lx, ly);
+                let snap = painting::find_snap_target(
+                    &self.graph,
+                    &self.viewport,
+                    self.flow_direction,
+                    &self.node_sizes,
+                    from,
+                    lx,
+                    ly,
+                );
                 self.drag = DragMode::Connect {
                     from: from.clone(),
                     to_point: (lx, ly),
@@ -2947,11 +3067,12 @@ impl NodeEditorPanel {
                     let (nx, ny) = self
                         .viewport
                         .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-                    let (nw, nh) = self
-                        .node_sizes
-                        .get(&node.id)
-                        .copied()
-                        .unwrap_or((node_width(self.viewport.zoom), 60.0));
+                    let (nw, nh) = painting::node_size_or_default(
+                        &self.node_sizes,
+                        node,
+                        self.viewport.zoom,
+                        self.flow_direction,
+                    );
                     if nx + nw > sx && nx < ex && ny + nh > sy && ny < ey {
                         sel.insert(node.id);
                     }
@@ -2964,6 +3085,7 @@ impl NodeEditorPanel {
             DragMode::None => {
                 let hint = self.pointer_hint_at(lx, ly);
                 self.update_pointer_hint(hint, cx);
+                self.update_hovered_port(lx, ly, cx);
 
                 // Idle hover tracking: re-arm the dwell when the
                 // hovered node changes; repaint when an open popover
@@ -3371,7 +3493,24 @@ impl Render for NodeEditorPanel {
         let node_sizes = self.node_sizes.clone();
         let canvas_origin = self.canvas_origin.clone();
         let edge_style = self.edge_style;
+        let flow = self.flow_direction;
         let colors = cx.tokens().colors;
+        // Top-down nodes print no port names, so a name is drawn where the
+        // user is pointing: the dot under the idle pointer, or the target a
+        // dragged wire has snapped to (no dwell delay).
+        let port_label = if flow == FlowDirection::Vertical {
+            match &self.drag {
+                DragMode::None => self.hovered_port.as_ref(),
+                DragMode::Connect { snap, .. } => snap.as_ref(),
+                _ => None,
+            }
+            .and_then(|hit| {
+                painting::port_name(&self.graph, hit)
+                    .map(|name| (name.to_string(), hit.center, hit.is_output))
+            })
+        } else {
+            None
+        };
         let draft_line = match &self.drag {
             DragMode::Connect {
                 from,
@@ -3422,11 +3561,12 @@ impl Render for NodeEditorPanel {
                 let (sx, sy) = self
                     .viewport
                     .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-                let (_, h) = self
-                    .node_sizes
-                    .get(&node.id)
-                    .copied()
-                    .unwrap_or((node_width(self.viewport.zoom), 60.0));
+                let (_, h) = painting::node_size_or_default(
+                    &self.node_sizes,
+                    node,
+                    self.viewport.zoom,
+                    self.flow_direction,
+                );
                 hover_popover_element(Some(&info), point(px(sx), px(sy + h)), true, cx)
             }
             None => hover_popover_element(None, point(px(0.0), px(0.0)), false, cx),
@@ -3552,6 +3692,8 @@ impl Render for NodeEditorPanel {
                                     ly,
                                     5.0,
                                     this.edge_style,
+                                    this.flow_direction,
+                                    &this.node_sizes,
                                 )
                                 .is_none();
                             if empty {
@@ -3624,14 +3766,35 @@ impl Render for NodeEditorPanel {
                 let sizes_snap = self.node_sizes.clone();
                 let selected_snap = Self::selected_nodes(cx);
                 let es = self.edge_style;
+                let flow = self.flow_direction;
                 move |menu, window, cx| {
                     let (lx, ly) = right_click.get();
-                    let hit_edge =
-                        painting::edge_at_local_pos(&graph_snap, &vp_snap, lx, ly, 5.0, es);
-                    let hit_node =
-                        NodeEditorPanel::node_hit_at(&graph_snap, &vp_snap, &sizes_snap, lx, ly);
-                    let hit_port =
-                        NodeEditorPanel::port_hit_at(&graph_snap, &vp_snap, &sizes_snap, lx, ly);
+                    let hit_edge = painting::edge_at_local_pos(
+                        &graph_snap,
+                        &vp_snap,
+                        lx,
+                        ly,
+                        5.0,
+                        es,
+                        flow,
+                        &sizes_snap,
+                    );
+                    let hit_node = NodeEditorPanel::node_hit_at(
+                        &graph_snap,
+                        &vp_snap,
+                        flow,
+                        &sizes_snap,
+                        lx,
+                        ly,
+                    );
+                    let hit_port = NodeEditorPanel::port_hit_at(
+                        &graph_snap,
+                        &vp_snap,
+                        flow,
+                        &sizes_snap,
+                        lx,
+                        ly,
+                    );
 
                     let entity_add = entity.clone();
                     let groups = add_node_menu.clone();
@@ -3866,8 +4029,55 @@ impl Render for NodeEditorPanel {
                         );
                     }
 
+                    let entity_flow = entity.clone();
+                    menu = menu.separator().submenu(
+                        t!("panel.node_graph_menu.flow_direction"),
+                        window,
+                        cx,
+                        move |sub, _window, _cx| {
+                            let horizontal = entity_flow.clone();
+                            let vertical = entity_flow.clone();
+                            sub.item(
+                                PopupMenuItem::new(t!(
+                                    "panel.node_graph_menu.flow_direction_horizontal"
+                                ))
+                                .checked(flow == FlowDirection::Horizontal)
+                                .on_click(
+                                    move |_, _window, cx| {
+                                        horizontal
+                                            .update(cx, |this, cx| {
+                                                this.set_flow_direction(
+                                                    FlowDirection::Horizontal,
+                                                    cx,
+                                                );
+                                            })
+                                            .ok();
+                                    },
+                                ),
+                            )
+                            .item(
+                                PopupMenuItem::new(t!(
+                                    "panel.node_graph_menu.flow_direction_vertical"
+                                ))
+                                .checked(flow == FlowDirection::Vertical)
+                                .on_click(
+                                    move |_, _window, cx| {
+                                        vertical
+                                            .update(cx, |this, cx| {
+                                                this.set_flow_direction(
+                                                    FlowDirection::Vertical,
+                                                    cx,
+                                                );
+                                            })
+                                            .ok();
+                                    },
+                                ),
+                            )
+                        },
+                    );
+
                     let entity_es = entity.clone();
-                    menu.separator().submenu(
+                    menu.submenu(
                         t!("panel.node_graph_menu.edge_style"),
                         window,
                         cx,
@@ -3929,6 +4139,8 @@ impl Render for NodeEditorPanel {
                             &bounds,
                             &selected_edges,
                             edge_style,
+                            flow,
+                            &node_sizes,
                             &colors,
                             window,
                         );
@@ -3942,12 +4154,20 @@ impl Render for NodeEditorPanel {
                             &categories,
                             &labels,
                             show_param_values,
+                            flow,
                             &colors,
                             window,
                             cx,
                         );
                         if let Some((from, to)) = draft_line {
-                            painting::paint_connection_draft(from, to, &bounds, &colors, window);
+                            painting::paint_connection_draft(
+                                from, to, flow, &bounds, &colors, window,
+                            );
+                        }
+                        if let Some((name, center, is_output)) = &port_label {
+                            painting::paint_port_label(
+                                name, *center, *is_output, &bounds, &colors, window, cx,
+                            );
                         }
                         if let Some((start, current)) = selection_box {
                             painting::paint_selection_box(start, current, &bounds, &colors, window);
@@ -4631,7 +4851,14 @@ mod tests {
         .into();
 
         assert_eq!(
-            NodeEditorPanel::node_hit_at(&graph, &viewport, &sizes, 10.0, 10.0),
+            NodeEditorPanel::node_hit_at(
+                &graph,
+                &viewport,
+                FlowDirection::Horizontal,
+                &sizes,
+                10.0,
+                10.0
+            ),
             Some(NodeId::new(1))
         );
     }
@@ -4653,8 +4880,18 @@ mod tests {
             zoom: 1.0,
         };
 
-        let shown = NodeEditorPanel::compute_all_sizes(&graph, viewport.zoom, true);
-        let hidden = NodeEditorPanel::compute_all_sizes(&graph, viewport.zoom, false);
+        let shown = NodeEditorPanel::compute_all_sizes(
+            &graph,
+            viewport.zoom,
+            true,
+            FlowDirection::Horizontal,
+        );
+        let hidden = NodeEditorPanel::compute_all_sizes(
+            &graph,
+            viewport.zoom,
+            false,
+            FlowDirection::Horizontal,
+        );
         let (_, shown_h) = shown[&NodeId::new(1)];
         let (_, hidden_h) = hidden[&NodeId::new(1)];
         assert!(hidden_h < shown_h, "hiding the rows must shrink the node");
@@ -4663,18 +4900,39 @@ mod tests {
         // empty canvas without.
         let y = (hidden_h + shown_h) / 2.0;
         assert_eq!(
-            NodeEditorPanel::node_hit_at(&graph, &viewport, &shown, 10.0, y),
+            NodeEditorPanel::node_hit_at(
+                &graph,
+                &viewport,
+                FlowDirection::Horizontal,
+                &shown,
+                10.0,
+                y
+            ),
             Some(NodeId::new(1))
         );
         assert_eq!(
-            NodeEditorPanel::node_hit_at(&graph, &viewport, &hidden, 10.0, y),
+            NodeEditorPanel::node_hit_at(
+                &graph,
+                &viewport,
+                FlowDirection::Horizontal,
+                &hidden,
+                10.0,
+                y
+            ),
             None,
             "the hit box must not keep the height of rows nobody paints"
         );
         // The header is body either way: the toggle moves the bottom edge and
         // nothing else.
         assert_eq!(
-            NodeEditorPanel::node_hit_at(&graph, &viewport, &hidden, 10.0, 10.0),
+            NodeEditorPanel::node_hit_at(
+                &graph,
+                &viewport,
+                FlowDirection::Horizontal,
+                &hidden,
+                10.0,
+                10.0
+            ),
             Some(NodeId::new(1))
         );
     }
@@ -4702,10 +4960,38 @@ mod tests {
         .into();
         let (x, y) = painting::output_port_screen_center((0.0, 0.0), 0, 1.0);
 
-        assert!(painting::port_at_local_pos(&graph, &viewport, x, y).is_some());
-        assert!(NodeEditorPanel::port_hit_at(&graph, &viewport, &sizes, x, y).is_none());
+        assert!(
+            painting::port_at_local_pos(
+                &graph,
+                &viewport,
+                FlowDirection::Horizontal,
+                &HashMap::new(),
+                x,
+                y
+            )
+            .is_some()
+        );
+        assert!(
+            NodeEditorPanel::port_hit_at(
+                &graph,
+                &viewport,
+                FlowDirection::Horizontal,
+                &sizes,
+                x,
+                y
+            )
+            .is_none()
+        );
         assert_eq!(
-            NodeEditorPanel::pointer_hint_at_in(&graph, &viewport, &sizes, EdgeStyle::Bezier, x, y,),
+            NodeEditorPanel::pointer_hint_at_in(
+                &graph,
+                &viewport,
+                FlowDirection::Horizontal,
+                &sizes,
+                EdgeStyle::Bezier,
+                x,
+                y,
+            ),
             PointerHint::Node,
             "hover follows the same frontmost target as mouse-down"
         );
@@ -7043,6 +7329,130 @@ mod tests {
             .unwrap();
     }
 
+    // ----- top-down flow (NGR-5) -----------------------------------------------
+
+    /// The View command writes the setting; the panel follows it, re-measures
+    /// the nodes narrower, and leaves every position where the document has it
+    /// — switching is not an alignment.
+    #[gpui::test]
+    fn switching_the_flow_direction_re_measures_without_moving_nodes(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+        pile_up_nodes(&project, &path, 2, cx);
+        cx.update(|cx| {
+            crate::app_settings::install(crate::app_settings::GlobalSettingsFile::default(), cx)
+        });
+
+        let (before_positions, before_width) = window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.flow_direction, FlowDirection::Horizontal);
+                (positions(panel), panel.node_sizes[&blur].0)
+            })
+            .unwrap();
+
+        // What `CommandId::ViewToggleNodeFlowDirection` does.
+        cx.update(crate::panels::toggle_node_flow_direction);
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.flow_direction, FlowDirection::Vertical);
+                assert!(panel.node_sizes[&blur].0 < before_width);
+                assert_eq!(
+                    positions(panel),
+                    before_positions,
+                    "no auto-layout on switch"
+                );
+            })
+            .unwrap();
+
+        // A panel opened afterwards starts in the chosen flow.
+        let reopened = cx.add_window(|window, cx| {
+            NodeEditorPanel::new(ravel_ui::layout::PanelInstanceId(1), window, cx)
+        });
+        reopened
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.flow_direction, FlowDirection::Vertical);
+            })
+            .unwrap();
+
+        cx.update(crate::panels::toggle_node_flow_direction);
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.flow_direction, FlowDirection::Horizontal);
+                assert_eq!(
+                    panel.node_sizes[&blur].0, before_width,
+                    "flipping back restores it"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Top-down nodes print no port names, so the dot under the idle pointer
+    /// is tracked for its name tag; horizontal nodes never track it.
+    #[gpui::test]
+    fn the_hovered_port_is_tracked_only_in_vertical_flow(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+        cx.update(|cx| {
+            crate::app_settings::install(crate::app_settings::GlobalSettingsFile::default(), cx)
+        });
+        cx.update(crate::panels::toggle_node_flow_direction);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let node = panel.graph.node(blur).unwrap().clone();
+                let screen = panel
+                    .viewport
+                    .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+                let (x, y) = painting::port_screen_center(
+                    &node,
+                    screen,
+                    panel.node_sizes[&blur],
+                    panel.viewport.zoom,
+                    panel.flow_direction,
+                    false,
+                    0,
+                );
+                panel.update_hovered_port(x, y, cx);
+                let hovered = panel.hovered_port.clone().expect("the dot is hovered");
+                assert_eq!((hovered.node_id, hovered.is_output), (blur, false));
+                assert!(painting::port_name(&panel.graph, &hovered).is_some());
+
+                panel.update_hovered_port(x + 500.0, y + 500.0, cx);
+                assert!(panel.hovered_port.is_none(), "leaving the dot clears it");
+            })
+            .unwrap();
+    }
+
+    /// In top-down flow the alignment passes the vertical axis: a connected
+    /// chain stacks downwards, one layer per row, without overlapping.
+    #[gpui::test]
+    fn aligning_in_vertical_flow_stacks_the_layers_downwards(cx: &mut TestAppContext) {
+        let (window, project, path, _blur) = setup(cx);
+        let extra = pile_up_nodes(&project, &path, 2, cx);
+        cx.update(|cx| {
+            crate::app_settings::install(crate::app_settings::GlobalSettingsFile::default(), cx)
+        });
+        cx.update(crate::panels::toggle_node_flow_direction);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.connect_ports(
+                    extra[0],
+                    OutputPortIndex(0),
+                    extra[1],
+                    InputPortIndex(0),
+                    cx,
+                );
+                panel.clear_selected_nodes(cx);
+                panel.auto_layout_nodes(cx);
+                let after = positions(panel);
+                assert!(
+                    after[&extra[1]].1 > after[&extra[0]].1,
+                    "the downstream layer is below: {after:?}"
+                );
+                assert!(!rects_overlap(&drawn_rects(panel)));
+            })
+            .unwrap();
+    }
+
     // ----- edge style persistence (NGR-3) ------------------------------------
 
     /// The style used to live and die with the panel. It is a setting now, so
@@ -8504,11 +8914,12 @@ mod tests {
                 let (sx, sy) = panel
                     .viewport
                     .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-                let (_, h) = panel
-                    .node_sizes
-                    .get(&blur)
-                    .copied()
-                    .unwrap_or((node_width(panel.viewport.zoom), 60.0));
+                let (_, h) = painting::node_size_or_default(
+                    &panel.node_sizes,
+                    node,
+                    panel.viewport.zoom,
+                    panel.flow_direction,
+                );
                 let (ox, oy) = panel.canvas_origin.get();
                 (ox + sx, oy + sy + h)
             })

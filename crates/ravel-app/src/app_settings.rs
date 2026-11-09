@@ -872,7 +872,7 @@ mod tests {
     use gpui::{AppContext as _, TestAppContext};
     use ravel_project::ProjectFile;
     use ravel_project::settings::{AutoSaveLayer, PlaybackLayer};
-    use ravel_ui::node_editor::EdgeStyle;
+    use ravel_ui::node_editor::{EdgeStyle, FlowDirection};
 
     fn write_toml(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1022,18 +1022,21 @@ mod tests {
             install(read_global_settings_at(Some(path.clone())), cx);
             update(
                 SettingsScope::Global,
-                |layer| layer.node_editor.edge_style = Some(EdgeStyle::Step),
+                |layer| {
+                    layer.node_editor.edge_style = Some(EdgeStyle::Step);
+                    layer.node_editor.flow_direction = Some(FlowDirection::Vertical);
+                },
                 cx,
             );
         });
         cx.run_until_parked();
 
         // A fresh process reads the file back and resolves the same value.
+        let relaunched = read_global_settings_at(Some(path)).resolved();
+        assert_eq!(relaunched.node_editor_edge_style, EdgeStyle::Step);
         assert_eq!(
-            read_global_settings_at(Some(path))
-                .resolved()
-                .node_editor_edge_style,
-            EdgeStyle::Step
+            relaunched.node_editor_flow_direction,
+            FlowDirection::Vertical
         );
     }
 

@@ -27,6 +27,19 @@ pub fn horizontal_bezier(sx: f32, sy: f32, tx: f32, ty: f32, curvature: f32) -> 
     }
 }
 
+/// The top-down counterpart: leaves the source downwards and enters the
+/// target from above, so the controls offset along y.
+pub fn vertical_bezier(sx: f32, sy: f32, tx: f32, ty: f32, curvature: f32) -> BezierPath {
+    let scy = sy + control_offset(ty - sy, curvature);
+    let tcy = ty - control_offset(ty - sy, curvature);
+    BezierPath {
+        source: (sx, sy),
+        source_control: (sx, scy),
+        target_control: (tx, tcy),
+        target: (tx, ty),
+    }
+}
+
 pub fn point_to_bezier_distance(px: f32, py: f32, path: &BezierPath, samples: usize) -> f32 {
     let (x0, y0) = path.source;
     let (cx0, cy0) = path.source_control;
@@ -56,6 +69,15 @@ mod tests {
         assert_eq!(path.target, (200.0, 100.0));
         assert!(path.source_control.0 > 0.0);
         assert!(path.target_control.0 < 200.0);
+    }
+
+    #[test]
+    fn vertical_bezier_leaves_downwards_and_enters_from_above() {
+        let path = vertical_bezier(0.0, 0.0, 100.0, 200.0, 0.25);
+        assert_eq!(path.source, (0.0, 0.0));
+        assert_eq!(path.target, (100.0, 200.0));
+        assert_eq!(path.source_control, (0.0, 100.0));
+        assert_eq!(path.target_control, (100.0, 100.0));
     }
 
     #[test]

@@ -12,10 +12,11 @@ use std::time::Duration;
 
 use ravel_core::registry::NodeCategory;
 
-use super::bezier::horizontal_bezier;
+use super::bezier::{BezierPath, horizontal_bezier, vertical_bezier};
 use super::port_colors::{PortShape, category_color, port_color, port_shape};
 use super::viewport::Viewport;
 use crate::assets::RavelIcon;
+use ravel_ui::node_editor::FlowDirection;
 
 /// Display value for an animated channel without an evaluation context:
 /// the constant value, the curve's frame-0 sample, or 0 for
@@ -56,6 +57,13 @@ fn channels_display(chs: &[ravel_core::animation::channel::AnimationChannel]) ->
 }
 
 const BASE_NODE_WIDTH: f32 = 160.0;
+/// Narrowest top-down node, at zoom 1.0. The ports sit on the top and bottom
+/// edges, so the body carries only the header and parameter rows.
+const BASE_VERTICAL_NODE_WIDTH: f32 = 120.0;
+/// Least width each port on a top/bottom edge gets, at zoom 1.0 — the hit
+/// diameter, so two neighbouring dots never share a hit target and the node
+/// widens past [`BASE_VERTICAL_NODE_WIDTH`] before they would.
+const BASE_VERTICAL_PORT_SPACING: f32 = 2.0 * PORT_HIT_RADIUS;
 const BASE_HEADER_H: f32 = 24.0;
 const BASE_PORT_ROW_H: f32 = 18.0;
 const BASE_PARAM_ROW_H: f32 = 16.0;
@@ -65,6 +73,10 @@ const BASE_PORT_DOT_R: f32 = 4.0;
 const BASE_CORNER_R: f32 = 6.0;
 const PORT_HIT_RADIUS: f32 = 10.0;
 const SNAP_RADIUS: f32 = 20.0;
+/// Port-name tag text size and padding, in screen pixels: the tag is an
+/// overlay read at any zoom, so it does not scale with the canvas.
+const PORT_LABEL_FONT: f32 = 10.0;
+const PORT_LABEL_PAD: f32 = 4.0;
 /// Alpha multiplier applied to every part of a bypassed node's painting.
 const BYPASSED_OPACITY: f32 = 0.45;
 
@@ -98,10 +110,6 @@ pub fn quantized_header_icon_size(zoom: f32) -> Option<f32> {
         .min_by(|a, b| (a - raw).abs().total_cmp(&(b - raw).abs()))
 }
 
-pub fn node_width(zoom: f32) -> f32 {
-    BASE_NODE_WIDTH * zoom
-}
-
 /// The node body's screen size at `zoom`.
 ///
 /// `show_param_values` must be the same value the paint pass is given
@@ -126,8 +134,25 @@ pub fn painted_param_rows(node: &Node, show_param_values: bool) -> usize {
     }
 }
 
-pub fn compute_node_size(node: &Node, zoom: f32, show_param_values: bool) -> (f32, f32) {
+pub fn compute_node_size(
+    node: &Node,
+    zoom: f32,
+    show_param_values: bool,
+    flow: FlowDirection,
+) -> (f32, f32) {
     let z = zoom;
+    if flow == FlowDirection::Vertical {
+        let param_rows = painted_param_rows(node, show_param_values);
+        let sep = if param_rows > 0 { 6.0 * z } else { 0.0 };
+        let ports = node.inputs.len().max(node.outputs.len()) as f32;
+        let w = BASE_VERTICAL_NODE_WIDTH.max(ports * BASE_VERTICAL_PORT_SPACING);
+        let h = BASE_NODE_PAD * z
+            + BASE_HEADER_H * z
+            + sep
+            + param_rows as f32 * BASE_PARAM_ROW_H * z
+            + BASE_NODE_PAD * z;
+        return (w * z, h);
+    }
     let port_rows = node.inputs.len().max(node.outputs.len());
     let param_rows = painted_param_rows(node, show_param_values);
     let sep = if param_rows > 0 { 6.0 * z } else { 0.0 };
@@ -139,6 +164,62 @@ pub fn compute_node_size(node: &Node, zoom: f32, show_param_values: bool) -> (f3
         + param_rows as f32 * BASE_PARAM_ROW_H * z
         + BASE_NODE_PAD * z;
     (BASE_NODE_WIDTH * z, h)
+}
+
+/// A node's drawn size, falling back to what [`compute_node_size`] gives
+/// without parameter rows when the cache has no entry yet.
+pub fn node_size_or_default(
+    sizes: &HashMap<NodeId, (f32, f32)>,
+    node: &Node,
+    zoom: f32,
+    flow: FlowDirection,
+) -> (f32, f32) {
+    sizes
+        .get(&node.id)
+        .copied()
+        .unwrap_or_else(|| compute_node_size(node, zoom, false, flow))
+}
+
+/// Screen centre of port `index` on `node`: the **one** place the flow axis
+/// enters port geometry. Painting, hit testing, snapping and edge endpoints
+/// all call this, so they cannot disagree about where a dot is.
+///
+/// `size` is the node's drawn size ([`compute_node_size`]). Horizontal puts
+/// inputs on the left edge and outputs on the right, one per row; vertical
+/// spreads them evenly across the top (inputs) or bottom (outputs) edge.
+pub fn port_screen_center(
+    node: &Node,
+    node_screen: (f32, f32),
+    size: (f32, f32),
+    zoom: f32,
+    flow: FlowDirection,
+    is_output: bool,
+    port_index: usize,
+) -> (f32, f32) {
+    match flow {
+        FlowDirection::Horizontal => {
+            if is_output {
+                output_port_screen_center(node_screen, port_index, zoom)
+            } else {
+                input_port_screen_center(node_screen, port_index, zoom)
+            }
+        }
+        FlowDirection::Vertical => {
+            let count = if is_output {
+                node.outputs.len()
+            } else {
+                node.inputs.len()
+            }
+            .max(1);
+            let x = node_screen.0 + size.0 * (port_index as f32 + 0.5) / count as f32;
+            let y = if is_output {
+                node_screen.1 + size.1
+            } else {
+                node_screen.1
+            };
+            (x, y)
+        }
+    }
 }
 
 pub fn input_port_screen_center(
@@ -215,12 +296,59 @@ pub fn paint_grid(
     }
 }
 
+/// Screen positions of an edge's two ports, shared by painting and the edge
+/// hit test.
+fn edge_endpoints(
+    edge: &ravel_core::graph::Edge,
+    src_node: &Node,
+    tgt_node: &Node,
+    viewport: &Viewport,
+    flow: FlowDirection,
+    node_sizes: &HashMap<NodeId, (f32, f32)>,
+) -> ((f32, f32), (f32, f32)) {
+    let at = |node: &Node, is_output: bool, port: usize| {
+        let screen = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+        let size = node_size_or_default(node_sizes, node, viewport.zoom, flow);
+        port_screen_center(node, screen, size, viewport.zoom, flow, is_output, port)
+    };
+    (
+        at(src_node, true, edge.source_port.0 as usize),
+        at(tgt_node, false, edge.target_port.0 as usize),
+    )
+}
+
+/// The cubic an edge follows, leaving along the flow axis.
+fn flow_bezier(flow: FlowDirection, sx: f32, sy: f32, tx: f32, ty: f32) -> BezierPath {
+    match flow {
+        FlowDirection::Horizontal => horizontal_bezier(sx, sy, tx, ty, 0.25),
+        FlowDirection::Vertical => vertical_bezier(sx, sy, tx, ty, 0.25),
+    }
+}
+
+/// The four corners of a `Step` edge: it runs along the flow axis, jogs across
+/// halfway, and runs on into the target.
+fn step_points(flow: FlowDirection, sx: f32, sy: f32, tx: f32, ty: f32) -> [(f32, f32); 4] {
+    match flow {
+        FlowDirection::Horizontal => {
+            let mid_x = (sx + tx) / 2.0;
+            [(sx, sy), (mid_x, sy), (mid_x, ty), (tx, ty)]
+        }
+        FlowDirection::Vertical => {
+            let mid_y = (sy + ty) / 2.0;
+            [(sx, sy), (sx, mid_y), (tx, mid_y), (tx, ty)]
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn paint_edges(
     graph: &Graph,
     viewport: &Viewport,
     bounds: &Bounds<Pixels>,
     selected_edges: &HashSet<EdgeId>,
     edge_style: super::EdgeStyle,
+    flow: FlowDirection,
+    node_sizes: &HashMap<NodeId, (f32, f32)>,
     colors: &Colors,
     window: &mut Window,
 ) {
@@ -244,15 +372,8 @@ pub fn paint_edges(
             continue;
         }
 
-        let src_screen =
-            viewport.flow_to_screen(src_node.metadata.position.0, src_node.metadata.position.1);
-        let tgt_screen =
-            viewport.flow_to_screen(tgt_node.metadata.position.0, tgt_node.metadata.position.1);
-
-        let (sx, sy) =
-            output_port_screen_center(src_screen, edge.source_port.0 as usize, viewport.zoom);
-        let (tx, ty) =
-            input_port_screen_center(tgt_screen, edge.target_port.0 as usize, viewport.zoom);
+        let ((sx, sy), (tx, ty)) =
+            edge_endpoints(edge, src_node, tgt_node, viewport, flow, node_sizes);
 
         let sx = sx + ox;
         let sy = sy + oy;
@@ -266,7 +387,7 @@ pub fn paint_edges(
 
         match edge_style {
             super::EdgeStyle::Bezier => {
-                let path = horizontal_bezier(sx, sy, tx, ty, 0.25);
+                let path = flow_bezier(flow, sx, sy, tx, ty);
                 let mut builder = PathBuilder::stroke(px(stroke_w));
                 builder.move_to(Point::new(px(path.source.0), px(path.source.1)));
                 builder.cubic_bezier_to(
@@ -296,16 +417,16 @@ pub fn paint_edges(
                 paint_arrowhead(window, tx, ty, sx, sy, color);
             }
             super::EdgeStyle::Step => {
-                let mid_x = (sx + tx) / 2.0;
+                let points = step_points(flow, sx, sy, tx, ty);
                 let mut builder = PathBuilder::stroke(px(stroke_w));
-                builder.move_to(Point::new(px(sx), px(sy)));
-                builder.line_to(Point::new(px(mid_x), px(sy)));
-                builder.line_to(Point::new(px(mid_x), px(ty)));
-                builder.line_to(Point::new(px(tx), px(ty)));
+                builder.move_to(Point::new(px(points[0].0), px(points[0].1)));
+                for corner in &points[1..] {
+                    builder.line_to(Point::new(px(corner.0), px(corner.1)));
+                }
                 if let Ok(p) = builder.build() {
                     window.paint_path(p, color);
                 }
-                paint_arrowhead(window, tx, ty, mid_x, ty, color);
+                paint_arrowhead(window, tx, ty, points[2].0, points[2].1, color);
             }
         }
     }
@@ -477,6 +598,7 @@ pub fn paint_nodes(
     categories: &HashMap<NodeId, NodeCategory>,
     labels: &HashMap<NodeId, String>,
     show_param_values: bool,
+    flow: FlowDirection,
     colors: &Colors,
     window: &mut Window,
     cx: &mut App,
@@ -491,7 +613,7 @@ pub fn paint_nodes(
         let (sw, sh) = node_sizes
             .get(&node.id)
             .copied()
-            .unwrap_or((BASE_NODE_WIDTH * z, 60.0 * z));
+            .unwrap_or_else(|| compute_node_size(node, z, show_param_values, flow));
         let (sx, sy) = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
 
         if sx + sw < -50.0 || sx > bw + 50.0 || sy + sh < -50.0 || sy > bh + 50.0 {
@@ -516,6 +638,7 @@ pub fn paint_nodes(
             categories.get(&node.id).copied(),
             z,
             show_param_values,
+            flow,
             colors,
             window,
             cx,
@@ -554,6 +677,7 @@ fn paint_single_node(
     category: Option<NodeCategory>,
     z: f32,
     show_param_values: bool,
+    flow: FlowDirection,
     colors: &Colors,
     window: &mut Window,
     cx: &mut App,
@@ -700,9 +824,10 @@ fn paint_single_node(
     ));
 
     let port_base_y = sep_y + port_gap;
+    let vertical = flow == FlowDirection::Vertical;
 
     for (i, input) in node.inputs.iter().enumerate() {
-        let py = port_base_y + (i as f32 + 0.5) * port_row_h;
+        let (pcx, py) = port_screen_center(node, (x, y), (w, h), z, flow, false, i);
         // Parameter inputs keep the same center and hit target as ordinary
         // inputs, but render slightly smaller so their role is visible.
         let input_dot_r = if input.is_param { dot_r * 0.75 } else { dot_r };
@@ -717,8 +842,13 @@ fn paint_single_node(
             .map(|t| port_shape(*t))
             .unwrap_or(PortShape::Circle);
 
-        paint_port_marker(window, (x, py), input_dot_r, shape, dot_color);
+        paint_port_marker(window, (pcx, py), input_dot_r, shape, dot_color);
 
+        // Top-down nodes draw no port-name rows; the name appears on hover
+        // (`paint_port_label`).
+        if vertical {
+            continue;
+        }
         paint_text(
             &input.name,
             Point::new(px(x + dot_r + 4.0 * z), px(py - 5.0 * z)),
@@ -730,16 +860,19 @@ fn paint_single_node(
     }
 
     for (i, output) in node.outputs.iter().enumerate() {
-        let py = port_base_y + (i as f32 + 0.5) * port_row_h;
+        let (pcx, py) = port_screen_center(node, (x, y), (w, h), z, flow, true, i);
         let dot_color = dim(port_color(output.data_type));
 
         paint_port_marker(
             window,
-            (x + w, py),
+            (pcx, py),
             dot_r,
             port_shape(output.data_type),
             dot_color,
         );
+        if vertical {
+            continue;
+        }
 
         let text: SharedString = output.name.as_str().into();
         let len = text.len();
@@ -776,8 +909,11 @@ fn paint_single_node(
     let rows = painted_param_rows(node, show_param_values);
     if rows > 0 {
         let param_row_h = BASE_PARAM_ROW_H * z;
-        let params_base_y =
-            port_base_y + node.inputs.len().max(node.outputs.len()) as f32 * port_row_h + 6.0 * z;
+        let params_base_y = if vertical {
+            sep_y + 6.0 * z
+        } else {
+            port_base_y + node.inputs.len().max(node.outputs.len()) as f32 * port_row_h + 6.0 * z
+        };
 
         let sep2 = Bounds::new(
             Point::new(px(x + 4.0 * z), px(params_base_y - 3.0 * z)),
@@ -786,13 +922,17 @@ fn paint_single_node(
                 height: px(1.0),
             },
         );
-        window.paint_quad(fill(
-            sep2,
-            dim(Hsla {
-                alpha: 0.2,
-                ..colors.border
-            }),
-        ));
+        // The header's own separator already sits right above in top-down
+        // mode.
+        if !vertical {
+            window.paint_quad(fill(
+                sep2,
+                dim(Hsla {
+                    alpha: 0.2,
+                    ..colors.border
+                }),
+            ));
+        }
 
         for (i, param) in node.parameters.iter().enumerate().take(rows) {
             let py = params_base_y + i as f32 * param_row_h;
@@ -924,6 +1064,7 @@ fn paint_port_marker(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn edge_at_local_pos(
     graph: &Graph,
     viewport: &Viewport,
@@ -931,6 +1072,8 @@ pub fn edge_at_local_pos(
     ly: f32,
     threshold: f32,
     edge_style: super::EdgeStyle,
+    flow: FlowDirection,
+    node_sizes: &HashMap<NodeId, (f32, f32)>,
 ) -> Option<EdgeId> {
     use super::bezier::point_to_bezier_distance;
 
@@ -947,27 +1090,20 @@ pub fn edge_at_local_pos(
             continue;
         }
 
-        let src_screen =
-            viewport.flow_to_screen(src_node.metadata.position.0, src_node.metadata.position.1);
-        let tgt_screen =
-            viewport.flow_to_screen(tgt_node.metadata.position.0, tgt_node.metadata.position.1);
-
-        let (sx, sy) =
-            output_port_screen_center(src_screen, edge.source_port.0 as usize, viewport.zoom);
-        let (tx, ty) =
-            input_port_screen_center(tgt_screen, edge.target_port.0 as usize, viewport.zoom);
+        let ((sx, sy), (tx, ty)) =
+            edge_endpoints(edge, src_node, tgt_node, viewport, flow, node_sizes);
 
         let dist = match edge_style {
             super::EdgeStyle::Bezier => {
-                let path = horizontal_bezier(sx, sy, tx, ty, 0.25);
+                let path = flow_bezier(flow, sx, sy, tx, ty);
                 point_to_bezier_distance(lx, ly, &path, 20)
             }
             super::EdgeStyle::Straight => point_to_segment_distance(lx, ly, sx, sy, tx, ty),
             super::EdgeStyle::Step => {
-                let mid_x = (sx + tx) / 2.0;
-                let d1 = point_to_segment_distance(lx, ly, sx, sy, mid_x, sy);
-                let d2 = point_to_segment_distance(lx, ly, mid_x, sy, mid_x, ty);
-                let d3 = point_to_segment_distance(lx, ly, mid_x, ty, tx, ty);
+                let [a, b, c, d] = step_points(flow, sx, sy, tx, ty);
+                let d1 = point_to_segment_distance(lx, ly, a.0, a.1, b.0, b.1);
+                let d2 = point_to_segment_distance(lx, ly, b.0, b.1, c.0, c.1);
+                let d3 = point_to_segment_distance(lx, ly, c.0, c.1, d.0, d.1);
                 d1.min(d2).min(d3)
             }
         };
@@ -1000,13 +1136,21 @@ pub struct PortHit {
     pub center: (f32, f32),
 }
 
-pub fn port_at_local_pos(graph: &Graph, viewport: &Viewport, lx: f32, ly: f32) -> Option<PortHit> {
+pub fn port_at_local_pos(
+    graph: &Graph,
+    viewport: &Viewport,
+    flow: FlowDirection,
+    node_sizes: &HashMap<NodeId, (f32, f32)>,
+    lx: f32,
+    ly: f32,
+) -> Option<PortHit> {
     let mut hit = None;
     for node in z_ordered(graph) {
-        let (sx, sy) = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+        let screen = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+        let size = node_size_or_default(node_sizes, node, viewport.zoom, flow);
 
         for (i, _input) in node.inputs.iter().enumerate() {
-            let (cx, cy) = input_port_screen_center((sx, sy), i, viewport.zoom);
+            let (cx, cy) = port_screen_center(node, screen, size, viewport.zoom, flow, false, i);
             let dist = ((lx - cx).powi(2) + (ly - cy).powi(2)).sqrt();
             if dist <= PORT_HIT_RADIUS {
                 hit = Some(PortHit {
@@ -1019,7 +1163,7 @@ pub fn port_at_local_pos(graph: &Graph, viewport: &Viewport, lx: f32, ly: f32) -
         }
 
         for (i, _output) in node.outputs.iter().enumerate() {
-            let (cx, cy) = output_port_screen_center((sx, sy), i, viewport.zoom);
+            let (cx, cy) = port_screen_center(node, screen, size, viewport.zoom, flow, true, i);
             let dist = ((lx - cx).powi(2) + (ly - cy).powi(2)).sqrt();
             if dist <= PORT_HIT_RADIUS {
                 hit = Some(PortHit {
@@ -1034,9 +1178,93 @@ pub fn port_at_local_pos(graph: &Graph, viewport: &Viewport, lx: f32, ly: f32) -
     hit
 }
 
+/// Name of the port a [`PortHit`] points at.
+pub fn port_name<'a>(graph: &'a Graph, hit: &PortHit) -> Option<&'a str> {
+    let node = graph.node(hit.node_id)?;
+    let i = hit.port_index as usize;
+    if hit.is_output {
+        node.outputs.get(i).map(|p| p.name.as_str())
+    } else {
+        node.inputs.get(i).map(|p| p.name.as_str())
+    }
+}
+
+/// Port-name tag drawn beside a top-down node's port dot while it is hovered
+/// or is the snapped target of a wire being dragged. The row of names a
+/// horizontal node prints is absent in that mode, so this is where a port's
+/// name is read. `center` is in panel-local pixels; inputs get the tag above
+/// the dot (outside the node) and outputs below it.
+pub fn paint_port_label(
+    name: &str,
+    center: (f32, f32),
+    is_output: bool,
+    bounds: &Bounds<Pixels>,
+    colors: &Colors,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if name.is_empty() {
+        return;
+    }
+    let ox: f32 = bounds.origin.x.into();
+    let oy: f32 = bounds.origin.y.into();
+    let font_size = PORT_LABEL_FONT;
+    let text: SharedString = name.to_string().into();
+    let len = text.len();
+    let shaped = window.text_system().shape_line(
+        text,
+        px(font_size),
+        &[TextRun {
+            len,
+            font: crate::fonts::ui_font(cx),
+            color: colors.foreground,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+            letter_spacing: None,
+        }],
+        None,
+    );
+    let tw: f32 = shaped.width.into();
+    let tag_w = tw + 2.0 * PORT_LABEL_PAD;
+    let tag_h = font_size * 1.4 + PORT_LABEL_PAD;
+    let gap = BASE_PORT_DOT_R + PORT_LABEL_PAD;
+    let x = ox + center.0 - tag_w / 2.0;
+    let y = if is_output {
+        oy + center.1 + gap
+    } else {
+        oy + center.1 - gap - tag_h
+    };
+    let tag = Bounds::new(
+        Point::new(px(x), px(y)),
+        Size {
+            width: px(tag_w),
+            height: px(tag_h),
+        },
+    );
+    window.paint_quad(fill(tag, colors.background).corner_radii(px(BASE_CORNER_R / 2.0)));
+    window.paint_quad(
+        outline(tag, colors.border, BorderStyle::default())
+            .corner_radii(px(BASE_CORNER_R / 2.0))
+            .border_widths(px(1.0)),
+    );
+    shaped
+        .paint(
+            Point::new(px(x + PORT_LABEL_PAD), px(y + PORT_LABEL_PAD / 2.0)),
+            px(font_size * 1.4),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        )
+        .ok();
+}
+
 pub fn find_snap_target(
     graph: &Graph,
     viewport: &Viewport,
+    flow: FlowDirection,
+    node_sizes: &HashMap<NodeId, (f32, f32)>,
     from: &PortHit,
     mouse_lx: f32,
     mouse_ly: f32,
@@ -1048,7 +1276,8 @@ pub fn find_snap_target(
             continue;
         }
 
-        let (sx, sy) = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+        let screen = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+        let size = node_size_or_default(node_sizes, node, viewport.zoom, flow);
 
         let ports: Vec<(usize, bool)> = if from.is_output {
             node.inputs
@@ -1069,11 +1298,7 @@ pub fn find_snap_target(
                 continue;
             }
 
-            let (cx, cy) = if is_out {
-                output_port_screen_center((sx, sy), i, viewport.zoom)
-            } else {
-                input_port_screen_center((sx, sy), i, viewport.zoom)
-            };
+            let (cx, cy) = port_screen_center(node, screen, size, viewport.zoom, flow, is_out, i);
 
             let dist = ((mouse_lx - cx).powi(2) + (mouse_ly - cy).powi(2)).sqrt();
             // z_ordered walks back to front, so an equal-distance candidate
@@ -1140,6 +1365,7 @@ fn is_port_compatible(
 pub fn paint_connection_draft(
     from: (f32, f32),
     to: (f32, f32),
+    flow: FlowDirection,
     bounds: &Bounds<Pixels>,
     colors: &Colors,
     window: &mut Window,
@@ -1154,7 +1380,7 @@ pub fn paint_connection_draft(
 
     let draft_color = colors.primary;
 
-    let path = horizontal_bezier(sx, sy, tx, ty, 0.25);
+    let path = flow_bezier(flow, sx, sy, tx, ty);
     let mut builder = PathBuilder::stroke(px(2.0));
     builder.move_to(Point::new(px(path.source.0), px(path.source.1)));
     builder.cubic_bezier_to(
@@ -1505,10 +1731,28 @@ mod tests {
         let (px, py) = output_port_screen_center((0.0, 0.0), 0, vp.zoom);
 
         let hidden = Graph::new().add_node(scalar_source(1, true)).unwrap();
-        assert!(port_at_local_pos(&hidden, &vp, px, py).is_none());
+        assert!(
+            port_at_local_pos(
+                &hidden,
+                &vp,
+                FlowDirection::Horizontal,
+                &HashMap::new(),
+                px,
+                py
+            )
+            .is_none()
+        );
 
         let visible = Graph::new().add_node(scalar_source(1, false)).unwrap();
-        let hit = port_at_local_pos(&visible, &vp, px, py).expect("visible port hits");
+        let hit = port_at_local_pos(
+            &visible,
+            &vp,
+            FlowDirection::Horizontal,
+            &HashMap::new(),
+            px,
+            py,
+        )
+        .expect("visible port hits");
         assert!(hit.is_output);
     }
 
@@ -1548,7 +1792,16 @@ mod tests {
         let (x, y) = output_port_screen_center((0.0, 0.0), 0, vp.zoom);
 
         assert_eq!(
-            port_at_local_pos(&graph, &vp, x, y).unwrap().node_id,
+            port_at_local_pos(
+                &graph,
+                &vp,
+                FlowDirection::Horizontal,
+                &HashMap::new(),
+                x,
+                y
+            )
+            .unwrap()
+            .node_id,
             NodeId::new(2)
         );
     }
@@ -1570,11 +1823,29 @@ mod tests {
             .unwrap();
         let source_pos = vp.flow_to_screen(-200.0, 0.0);
         let (sx, sy) = output_port_screen_center(source_pos, 0, vp.zoom);
-        let from = port_at_local_pos(&graph, &vp, sx, sy).unwrap();
+        let from = port_at_local_pos(
+            &graph,
+            &vp,
+            FlowDirection::Horizontal,
+            &HashMap::new(),
+            sx,
+            sy,
+        )
+        .unwrap();
         let (x, y) = input_port_screen_center((0.0, 0.0), 0, vp.zoom);
 
         assert_eq!(
-            find_snap_target(&graph, &vp, &from, x, y).unwrap().node_id,
+            find_snap_target(
+                &graph,
+                &vp,
+                FlowDirection::Horizontal,
+                &HashMap::new(),
+                &from,
+                x,
+                y
+            )
+            .unwrap()
+            .node_id,
             NodeId::new(3)
         );
     }
@@ -1707,8 +1978,8 @@ mod tests {
             Node::new(NodeId::new(2), "user.unknown").with_output("out", DataTypeId::FRAME_BUFFER);
         for zoom in [Viewport::MIN_ZOOM, 1.0, Viewport::MAX_ZOOM] {
             assert_eq!(
-                compute_node_size(&explicit, zoom, true),
-                compute_node_size(&fallback, zoom, true),
+                compute_node_size(&explicit, zoom, true, FlowDirection::Horizontal),
+                compute_node_size(&fallback, zoom, true, FlowDirection::Horizontal),
                 "node size must not depend on the header glyph at zoom {zoom}"
             );
         }
@@ -1746,8 +2017,10 @@ mod tests {
         let bare = Node::new(NodeId::new(2), "test").with_output("out", DataTypeId::FRAME_BUFFER);
 
         for zoom in [Viewport::MIN_ZOOM, 1.0, Viewport::MAX_ZOOM] {
-            let (shown_w, shown_h) = compute_node_size(&node, zoom, true);
-            let (hidden_w, hidden_h) = compute_node_size(&node, zoom, false);
+            let (shown_w, shown_h) =
+                compute_node_size(&node, zoom, true, FlowDirection::Horizontal);
+            let (hidden_w, hidden_h) =
+                compute_node_size(&node, zoom, false, FlowDirection::Horizontal);
             assert_eq!(
                 shown_w, hidden_w,
                 "the node width never depends on the rows"
@@ -1757,8 +2030,8 @@ mod tests {
                 "at zoom {zoom} only the rows and their separator come off: {shown_h} -> {hidden_h}"
             );
             assert_eq!(
-                compute_node_size(&bare, zoom, true),
-                compute_node_size(&bare, zoom, false),
+                compute_node_size(&bare, zoom, true, FlowDirection::Horizontal),
+                compute_node_size(&bare, zoom, false, FlowDirection::Horizontal),
                 "a node with no parameters is unaffected at zoom {zoom}"
             );
         }
@@ -1795,9 +2068,28 @@ mod tests {
             .unwrap();
 
         let (px, py) = output_port_screen_center((0.0, 0.0), 0, vp.zoom);
-        let from = port_at_local_pos(&graph, &vp, px, py).unwrap();
+        let from = port_at_local_pos(
+            &graph,
+            &vp,
+            FlowDirection::Horizontal,
+            &HashMap::new(),
+            px,
+            py,
+        )
+        .unwrap();
         let (ix, iy) = input_port_screen_center((0.0, 0.0), 0, vp.zoom);
-        assert!(find_snap_target(&graph, &vp, &from, ix, iy).is_none());
+        assert!(
+            find_snap_target(
+                &graph,
+                &vp,
+                FlowDirection::Horizontal,
+                &HashMap::new(),
+                &from,
+                ix,
+                iy
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -1821,11 +2113,27 @@ mod tests {
 
         let source_screen = vp.flow_to_screen(0.0, 100.0);
         let (source_x, source_y) = output_port_screen_center(source_screen, 0, vp.zoom);
-        let from = port_at_local_pos(&graph, &vp, source_x, source_y).unwrap();
+        let from = port_at_local_pos(
+            &graph,
+            &vp,
+            FlowDirection::Horizontal,
+            &HashMap::new(),
+            source_x,
+            source_y,
+        )
+        .unwrap();
         let sink_screen = vp.flow_to_screen(300.0, 0.0);
         let (target_x, target_y) = input_port_screen_center(sink_screen, 0, vp.zoom);
-        let target = find_snap_target(&graph, &vp, &from, target_x, target_y)
-            .expect("scalar snaps to exposed float parameter");
+        let target = find_snap_target(
+            &graph,
+            &vp,
+            FlowDirection::Horizontal,
+            &HashMap::new(),
+            &from,
+            target_x,
+            target_y,
+        )
+        .expect("scalar snaps to exposed float parameter");
         assert_eq!(target.node_id, sink_id);
         assert_eq!(target.port_index, 0);
 
@@ -1833,10 +2141,200 @@ mod tests {
             .with_output("out", DataTypeId::COLOR)
             .with_position(0.0, 100.0);
         let graph = graph.replace_node(Arc::new(color_source));
-        let from = port_at_local_pos(&graph, &vp, source_x, source_y).unwrap();
+        let from = port_at_local_pos(
+            &graph,
+            &vp,
+            FlowDirection::Horizontal,
+            &HashMap::new(),
+            source_x,
+            source_y,
+        )
+        .unwrap();
         assert!(
-            find_snap_target(&graph, &vp, &from, target_x, target_y).is_none(),
+            find_snap_target(
+                &graph,
+                &vp,
+                FlowDirection::Horizontal,
+                &HashMap::new(),
+                &from,
+                target_x,
+                target_y
+            )
+            .is_none(),
             "color does not snap to scalar parameter input"
         );
+    }
+
+    // ---- top-down flow ----------------------------------------------------
+
+    const V: FlowDirection = FlowDirection::Vertical;
+
+    fn ported(id: u64, inputs: usize, outputs: usize) -> Node {
+        let mut node = Node::new(NodeId::new(id), "test");
+        for i in 0..inputs {
+            node = node.with_input(format!("in{i}"), &[DataTypeId::SCALAR]);
+        }
+        for i in 0..outputs {
+            node = node.with_output(format!("out{i}"), DataTypeId::SCALAR);
+        }
+        node
+    }
+
+    fn sizes_of(graph: &Graph, zoom: f32, flow: FlowDirection) -> HashMap<NodeId, (f32, f32)> {
+        graph
+            .nodes()
+            .map(|n| (n.id, compute_node_size(n, zoom, true, flow)))
+            .collect()
+    }
+
+    /// Every port's drawn centre must be what the hit test finds, in both
+    /// directions and across port counts — the centre is computed once
+    /// (`port_screen_center`) and painting and picking both read it.
+    #[test]
+    fn port_centres_round_trip_through_the_hit_test_in_both_flows() {
+        for flow in [FlowDirection::Horizontal, V] {
+            for (inputs, outputs) in [(1, 1), (2, 1), (3, 2), (8, 1), (12, 3)] {
+                let node = ported(1, inputs, outputs).with_position(40.0, 30.0);
+                let graph = Graph::new().add_node(node).unwrap();
+                let vp = Viewport {
+                    x: 7.0,
+                    y: 5.0,
+                    zoom: 1.5,
+                };
+                let sizes = sizes_of(&graph, vp.zoom, flow);
+                let node = graph.node(NodeId::new(1)).unwrap();
+                let screen = vp.flow_to_screen(40.0, 30.0);
+                let size = sizes[&node.id];
+                for (is_output, count) in [(false, inputs), (true, outputs)] {
+                    for index in 0..count {
+                        let (cx, cy) =
+                            port_screen_center(node, screen, size, vp.zoom, flow, is_output, index);
+                        let hit = port_at_local_pos(&graph, &vp, flow, &sizes, cx, cy)
+                            .unwrap_or_else(|| {
+                                panic!("{flow:?} {inputs}x{outputs} port {index} not hit")
+                            });
+                        assert_eq!(
+                            (hit.is_output, hit.port_index),
+                            (is_output, index as u32),
+                            "{flow:?} {inputs}x{outputs}"
+                        );
+                        assert_eq!(hit.center, (cx, cy));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vertical_inputs_sit_on_the_top_edge_and_outputs_on_the_bottom() {
+        let node = ported(1, 3, 2);
+        let size = compute_node_size(&node, 1.0, true, V);
+        let (ix, iy) = port_screen_center(&node, (10.0, 20.0), size, 1.0, V, false, 1);
+        let (ox, oy) = port_screen_center(&node, (10.0, 20.0), size, 1.0, V, true, 0);
+        assert_eq!(iy, 20.0, "inputs on the top edge");
+        assert_eq!(oy, 20.0 + size.1, "outputs on the bottom edge");
+        // Spread across the width: the middle of three is the centre, the
+        // first of two sits a quarter in.
+        assert_eq!(ix, 10.0 + size.0 / 2.0);
+        assert_eq!(ox, 10.0 + size.0 / 4.0);
+    }
+
+    /// No port-name rows, narrower than horizontal, and widening for many
+    /// inputs so neighbouring dots keep their hit targets apart.
+    #[test]
+    fn vertical_nodes_are_narrow_rowless_and_widen_for_many_ports() {
+        let few = ported(1, 2, 1);
+        let many = ported(2, 12, 1);
+        let (hw, hh) = compute_node_size(&few, 1.0, false, FlowDirection::Horizontal);
+        let (fw, fh) = compute_node_size(&few, 1.0, false, V);
+        let (mw, mh) = compute_node_size(&many, 1.0, false, V);
+
+        assert_eq!(fw, BASE_VERTICAL_NODE_WIDTH);
+        assert!(fw < hw, "vertical is narrower: {fw} vs {hw}");
+        assert!(fh < hh, "no port rows: {fh} vs {hh}");
+        assert_eq!(fh, mh, "height does not depend on the port count");
+        assert!(mw > fw, "many inputs widen the node");
+
+        let node = many.with_position(0.0, 0.0);
+        let size = compute_node_size(&node, 1.0, false, V);
+        let xs: Vec<f32> = (0..12)
+            .map(|i| port_screen_center(&node, (0.0, 0.0), size, 1.0, V, false, i).0)
+            .collect();
+        for pair in xs.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= 2.0 * PORT_HIT_RADIUS,
+                "dots {pair:?} would share a hit target"
+            );
+        }
+    }
+
+    /// Parameter rows follow the same flag as in horizontal flow, and cost the
+    /// same rows.
+    #[test]
+    fn vertical_height_follows_the_parameter_rows_flag() {
+        let node = ported(1, 1, 1)
+            .with_param("a", ParameterValue::Float(1.0))
+            .with_param("b", ParameterValue::Float(2.0));
+        let (_, shown) = compute_node_size(&node, 1.0, true, V);
+        let (_, hidden) = compute_node_size(&node, 1.0, false, V);
+        assert_eq!(shown - hidden, 6.0 + 2.0 * BASE_PARAM_ROW_H);
+    }
+
+    /// `Step` jogs across halfway along the flow axis: horizontal runs along x
+    /// first, vertical along y first.
+    #[test]
+    fn step_edges_bend_along_the_flow_axis() {
+        let h = step_points(FlowDirection::Horizontal, 0.0, 0.0, 100.0, 60.0);
+        assert_eq!(h, [(0.0, 0.0), (50.0, 0.0), (50.0, 60.0), (100.0, 60.0)]);
+        let v = step_points(V, 0.0, 0.0, 100.0, 60.0);
+        assert_eq!(v, [(0.0, 0.0), (0.0, 30.0), (100.0, 30.0), (100.0, 60.0)]);
+    }
+
+    /// The edge hit test follows the same routes the painter draws, for all
+    /// three styles in top-down flow.
+    #[test]
+    fn edges_are_hit_where_they_are_drawn_in_vertical_flow() {
+        let source = ported(1, 0, 1).with_position(0.0, 0.0);
+        let sink = ported(2, 1, 0).with_position(200.0, 200.0);
+        let graph = Graph::new()
+            .add_node(source)
+            .unwrap()
+            .add_node(sink)
+            .unwrap()
+            .add_edge(
+                EdgeId::new(1),
+                NodeId::new(1),
+                ravel_core::id::OutputPortIndex(0),
+                NodeId::new(2),
+                ravel_core::id::InputPortIndex(0),
+            )
+            .unwrap();
+        let vp = viewport();
+        let sizes = sizes_of(&graph, 1.0, V);
+        let src = graph.node(NodeId::new(1)).unwrap();
+        let tgt = graph.node(NodeId::new(2)).unwrap();
+        let (sx, sy) = port_screen_center(src, (0.0, 0.0), sizes[&src.id], 1.0, V, true, 0);
+        let (tx, ty) = port_screen_center(tgt, (200.0, 200.0), sizes[&tgt.id], 1.0, V, false, 0);
+        let hit = |style, x: f32, y: f32| {
+            edge_at_local_pos(&graph, &vp, x, y, 3.0, style, V, &sizes).is_some()
+        };
+
+        // Step: down from the source, across at mid-height, down into the target.
+        let mid_y = (sy + ty) / 2.0;
+        assert!(hit(super::super::EdgeStyle::Step, sx, (sy + mid_y) / 2.0));
+        assert!(hit(super::super::EdgeStyle::Step, (sx + tx) / 2.0, mid_y));
+        assert!(hit(super::super::EdgeStyle::Step, tx, (mid_y + ty) / 2.0));
+        // The horizontal route's first leg runs along y = sy; vertical does not.
+        assert!(!hit(super::super::EdgeStyle::Step, (sx + tx) / 2.0, sy));
+
+        // Straight and Bezier both pass through the endpoints and the middle.
+        assert!(hit(
+            super::super::EdgeStyle::Straight,
+            (sx + tx) / 2.0,
+            mid_y
+        ));
+        assert!(hit(super::super::EdgeStyle::Bezier, sx, sy));
+        assert!(hit(super::super::EdgeStyle::Bezier, (sx + tx) / 2.0, mid_y));
+        assert!(!hit(super::super::EdgeStyle::Bezier, sx + 60.0, sy));
     }
 }

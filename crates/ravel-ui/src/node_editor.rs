@@ -22,3 +22,16 @@ pub enum EdgeStyle {
     Straight,
     Step,
 }
+
+/// Which way the graph flows across a node: ports on the left and right
+/// edges, or inputs on the top edge and outputs on the bottom.
+///
+/// Persisted like [`EdgeStyle`] (`settings.toml`, `node_editor.flow_direction`),
+/// so the spellings are a file format.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowDirection {
+    #[default]
+    Horizontal,
+    Vertical,
+}

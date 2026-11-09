@@ -103,6 +103,11 @@ pub enum CommandId {
     /// Unlike its neighbours this is not a panel toggle — the panel stays,
     /// its nodes get shorter.
     ViewToggleNodeParamValues,
+    /// Flip the Node Graph editor between the horizontal flow (ports on the
+    /// left and right edges) and the compact top-down flow (inputs on top,
+    /// outputs at the bottom). A global setting, so like its neighbour it
+    /// applies whichever panel has focus; no default key.
+    ViewToggleNodeFlowDirection,
     /// Step the viewer's preview resolution factor to the next one
     /// (`done/viewer-preview-resolution-plan.md`, REQ-UI-004). One cycling command
     /// rather than three "set to X" commands, because the factors are one
@@ -396,6 +401,10 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
         "view.toggle_node_param_values",
     ),
     (
+        CommandId::ViewToggleNodeFlowDirection,
+        "view.toggle_node_flow_direction",
+    ),
+    (
         CommandId::ViewCyclePreviewResolution,
         "view.cycle_preview_resolution",
     ),
@@ -528,6 +537,7 @@ impl CommandId {
             CommandId::ViewToggleRenderQueue => "menu.view.render_queue",
             CommandId::ViewToggleAttributeSpreadsheet => "menu.view.attribute_spreadsheet",
             CommandId::ViewToggleNodeParamValues => "menu.view.node_param_values",
+            CommandId::ViewToggleNodeFlowDirection => "menu.view.node_flow_direction",
             CommandId::ViewCyclePreviewResolution => "menu.view.cycle_preview_resolution",
             CommandId::ViewerChannelRgb => "menu.viewer.channel_rgb",
             CommandId::ViewerChannelRed => "menu.viewer.channel_red",

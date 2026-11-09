@@ -1776,11 +1776,13 @@ max_points = "Most particles alive at once. Emission stops at the limit and a wa
 seed = "Random seed. The same seed gives the same particles."
 initial_velocity = "Launch velocity in pixels per second."
 initial_spread = "Random extra launch speed in pixels per second."
+force_direction = "Direction a scalar force field pushes along, as a vector (its length scales the push). A Vec2 force field is used as it is."
 drag = "Slows a particle in proportion to its speed (per second)."
 [node."particle.simulate".group]
 emission = "Emission"
 emitter = "Emitter"
 motion = "Motion"
+forces = "Forces"
 
 [node."attribute.set"]
 label = "Attribute Set"

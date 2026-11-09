@@ -3101,6 +3101,9 @@ fn scatter_path_array() -> NodeTemplate {
 /// pixels, time in frames except `rate` and the velocities, which are per
 /// second so a change of frame rate does not change the motion.
 ///
+/// The `force` group takes fields: each answers an acceleration (px/s²), a
+/// scalar one along `force_direction`, a `Vec2` one as it is.
+///
 /// No transform section: the particles are placed by the emitter they leave.
 fn particle_simulate() -> NodeTemplate {
     NodeTemplate::new(
@@ -3109,6 +3112,7 @@ fn particle_simulate() -> NodeTemplate {
         NodeCategory::Geometry,
     )
     .with_input(geometry_input("emitter"))
+    .with_variadic_input_group(field_input("force"))
     .with_output(geometry_output())
     .with_param(float_parameter("rate", 60.0))
     .with_param(float_parameter("life", 60.0))
@@ -3122,6 +3126,7 @@ fn particle_simulate() -> NodeTemplate {
     .with_param_options("velocity_mode", ["fixed", "random", "normal"])
     .with_param(channel2_parameter("initial_velocity", 0.0, 0.0))
     .with_param(float_parameter("initial_spread", 0.0))
+    .with_param(channel2_parameter("force_direction", 0.0, 1.0))
     .with_param(float_parameter("drag", 0.0))
     .with_param_range("rate", 0.0..=1e7, 0.0..=1000.0)
     .with_param_range("life", 0.0..=1e6, 1.0..=300.0)
@@ -3131,6 +3136,7 @@ fn particle_simulate() -> NodeTemplate {
     .with_param_range("jitter", 0.0..=1e6, 0.0..=100.0)
     .with_param_range("initial_velocity", -1e6..=1e6, -500.0..=500.0)
     .with_param_range("initial_spread", 0.0..=1e6, 0.0..=200.0)
+    .with_param_range("force_direction", -1e6..=1e6, -1.0..=1.0)
     .with_param_range("drag", 0.0..=1e3, 0.0..=5.0)
     .with_param_group(
         "emission",
@@ -3139,13 +3145,9 @@ fn particle_simulate() -> NodeTemplate {
     .with_param_group("emitter", ["emit_from", "jitter"])
     .with_param_group(
         "motion",
-        [
-            "velocity_mode",
-            "initial_velocity",
-            "initial_spread",
-            "drag",
-        ],
+        ["velocity_mode", "initial_velocity", "initial_spread"],
     )
+    .with_param_group("forces", ["force_direction", "drag"])
 }
 
 fn scatter_scatter() -> NodeTemplate {

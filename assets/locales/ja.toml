@@ -1764,11 +1764,13 @@ max_points = "同時に存在できる最大数。上限に達すると発生を
 seed = "乱数シード。同じシードなら同じパーティクルになる。"
 initial_velocity = "発射速度（ピクセル/秒）。"
 initial_spread = "発射速度に足すランダムな速さ（ピクセル/秒）。"
+force_direction = "スカラーのフォースフィールドが押す向き（ベクトル。長さが力に掛かる）。Vec2 のフォースフィールドはそのまま使う。"
 drag = "速さに比例して減速する（毎秒）。"
 [node."particle.simulate".group]
 emission = "発生"
 emitter = "エミッタ"
 motion = "運動"
+forces = "フォース"
 
 [node."attribute.set"]
 label = "アトリビュート設定"

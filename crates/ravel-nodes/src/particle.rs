@@ -34,6 +34,17 @@
 //! ([`SIMULATED`]). Nothing wired emits from the origin; a wired emitter with
 //! nothing to emit from emits nothing and is not an error.
 //!
+//! # Forces
+//!
+//! Every field wired to the `force` group is sampled **once per frame, as a
+//! batch, at the positions of the live particles** ([`Forces`]), with the
+//! particles' own attributes on offer (`field.attribute("age")` works). What
+//! the field answers is an acceleration in pixels per second squared: a scalar
+//! field is a magnitude along `force_direction`, a `Vec2` field is the
+//! acceleration itself (`field.direction_to` times a falloff is an attractor).
+//! Accelerations add. Drag is a parameter, not a field: it slows a particle in
+//! proportion to its speed.
+//!
 //! # Determinism
 //!
 //! Randomness is a hash of the `seed` parameter and the particle's `id`
@@ -48,8 +59,8 @@ use ravel_core::eval::{EvalContext, ResolvedParams, SimInputs, StatefulProcessor
 use ravel_core::geometry::absent::absent_column;
 use ravel_core::geometry::ops::PathArcTable;
 use ravel_core::geometry::{
-    AttrName, AttributeArray, AttributeSet, Domain, Geometry, Primitive, bounds_center,
-    element_hash, names,
+    AttrName, AttributeArray, AttributeSet, Domain, FieldSample, FieldValue, Geometry, Primitive,
+    bounds_center, element_hash, names,
 };
 use ravel_core::registry::builtin::PARTICLE_MAX_POINTS_DEFAULT;
 use ravel_core::types::{NodeData, Vec2};
@@ -83,6 +94,8 @@ pub struct ParticleState {
     /// Whether the emitter could not be read (3D positions, a path that is
     /// not one), for the same once-per-episode warning.
     emitter_unusable: bool,
+    /// Whether a force answered a type that is not an acceleration.
+    force_unusable: bool,
 }
 
 impl ParticleState {
@@ -156,12 +169,14 @@ struct Config {
     launch: LaunchMode,
     initial_velocity: Vec2,
     initial_spread: f32,
+    force_direction: Vec2,
     drag: f32,
 }
 
 impl Config {
     fn read(params: &ResolvedParams) -> Self {
         let [vx, vy] = params.vec2_or("initial_velocity", [0.0, 0.0]);
+        let [fx, fy] = params.vec2_or("force_direction", [0.0, 1.0]);
         Self {
             rate: f64::from(params.f32_or("rate", 60.0).max(0.0)),
             life: params.f32_or("life", 60.0),
@@ -175,6 +190,7 @@ impl Config {
             launch: LaunchMode::parse(params.str_or("velocity_mode", "fixed")),
             initial_velocity: Vec2(vx, vy),
             initial_spread: params.f32_or("initial_spread", 0.0).max(0.0),
+            force_direction: Vec2(fx, fy),
             drag: params.f32_or("drag", 0.0).max(0.0),
         }
     }
@@ -558,6 +574,63 @@ fn disc(seed: u32, id: i32, radius: f32, radius_k: u32, angle_k: u32) -> Vec2 {
 }
 
 // ===========================================================================
+// Forces
+// ===========================================================================
+
+/// The fields wired to the `force` group.
+struct Forces<'a>(Vec<&'a FieldValue>);
+
+impl<'a> Forces<'a> {
+    /// The fields in the slots after the emitter's.
+    fn read(inputs: &'a [Option<Arc<dyn NodeData>>]) -> Self {
+        Self(
+            inputs
+                .iter()
+                .skip(1)
+                .filter_map(|slot| slot.as_ref()?.downcast_ref::<FieldValue>())
+                .collect(),
+        )
+    }
+
+    /// The acceleration of each of `live` (pixels per second squared), or
+    /// `None` when nothing pushes. The second answer is `true` when a field
+    /// answered something that is not an acceleration, which then counts as
+    /// zero.
+    fn acceleration(
+        &self,
+        live: &Live<'_>,
+        attributes: &AttributeSet,
+        direction: Vec2,
+        ctx: &EvalContext,
+    ) -> (Option<Vec<Vec2>>, bool) {
+        if self.0.is_empty() {
+            return (None, false);
+        }
+        let sample = FieldSample::new(live.p, attributes, ctx);
+        let mut total = vec![Vec2(0.0, 0.0); live.p.len()];
+        let mut unusable = false;
+        for field in &self.0 {
+            match field.sample(&sample) {
+                AttributeArray::F32(values) if values.len() == total.len() => {
+                    for (sum, magnitude) in total.iter_mut().zip(values) {
+                        sum.0 += direction.0 * magnitude;
+                        sum.1 += direction.1 * magnitude;
+                    }
+                }
+                AttributeArray::Vec2(values) if values.len() == total.len() => {
+                    for (sum, push) in total.iter_mut().zip(values) {
+                        sum.0 += push.0;
+                        sum.1 += push.1;
+                    }
+                }
+                _ => unusable = true,
+            }
+        }
+        (Some(total), unusable)
+    }
+}
+
+// ===========================================================================
 // The processor
 // ===========================================================================
 
@@ -641,13 +714,19 @@ impl ParticleSimulate {
         }
     }
 
-    fn finish(columns: Columns, emission: Emission, emitter_unusable: bool) -> ParticleState {
+    fn finish(
+        columns: Columns,
+        emission: Emission,
+        emitter_unusable: bool,
+        force_unusable: bool,
+    ) -> ParticleState {
         ParticleState {
             points: columns.into_geometry(),
             next_id: emission.next_id,
             carry: emission.carry,
             capped: emission.capped,
             emitter_unusable,
+            force_unusable,
         }
     }
 }
@@ -666,6 +745,11 @@ fn warn_on_entering(prev: Option<&ParticleState>, state: &ParticleState, config:
             "particle.simulate cannot emit from this geometry (3D positions, a mesh, or not a geometry); nothing is emitted"
         );
     }
+    if state.force_unusable && !prev.is_some_and(|prev| prev.force_unusable) {
+        tracing::warn!(
+            "particle.simulate: a force answers neither a scalar nor a Vec2 per particle; it is ignored"
+        );
+    }
 }
 
 impl StatefulProcessor for ParticleSimulate {
@@ -679,7 +763,7 @@ impl StatefulProcessor for ParticleSimulate {
         );
         let mut columns = Columns::default();
         let emission = Self::emit(&config, ctx, &emitter, 0, 0.0, 0, &mut columns);
-        let state = Self::finish(columns, emission, unusable);
+        let state = Self::finish(columns, emission, unusable, false);
         warn_on_entering(None, &state, &config);
         state
     }
@@ -699,7 +783,15 @@ impl StatefulProcessor for ParticleSimulate {
         let damping = (config.drag * dt).min(1.0);
 
         let mut next = Columns::default();
+        let mut force_unusable = false;
         if let Some(live) = Live::of(&prev.points) {
+            let (acceleration, unusable) = Forces::read(inputs.inputs).acceleration(
+                &live,
+                prev.points.points(),
+                config.force_direction,
+                ctx,
+            );
+            force_unusable = unusable;
             next = Columns::with_capacity(live.p.len());
             let mut kept = Vec::with_capacity(live.p.len());
             for i in 0..live.p.len() {
@@ -709,8 +801,12 @@ impl StatefulProcessor for ParticleSimulate {
                 }
                 kept.push(i);
                 let (p, v) = (live.p[i], live.v[i]);
+                let a = acceleration.as_ref().map_or(Vec2(0.0, 0.0), |a| a[i]);
                 next.p.push(Vec2(p.0 + v.0 * dt, p.1 + v.1 * dt));
-                next.v.push(Vec2(v.0 - v.0 * damping, v.1 - v.1 * damping));
+                next.v.push(Vec2(
+                    v.0 + a.0 * dt - v.0 * damping,
+                    v.1 + a.1 * dt - v.1 * damping,
+                ));
                 next.id.push(live.id[i]);
                 next.age.push(age);
                 next.life.push(live.life[i]);
@@ -733,7 +829,7 @@ impl StatefulProcessor for ParticleSimulate {
             prev.next_id,
             &mut next,
         );
-        let state = Self::finish(next, emission, unusable);
+        let state = Self::finish(next, emission, unusable, force_unusable);
         warn_on_entering(Some(prev), &state, &config);
         state
     }
@@ -751,7 +847,10 @@ impl StatefulProcessor for ParticleSimulate {
 pub(crate) mod tests {
     use super::*;
     use ravel_core::eval::Evaluator;
-    use ravel_core::geometry::Primitive;
+    use ravel_core::geometry::{
+        AttributeField, ComposeField, ConstantField, DirectionToField, FalloffField, FalloffShape,
+        MultiplyField, NoiseField, Primitive,
+    };
     use ravel_core::graph::{Graph, Node, ParameterValue};
     use ravel_core::id::NodeId;
     use ravel_core::registry::NodeRegistry;
@@ -1352,6 +1451,241 @@ pub(crate) mod tests {
             checked += 1;
         }
         assert!(checked >= 5, "too few particles off the corners: {checked}");
+    }
+
+    /// The simulation with `forces` wired into its `force` group, and
+    /// `emitter` into the first input when there is one.
+    fn with_forces(
+        params: &[(&str, ParameterValue)],
+        emitter: Option<Geometry>,
+        forces: Vec<FieldValue>,
+    ) -> (Graph, Evaluator) {
+        use ravel_core::id::{EdgeId, InputPortIndex, OutputPortIndex};
+        let mut graph = Graph::new().add_node(sim_node(params)).unwrap();
+        let mut ev = evaluator();
+        let sim = NodeId::new(SIM);
+        let wire =
+            |graph: Graph, ev: &mut Evaluator, id: u64, slot: u32, value: Arc<dyn NodeData>| {
+                let source = NodeId::new(id);
+                let graph = graph
+                    .add_node(
+                        Node::new(source, "test.source").with_output("out", value.data_type_id()),
+                    )
+                    .unwrap()
+                    .add_edge(
+                        EdgeId::new(id),
+                        source,
+                        OutputPortIndex(0),
+                        sim,
+                        InputPortIndex(slot),
+                    )
+                    .unwrap();
+                ev.register(source, Arc::new(Stub(value)));
+                graph
+            };
+        if let Some(emitter) = emitter {
+            graph = wire(graph, &mut ev, 100, 0, Arc::new(emitter));
+        }
+        for (slot, field) in forces.into_iter().enumerate() {
+            graph = wire(
+                graph,
+                &mut ev,
+                200 + slot as u64,
+                1 + slot as u32,
+                Arc::new(field),
+            );
+            graph = graph.grow_variadic_input_group(sim).unwrap();
+        }
+        (graph, ev)
+    }
+
+    fn constant(value: f32) -> FieldValue {
+        FieldValue::new(ConstantField(value))
+    }
+
+    fn velocities(geometry: &dyn NodeData) -> Vec<Vec2> {
+        column(geometry, names::VELOCITY)
+            .as_vec2(names::VELOCITY)
+            .unwrap()
+            .to_vec()
+    }
+
+    /// One particle per frame, born at the origin at rest, never expiring.
+    fn one_per_frame(
+        extra: &[(&'static str, ParameterValue)],
+    ) -> Vec<(&'static str, ParameterValue)> {
+        let mut params = vec![("rate", float(FPS as f32)), ("life", float(1e6))];
+        params.extend_from_slice(extra);
+        params
+    }
+
+    #[test]
+    fn a_constant_field_down_is_free_fall() {
+        let gravity = 980.0;
+        let (graph, mut ev) = with_forces(&one_per_frame(&STILL), None, vec![constant(gravity)]);
+        let frames = 30u64;
+        let out = geometry_at(&mut ev, &graph, frames);
+        // Particle 0 is first in the array and has had `frames` steps.
+        let (y, vy) = (positions(&*out)[0].1, velocities(&*out)[0].1);
+        let (n, dt) = (frames as f32, 1.0 / FPS as f32);
+        let t = n * dt;
+
+        // Exactly what forward Euler gives: v_n = g n dt, y_n = g dt^2 n(n-1)/2.
+        assert!((vy - gravity * t).abs() < 1e-2, "{vy}");
+        let discrete = gravity * dt * dt * n * (n - 1.0) / 2.0;
+        assert!((y - discrete).abs() < 1e-2 * discrete, "{y} vs {discrete}");
+        // And the analytic solution y = g t^2 / 2 within the Euler error bound
+        // g t dt / 2, so an integrator that is wrong by more than the scheme
+        // itself is caught.
+        let analytic = 0.5 * gravity * t * t;
+        assert!(
+            (y - analytic).abs() <= gravity * t * dt / 2.0 * 1.01,
+            "{y} vs {analytic}"
+        );
+        // Nothing pushed sideways.
+        assert!(positions(&*out)[0].0.abs() < 1e-4);
+    }
+
+    #[test]
+    fn force_direction_chooses_where_a_scalar_force_pushes() {
+        let params = one_per_frame(&[("force_direction", ParameterValue::vec2(1.0, 0.0))]);
+        let (graph, mut ev) = with_forces(&params, None, vec![constant(300.0)]);
+        let out = geometry_at(&mut ev, &graph, 10);
+        let v = velocities(&*out)[0];
+        assert!((v.0 - 100.0).abs() < 1e-2 && v.1.abs() < 1e-4, "{v:?}");
+    }
+
+    #[test]
+    fn an_attractor_gathers_particles_at_its_center() {
+        // A ring of eight points at radius 80, a falloff centred on the origin
+        // that reaches past it, and the unit direction toward the origin scaled
+        // by the falloff and a strength. Drag takes the energy out so the
+        // particles settle.
+        let center = Vec2(0.0, 0.0);
+        let ring: Vec<Vec2> = (0..8)
+            .map(|k| {
+                let a = k as f32 * std::f32::consts::FRAC_PI_4;
+                Vec2(80.0 * a.cos(), 80.0 * a.sin())
+            })
+            .collect();
+        let pull = FieldValue::new(MultiplyField {
+            left: FieldValue::new(MultiplyField {
+                left: FieldValue::new(DirectionToField { target: center }),
+                right: FieldValue::new(FalloffField {
+                    center,
+                    inner_radius: 0.0,
+                    outer_radius: 200.0,
+                    shape: FalloffShape::Sphere,
+                }),
+            }),
+            right: constant(300.0),
+        });
+        // Eight particles at frame 0 (240 per second at 30 fps), then none.
+        let params = [
+            ("rate", float(240.0)),
+            ("life", float(1e6)),
+            ("drag", float(6.0)),
+            ("max_points", ParameterValue::Int(8)),
+        ];
+        let (graph, mut ev) = with_forces(&params, Some(Geometry::from_points(ring)), vec![pull]);
+
+        let distance = |frame: u64, ev: &mut Evaluator| -> Vec<f32> {
+            positions(&*geometry_at(ev, &graph, frame))
+                .iter()
+                .map(|p| p.0.hypot(p.1))
+                .collect()
+        };
+        let start = distance(0, &mut ev);
+        let early = distance(6, &mut ev);
+        let late = distance(150, &mut ev);
+
+        assert_eq!(start.len(), 8);
+        assert!(start.iter().all(|d| (d - 80.0).abs() < 1e-3));
+        // Drawn in from the start, and settled around the center at the end.
+        assert!(early.iter().zip(&start).all(|(e, s)| e < s), "{early:?}");
+        assert!(late.iter().all(|d| *d < 5.0), "{late:?}");
+    }
+
+    #[test]
+    fn a_noise_force_gives_the_same_trajectory_every_time() {
+        let noise = |seed| {
+            FieldValue::new(MultiplyField {
+                left: FieldValue::new(NoiseField {
+                    seed,
+                    frequency: 0.05,
+                    octaves: 2,
+                }),
+                right: constant(400.0),
+            })
+        };
+        // Born at the origin, where noise is zero, so they are launched off it.
+        let params = one_per_frame(&[
+            ("force_direction", ParameterValue::vec2(1.0, 1.0)),
+            ("initial_velocity", ParameterValue::vec2(20.0, 0.0)),
+            ("initial_spread", float(30.0)),
+        ]);
+        let run = |seed: u32, frame: u64| {
+            let (graph, mut ev) = with_forces(&params, None, vec![noise(seed)]);
+            positions(&*geometry_at(&mut ev, &graph, frame))
+        };
+        let first = run(5, 40);
+        assert_eq!(first, run(5, 40), "the same noise is the same path");
+        assert_ne!(first, run(6, 40), "another noise seed is another path");
+
+        // Scrubbing back over the track reads the same states.
+        let (graph, mut ev) = with_forces(&params, None, vec![noise(5)]);
+        geometry_at(&mut ev, &graph, 40);
+        geometry_at(&mut ev, &graph, 7);
+        assert_eq!(first, positions(&*geometry_at(&mut ev, &graph, 40)));
+
+        // The force acts: the same launch without it is a straight line.
+        let (graph, mut ev) = with_forces(&params, None, Vec::new());
+        let straight = positions(&*geometry_at(&mut ev, &graph, 40));
+        assert_ne!(first, straight);
+    }
+
+    #[test]
+    fn a_force_sees_the_attributes_of_the_particles_it_pushes() {
+        // `age` as the magnitude: before step k+1 the particle is k frames old,
+        // so v_n = dt * (0 + 1 + ... + (n - 1)).
+        let (graph, mut ev) = with_forces(
+            &one_per_frame(&STILL),
+            None,
+            vec![FieldValue::new(AttributeField::new("age"))],
+        );
+        let n = 6u64;
+        let v = velocities(&*geometry_at(&mut ev, &graph, n))[0];
+        let expected = (n * (n - 1) / 2) as f32 / FPS as f32;
+        assert!((v.1 - expected).abs() < 1e-4, "{v:?} vs {expected}");
+    }
+
+    #[test]
+    fn forces_add_up() {
+        let (graph, mut ev) = with_forces(
+            &one_per_frame(&STILL),
+            None,
+            vec![constant(100.0), constant(50.0)],
+        );
+        let v = velocities(&*geometry_at(&mut ev, &graph, 6))[0];
+        assert!((v.1 - 150.0 * 6.0 / FPS as f32).abs() < 1e-3, "{v:?}");
+    }
+
+    #[test]
+    fn a_force_that_is_not_an_acceleration_is_ignored_with_one_warning() {
+        let vec3 = FieldValue::new(ComposeField::new(vec![
+            constant(1.0),
+            constant(1.0),
+            constant(1.0),
+        ]));
+        let (graph, mut ev) = with_forces(&one_per_frame(&STILL), None, vec![vec3]);
+        let mut last = Vec::new();
+        let warnings = warnings_during(|| {
+            for frame in 0..5 {
+                last = velocities(&*geometry_at(&mut ev, &graph, frame));
+            }
+        });
+        assert_eq!(warnings, 1);
+        assert!(last.iter().all(|v| *v == Vec2(0.0, 0.0)));
     }
 
     /// Wall time of one steady-state step at 10k and 100k live particles, for

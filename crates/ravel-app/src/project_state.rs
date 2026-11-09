@@ -418,6 +418,14 @@ pub struct ProjectState {
     /// resolution) does not fence: a slightly coarse frame is still right, and
     /// dropping it would only leave the old picture up longer.
     published_generation: u64,
+    /// Whether the frame on screen is the **provisional** answer of
+    /// `published_generation` (a stateful node showed an older state while its
+    /// simulation fills, `EvalUpdate::provisional`). The fence is the pair:
+    /// the final update of the same generation supersedes a provisional one,
+    /// and never the reverse. Every fence that assigns a generation clears it
+    /// ([`Self::fence_at`]), or a fenced request's final update would still
+    /// get through.
+    published_provisional: bool,
     /// Everything the Timeline's cache band was last computed from, so an
     /// evaluation that changed none of it skips the walk. See [`BandKey`].
     published_band: Option<BandKey>,
@@ -538,6 +546,10 @@ pub(crate) struct ViewerUpdate {
     /// which is the state the viewer is normally in.
     linear: Option<Arc<FrameBuffer>>,
     scoped_results: Vec<(EvalResultKey, Arc<dyn ravel_core::types::NodeData>)>,
+    /// A stateful node answered with the state its simulation last reached
+    /// (`EvalUpdate::provisional`); the final answer follows under the same
+    /// generation.
+    provisional: bool,
 }
 
 /// Whether an evaluation result is an image the viewer would have drawn had
@@ -611,7 +623,33 @@ impl ViewerUpdate {
             output,
             linear,
             scoped_results,
+            provisional: update.provisional,
         }
+    }
+}
+
+/// Frames a forward jump may skip before a stateful node answers
+/// provisionally: about a second of footage, the same span read-ahead fills.
+const VIEWER_SIM_JUMP_FRAMES: u64 = 24;
+
+/// What the viewer's evaluation service is spawned with. A function so the
+/// choices — read-ahead on, simulation jumps provisional — are one thing a test
+/// can read back rather than a literal inside a spawn.
+fn viewer_eval_config(budget: SharedCacheBudget, generation: u64) -> EvalServiceConfig {
+    // Read-ahead is on here and nowhere else (`CACHE-9`): this is the one
+    // service with a playhead a user moves, so it is the one worth filling
+    // ahead of. A render and a benchmark evaluate exactly the frames they
+    // name.
+    EvalServiceConfig {
+        budget: Some(budget),
+        read_ahead: Some(ReadAhead::default()),
+        generation,
+        // A jump through a stateful node longer than this is shown at once
+        // with the state the simulation last reached and confirmed after the
+        // fill; `on_eval_update` fences on (generation, provisional) so the
+        // confirmation is not dropped as stale. Playback steps one frame at a
+        // time and never reaches it.
+        sim_jump_frames: Some(VIEWER_SIM_JUMP_FRAMES),
     }
 }
 
@@ -632,18 +670,7 @@ fn spawn_viewer_eval_service<H: EvalWorkerHooks>(
     generation: u64,
     updates: futures::channel::mpsc::UnboundedSender<ViewerUpdate>,
 ) -> EvalService {
-    // Read-ahead is on here and nowhere else (`CACHE-9`): this is the one
-    // service with a playhead a user moves, so it is the one worth filling
-    // ahead of. A render and a benchmark evaluate exactly the frames they
-    // name.
-    let config = EvalServiceConfig {
-        budget: Some(budget),
-        read_ahead: Some(ReadAhead::default()),
-        generation,
-        // Off until `ViewerUpdate` honours `EvalUpdate::provisional`: the
-        // generation fence would drop the final update that follows one.
-        sim_jump_frames: None,
-    };
+    let config = viewer_eval_config(budget, generation);
     EvalService::spawn_with_config(hooks, config, move |update| {
         let _ = updates.unbounded_send(ViewerUpdate::from_eval(update));
     })
@@ -721,6 +748,7 @@ impl ProjectState {
             load_request: 0,
             mirror_epoch: 0,
             published_generation: 0,
+            published_provisional: false,
             published_band: None,
             structure_epoch: 0,
             live_nodes: HashSet::new(),
@@ -815,7 +843,7 @@ impl ProjectState {
             .as_ref()
             .map_or_else(ravel_gpu::GpuDeviceState::new, GpuContext::device_state);
         self.gpu = gpu;
-        self.published_generation = generation;
+        self.fence_at(generation);
         cx.spawn(async move |this, cx| {
             use futures::StreamExt as _;
             while let Some(update) = update_rx.next().await {
@@ -954,7 +982,7 @@ impl ProjectState {
             .eval
             .as_ref()
             .map_or(self.published_generation, EvalService::latest_generation);
-        self.published_generation = generation;
+        self.fence_at(generation);
         // Give up the frame on screen, because holding it means holding a
         // texture of the outgoing device (`GPULOSS-5`). The lease travels
         // through the durable `ViewerFrame` global into every Viewer panel, so
@@ -1220,8 +1248,15 @@ impl ProjectState {
     /// `max` keeps a direct blank's fence from ever moving backwards.
     fn fence_in_flight_results(&mut self) {
         if let Some(eval) = self.eval.as_ref() {
-            self.published_generation = self.published_generation.max(eval.latest_generation());
+            self.fence_at(self.published_generation.max(eval.latest_generation()));
         }
+    }
+
+    /// Fence everything at or below `generation`: the provisional answer of
+    /// that generation is fenced with it, so its final update cannot follow.
+    fn fence_at(&mut self, generation: u64) {
+        self.published_generation = generation;
+        self.published_provisional = false;
     }
 
     // ----- document edits ----------------------------------------------------
@@ -2435,7 +2470,8 @@ impl ProjectState {
                     // fence keeps an older in-flight result from overwriting the
                     // blank).
                     if let Some(eval) = self.eval.as_mut() {
-                        self.published_generation = eval.cancel_pending();
+                        let fence = eval.cancel_pending();
+                        self.fence_at(fence);
                     }
                     let frame = self.viewer_blank(cx);
                     cx.set_global(frame);
@@ -2455,7 +2491,8 @@ impl ProjectState {
                     // "broken".
                     tracing::error!(%err, "active composition compilation failed");
                     if let Some(eval) = self.eval.as_mut() {
-                        self.published_generation = eval.cancel_pending();
+                        let fence = eval.cancel_pending();
+                        self.fence_at(fence);
                     }
                     let frame = self.viewer_error(err.to_string().into(), cx);
                     cx.set_global(frame);
@@ -2733,7 +2770,14 @@ impl ProjectState {
             cx.set_global(timings);
         }
 
-        if update.generation <= self.published_generation {
+        // Newer is published. The same generation is too, but only as the
+        // final answer replacing its own provisional one.
+        let supersedes = self.published_provisional
+            && !update.provisional
+            && update.generation == self.published_generation;
+        if update.generation < self.published_generation
+            || (update.generation == self.published_generation && !supersedes)
+        {
             // The worker logged this result as sent; pairing that with an
             // explicit drop keeps "worker Ok but nothing published" visible
             // in the log.
@@ -2799,6 +2843,7 @@ impl ProjectState {
             "viewer frame published"
         );
         self.published_generation = update.generation;
+        self.published_provisional = update.provisional;
         cx.set_global(frame);
         self.publish_cache_band(cx);
     }
@@ -3641,6 +3686,193 @@ mod tests {
             Some(8),
             "a straggler overwrote the frame the new device produced"
         );
+    }
+
+    /// `EvalUpdate::provisional` against the generation fence: the same
+    /// generation's final answer replaces its provisional one, and nothing
+    /// replaces a final one — with a fence clearing the provisional state so
+    /// a fenced request's confirmation cannot follow.
+    #[gpui::test]
+    fn a_final_update_supersedes_the_provisional_one_of_its_generation(cx: &mut TestAppContext) {
+        disable_background_eval_for_tests();
+        let project = cx.new(ProjectState::new);
+        let publish = |project: &mut ProjectState,
+                       cx: &mut Context<ProjectState>,
+                       generation: u64,
+                       provisional: bool,
+                       size: u32| {
+            project.on_eval_update(
+                ViewerUpdate::from_eval(EvalUpdate {
+                    generation,
+                    frame: 0,
+                    results: vec![(NodeId::next(), Ok(blank_display_frame(size, size)))],
+                    scoped: Vec::new(),
+                    timings: Vec::new(),
+                    provisional,
+                }),
+                cx,
+            );
+        };
+        let width = |cx: &mut TestAppContext| {
+            cx.update(|cx| match cx.try_global::<crate::panels::ViewerFrame>() {
+                Some(crate::panels::ViewerFrame::Frame { image, .. }) => Some(image.width()),
+                _ => None,
+            })
+        };
+
+        project.update(cx, |project, cx| publish(project, cx, 7, true, 4));
+        assert_eq!(width(cx), Some(4), "a provisional frame is shown");
+        project.update(cx, |project, cx| publish(project, cx, 7, true, 5));
+        assert_eq!(
+            width(cx),
+            Some(4),
+            "a second provisional of one generation is stale"
+        );
+
+        project.update(cx, |project, cx| publish(project, cx, 7, false, 8));
+        assert_eq!(
+            width(cx),
+            Some(8),
+            "the final answer must replace the provisional one"
+        );
+
+        project.update(cx, |project, cx| publish(project, cx, 7, true, 2));
+        assert_eq!(
+            width(cx),
+            Some(8),
+            "a provisional frame replaced its own final answer"
+        );
+        project.update(cx, |project, cx| publish(project, cx, 7, false, 3));
+        assert_eq!(
+            width(cx),
+            Some(8),
+            "a second final answer of one generation is stale"
+        );
+
+        // A fence at the provisional frame's generation takes its final
+        // answer with it.
+        project.update(cx, |project, cx| publish(project, cx, 9, true, 6));
+        assert_eq!(width(cx), Some(6));
+        project.update(cx, |project, _| project.fence_at(9));
+        project.update(cx, |project, cx| publish(project, cx, 9, false, 10));
+        assert_eq!(
+            width(cx),
+            Some(6),
+            "the final answer of a fenced request got through"
+        );
+    }
+
+    /// A stateful node: `state(f) = f`, output a `Scalar`.
+    #[derive(Clone)]
+    struct FrameCounter;
+
+    impl ravel_core::eval::StatefulProcessor for FrameCounter {
+        type State = u64;
+
+        fn initial(&self, _: &EvalContext, _: &ravel_core::eval::SimInputs<'_>) -> u64 {
+            0
+        }
+
+        fn step(&self, prev: &u64, _: &EvalContext, _: &ravel_core::eval::SimInputs<'_>) -> u64 {
+            prev + 1
+        }
+
+        fn output(&self, state: &u64) -> Arc<dyn ravel_core::types::NodeData> {
+            Arc::new(ravel_core::types::Scalar(*state as f32))
+        }
+    }
+
+    struct FrameCounterHooks;
+
+    impl EvalWorkerHooks for FrameCounterHooks {
+        fn sync(
+            &mut self,
+            evaluator: &mut ravel_core::runtime::ProcessorSync<'_>,
+            graph: &ravel_core::graph::Graph,
+            _document: Option<&ravel_core::composition::Document>,
+            hint: &InvalidationHint,
+        ) {
+            if matches!(hint, InvalidationHint::Structural) {
+                for node in graph.nodes() {
+                    evaluator.register(node.id, ravel_core::eval::stateful_processor(FrameCounter));
+                }
+            }
+        }
+    }
+
+    /// The viewer's own service configuration, a stateful node, and the
+    /// fence together: a long jump arrives provisional, its confirmation
+    /// arrives under the same generation, and `on_eval_update` publishes both.
+    #[gpui::test]
+    fn a_jump_through_a_stateful_node_publishes_provisionally_then_finally(
+        cx: &mut TestAppContext,
+    ) {
+        disable_background_eval_for_tests();
+        let budget = SharedCacheBudget::new(
+            ravel_project::settings::ResolvedSettings::default().cache_budget(),
+        );
+        let config = viewer_eval_config(budget, 0);
+        assert_eq!(config.sim_jump_frames, Some(VIEWER_SIM_JUMP_FRAMES));
+
+        let project = cx.new(ProjectState::new);
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<ViewerUpdate>();
+        let mut service =
+            EvalService::spawn_with_config(FrameCounterHooks, config, move |update| {
+                let _ = tx.unbounded_send(ViewerUpdate::from_eval(update));
+            });
+        let node = NodeId::new(1);
+        let graph = ravel_core::graph::Graph::new()
+            .add_node(Node::new(node, "test.counter").with_output("out", DataTypeId::SCALAR))
+            .unwrap();
+        let request = |frame: u64| ravel_core::runtime::EvalRequest {
+            graph: graph.clone(),
+            nodes: vec![node],
+            scoped: Vec::new(),
+            comp: None,
+            path: Vec::new(),
+            ctx: EvalContext::new(frame, FrameRate::new(30, 1), (16, 16)),
+            document: None,
+            hint: InvalidationHint::None,
+        };
+        let next = |rx: &mut futures::channel::mpsc::UnboundedReceiver<ViewerUpdate>,
+                    cx: &mut TestAppContext| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Ok(update) = rx.try_recv() {
+                    return update;
+                }
+                assert!(std::time::Instant::now() < deadline, "no update arrived");
+                cx.run_until_parked();
+                std::thread::yield_now();
+            }
+        };
+
+        service.request(request(0));
+        let first = next(&mut rx, cx);
+        assert!(!first.provisional);
+        project.update(cx, |project, cx| project.on_eval_update(first, cx));
+
+        let generation = service.request(request(VIEWER_SIM_JUMP_FRAMES * 10));
+        let provisional = next(&mut rx, cx);
+        assert!(provisional.provisional, "the jump was not provisional");
+        assert_eq!(provisional.generation, generation);
+        project.update(cx, |project, cx| project.on_eval_update(provisional, cx));
+        project.read_with(cx, |project, _| {
+            assert_eq!(project.published_generation, generation);
+            assert!(project.published_provisional);
+        });
+
+        let confirmed = next(&mut rx, cx);
+        assert!(!confirmed.provisional);
+        assert_eq!(confirmed.generation, generation);
+        project.update(cx, |project, cx| project.on_eval_update(confirmed, cx));
+        project.read_with(cx, |project, _| {
+            assert_eq!(project.published_generation, generation);
+            assert!(
+                !project.published_provisional,
+                "the confirmation was dropped as stale"
+            );
+        });
     }
 
     /// Wait for a device epoch swap to finish, or fail the test.

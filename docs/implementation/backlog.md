@@ -43,7 +43,6 @@
 | TYPE-3 | テキストレイヤーテンプレートと Properties（`TYPE-2` ✅） | `typography-plan.md` |
 | SHELL-6 | レイヤー殻プロパティの式入力 UI（`EXPR-4` 完了で着手可能） | `layer-shell-wiring-plan.md` |
 | UX-1 | 情報の所在表と往復候補の列挙（計器の材料） | `refactor-plan-0808.md` |
-| NGR-5 | 上→下フローモード（コンパクトな縦ビュー。前倒し、`NGR-9` と同 PR） | `node-graph-readability-plan.md` |
 | NGR-4 | 型によるエッジ配色 | `node-graph-readability-plan.md` |
 | NGR-6 | Reroute ノード | `node-graph-readability-plan.md` |
 | NGR-7 | エッジへのドロップでノードを挟む | `node-graph-readability-plan.md` |
@@ -859,11 +858,11 @@ proc-macro のクレート名ハードコードだけだった。**gpui-pre へ�
 | NGR-2 | ✅ #347 | 整列コマンドと undo | NGR-1 |
 | NGR-3 | ✅ #347 | `SettingsLayer` の `node_editor` 節と `edge_style` の永続化 | — |
 | NGR-4 | 🟡 | 型によるエッジ配色 | — |
-| NGR-5 | 🟡 | 上→下フローモード（描画・整列軸・`flow_direction`） | NGR-1, NGR-3 |
+| NGR-5 | ✅ #637 | 上→下フローモード（描画・整列軸・`flow_direction`） | NGR-1, NGR-3 |
 | NGR-6 | 🟡 | Reroute ノード | — |
 | NGR-7 | 🟡 | エッジへのドロップでノードを挟む | — |
 | NGR-8 | ⬜ | ロケール / 文書 | NGR-2〜7 |
-| NGR-9 | ⬜ | ノードエディタのツールバー（フロー方向・エッジスタイル・整列・パラメータ値表示・全体表示） | NGR-5 |
+| NGR-9 | ✅ #637 | ノードエディタのツールバー（フロー方向・エッジスタイル・整列・パラメータ値表示・全体表示） | NGR-5 |
 
 **リリース前は `NGR-1`〜`NGR-3` だけ**、`NGR-4` 以降はリリース後
 （`roadmap.md` のフェーズ UX）。

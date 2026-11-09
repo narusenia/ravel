@@ -22,6 +22,11 @@ pub const MAX_BLUR_RADIUS: f32 = 64.0;
 /// Default `max_iterations` of `geometry.iterate`.
 pub const MAX_ITERATIONS_DEFAULT: i32 = 256;
 
+/// Default `max_points` of `particle.simulate`: the ceiling the node holds
+/// when the parameter is not on the node. Declared once so the template and
+/// the processor's fallback cannot drift (the `center_input` lesson).
+pub const PARTICLE_MAX_POINTS_DEFAULT: i32 = 100_000;
+
 /// Built-in types whose template declares the transform section
 /// ([`NodeTemplate::with_transform_section`]).
 ///
@@ -191,6 +196,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(geometry_null());
     reg.register(geometry_from_image());
     reg.register(geometry_iterate());
+    reg.register(particle_simulate());
     reg.register(scene_add());
     reg.register(scene_merge());
     reg.register(scene_camera());
@@ -3087,6 +3093,45 @@ fn scatter_path_array() -> NodeTemplate {
         .with_param_role("translate", ParamRole::Position)
 }
 
+/// `particle.simulate`: frame-sequential point particles (REQ-MOGRAPH-002).
+///
+/// The one stateful geometry node. The emitter is any geometry; an
+/// unconnected emitter emits from the origin. Lengths are in composition
+/// pixels, time in frames except `rate` and the velocities, which are per
+/// second so a change of frame rate does not change the motion.
+///
+/// No transform section: the particles are placed by the emitter they leave.
+fn particle_simulate() -> NodeTemplate {
+    NodeTemplate::new(
+        "particle.simulate",
+        "Particle Simulate",
+        NodeCategory::Geometry,
+    )
+    .with_input(geometry_input("emitter"))
+    .with_output(geometry_output())
+    .with_param(float_parameter("rate", 60.0))
+    .with_param(float_parameter("life", 60.0))
+    .with_param(float_parameter("life_variance", 0.0))
+    .with_param(int_parameter("max_points", PARTICLE_MAX_POINTS_DEFAULT))
+    .with_param(int_parameter("seed", 0))
+    .with_param(channel2_parameter("initial_velocity", 0.0, 0.0))
+    .with_param(float_parameter("initial_spread", 0.0))
+    .with_param(float_parameter("drag", 0.0))
+    .with_param_range("rate", 0.0..=1e7, 0.0..=1000.0)
+    .with_param_range("life", 0.0..=1e6, 1.0..=300.0)
+    .with_param_range("life_variance", 0.0..=1e6, 0.0..=100.0)
+    .with_param_range("max_points", 0.0..=1e7, 0.0..=100_000.0)
+    .with_param_range("seed", 0.0..=1e9, 0.0..=1000.0)
+    .with_param_range("initial_velocity", -1e6..=1e6, -500.0..=500.0)
+    .with_param_range("initial_spread", 0.0..=1e6, 0.0..=200.0)
+    .with_param_range("drag", 0.0..=1e3, 0.0..=5.0)
+    .with_param_group(
+        "emission",
+        ["rate", "life", "life_variance", "max_points", "seed"],
+    )
+    .with_param_group("motion", ["initial_velocity", "initial_spread", "drag"])
+}
+
 fn scatter_scatter() -> NodeTemplate {
     NodeTemplate::new("scatter.scatter", "Scatter", NodeCategory::Geometry)
         .with_variadic_input_group(InputPort {
@@ -3615,14 +3660,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 135);
+        assert_eq!(reg.all_templates().count(), 136);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 40);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 41);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
@@ -4672,6 +4717,7 @@ mod tests {
             "geometry.switch",
             "geometry.transform",
             "geometry.twist",
+            "particle.simulate",
             "style.dash",
             "style.fill",
             "style.stroke",

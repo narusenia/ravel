@@ -1750,6 +1750,22 @@ layout = "配置"
 source = "ソース"
 transform = "トランスフォーム"
 
+[node."particle.simulate"]
+label = "パーティクル・シミュレート"
+description = "エミッタジオメトリからポイントパーティクルをフレーム逐次でシミュレートする。出力は id / index / age / life / velocity を持つポイントジオメトリ。"
+[node."particle.simulate".params]
+rate = "1 秒あたりの発生数。"
+life = "パーティクルの寿命（フレーム）。"
+life_variance = "寿命のランダムな幅（フレーム、±）。"
+max_points = "同時に存在できる最大数。上限に達すると発生を止め、警告をログに出す。"
+seed = "乱数シード。同じシードなら同じパーティクルになる。"
+initial_velocity = "発射速度（ピクセル/秒）。"
+initial_spread = "発射速度に足すランダムな速さ（ピクセル/秒）。"
+drag = "速さに比例して減速する（毎秒）。"
+[node."particle.simulate".group]
+emission = "発生"
+motion = "運動"
+
 [node."attribute.set"]
 label = "アトリビュート設定"
 description = "ジオメトリのドメインに定数アトリビュートを書き込む。"

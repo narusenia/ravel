@@ -1762,6 +1762,22 @@ layout = "Layout"
 source = "Source"
 transform = "Transform"
 
+[node."particle.simulate"]
+label = "Particle Simulate"
+description = "Simulates point particles frame by frame from an emitter geometry. Output is a point geometry with id, index, age, life and velocity."
+[node."particle.simulate".params]
+rate = "Particles emitted per second."
+life = "Lifetime of a particle in frames."
+life_variance = "Random spread of the lifetime in frames, plus or minus."
+max_points = "Most particles alive at once. Emission stops at the limit and a warning is logged."
+seed = "Random seed. The same seed gives the same particles."
+initial_velocity = "Launch velocity in pixels per second."
+initial_spread = "Random extra launch speed in pixels per second."
+drag = "Slows a particle in proportion to its speed (per second)."
+[node."particle.simulate".group]
+emission = "Emission"
+motion = "Motion"
+
 [node."attribute.set"]
 label = "Attribute Set"
 description = "Writes a constant attribute onto a geometry domain."

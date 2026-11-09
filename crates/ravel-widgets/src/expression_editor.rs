@@ -31,7 +31,9 @@
 //! keys are the kit's own bindings, not new ones: Up, Down, Enter and Escape
 //! reach the menu through the kit's overlay-action hook, and Tab, Shift+Enter
 //! and paste are caught in the capture phase on the field. Each of them lets the
-//! action through unchanged when the menu is closed.
+//! action through unchanged when the menu is closed. The rows also take the
+//! pointer: hovering moves the selection, and a click accepts the row without
+//! taking the focus from the editor.
 //!
 //! # A palette switch needs one call
 //!
@@ -44,9 +46,9 @@ use std::rc::Rc;
 
 use gpui::{
     Action, App, AppContext as _, Context, Empty, Entity, EntityInputHandler as _, HighlightStyle,
-    Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, RenderOnce,
-    SharedString, StyleRefinement, Styled, Subscription, Window, anchored, deferred, div,
-    prelude::FluentBuilder as _, px, relative,
+    Hsla, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render,
+    RenderOnce, SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled,
+    Subscription, Window, anchored, deferred, div, prelude::FluentBuilder as _, px, relative,
 };
 use gpui_base::input::{
     Diagnostic, DiagnosticColors, DiagnosticSeverity, EditorState, Enter, Escape, FoldRange,
@@ -240,6 +242,19 @@ const KIT_GUTTER: gpui::Pixels = px(10.0);
 /// How many rows the menu shows before it scrolls with the selection.
 const MENU_ROWS: usize = 8;
 
+/// Test lookup keys for the visible rows (`debug_bounds` takes a `&'static str`),
+/// counted from the first row shown.
+const ROW_SELECTORS: [&str; MENU_ROWS] = [
+    "ravel-expression-completion-0",
+    "ravel-expression-completion-1",
+    "ravel-expression-completion-2",
+    "ravel-expression-completion-3",
+    "ravel-expression-completion-4",
+    "ravel-expression-completion-5",
+    "ravel-expression-completion-6",
+    "ravel-expression-completion-7",
+];
+
 /// The one-line form of pasted text: line breaks become a single space, so the
 /// field stays one row until multi-line expressions exist.
 pub fn single_line(text: &str) -> String {
@@ -293,10 +308,53 @@ fn move_selection(state: &mut EditorState, delta: isize, cx: &mut Context<Editor
     let (start, query) = (menu.trigger_start_offset.unwrap_or(0), menu.query.clone());
     let current = selected_index(&items);
     let next = (current as isize + delta).rem_euclid(items.len() as isize) as usize;
-    for (index, item) in items.iter_mut().enumerate() {
-        item.preselect = Some(index == next);
+    select_row(&mut items, next);
+    state.present_completion_items(start, query, items, cx);
+}
+
+/// Mark `index` as the one selected row. An index past the end selects nothing
+/// new and leaves the rows as they were, so a stale hover cannot clear the
+/// selection.
+fn select_row(items: &mut [CompletionItem], index: usize) -> bool {
+    if index >= items.len() {
+        return false;
+    }
+    for (row, item) in items.iter_mut().enumerate() {
+        item.preselect = Some(row == index);
+    }
+    true
+}
+
+/// Move the highlight to row `index` (the pointer is over it). Nothing is
+/// presented again when it is already there, so hovering a row does not repaint
+/// on every mouse move.
+fn hover_row(state: &mut EditorState, index: usize, cx: &mut Context<EditorState>) {
+    let menu = state.completion_menu_state();
+    if !menu.open || selected_index(&menu.items) == index {
+        return;
+    }
+    let mut items = menu.items.clone();
+    let (start, query) = (menu.trigger_start_offset.unwrap_or(0), menu.query.clone());
+    if select_row(&mut items, index) {
+        state.present_completion_items(start, query, items, cx);
+    }
+}
+
+/// Accept row `index`, the same way Tab and Enter accept the selected one.
+fn click_row(
+    state: &mut EditorState,
+    index: usize,
+    window: &mut Window,
+    cx: &mut Context<EditorState>,
+) -> bool {
+    let menu = state.completion_menu_state();
+    let mut items = menu.items.clone();
+    let (start, query) = (menu.trigger_start_offset.unwrap_or(0), menu.query.clone());
+    if !select_row(&mut items, index) {
+        return false;
     }
     state.present_completion_items(start, query, items, cx);
+    accept_selected(state, window, cx)
 }
 
 fn selected_index(items: &[CompletionItem]) -> usize {
@@ -381,6 +439,7 @@ impl Render for CompletionPopup {
             return Empty.into_any_element();
         }
         let selected = selected_index(&menu.items);
+        let handle = self.state.read(cx).presentation().focus_handle().clone();
         let first = (selected + 1).saturating_sub(MENU_ROWS);
         let colors = theme.colors;
         let rows = menu
@@ -390,7 +449,25 @@ impl Render for CompletionPopup {
             .skip(first)
             .take(MENU_ROWS)
             .map(|(index, item)| {
+                let (hovered, clicked) = (self.state.clone(), self.state.clone());
+                let handle = handle.clone();
                 div()
+                    .id(("ravel-expression-completion", index))
+                    .debug_selector(move || ROW_SELECTORS[index - first].into())
+                    .cursor_pointer()
+                    .on_hover(move |over, _, cx| {
+                        if *over {
+                            hovered.update(cx, |state, cx| hover_row(state, index, cx));
+                        }
+                    })
+                    // The row takes the click, so nothing under it does; the
+                    // editor never loses focus, which is what keeps a click from
+                    // committing a half-typed expression on blur.
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        cx.stop_propagation();
+                        window.focus(&handle, cx);
+                        clicked.update(cx, |state, cx| click_row(state, index, window, cx));
+                    })
                     .flex()
                     .items_center()
                     .justify_between()
@@ -1129,6 +1206,73 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.run_until_parked();
         assert!(!menu_open(cx, &state));
+    }
+
+    #[test]
+    fn selecting_a_row_marks_exactly_that_row_and_ignores_a_stale_index() {
+        let item = |label: &str, on: bool| CompletionItem {
+            label: label.into(),
+            preselect: Some(on),
+            ..CompletionItem::default()
+        };
+        let mut items = vec![item("a", true), item("b", false), item("c", false)];
+        assert!(select_row(&mut items, 2));
+        let on: Vec<_> = items.iter().map(|i| i.preselect).collect();
+        assert_eq!(on, [Some(false), Some(false), Some(true)]);
+        assert!(!select_row(&mut items, 3), "past the end selects nothing");
+        assert_eq!(selected_index(&items), 2, "and leaves the selection alone");
+    }
+
+    fn row_centre(cx: &mut VisualTestContext, index: usize) -> gpui::Point<gpui::Pixels> {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.debug_bounds(ROW_SELECTORS[index])
+            .expect("the row is drawn")
+            .center()
+    }
+
+    #[gpui::test]
+    fn hovering_a_row_moves_the_selection_without_editing(cx: &mut TestAppContext) {
+        let (cx, state, _) = built_with(cx, "");
+        type_text(cx, "si");
+        let second = row_centre(cx, 1);
+        cx.simulate_mouse_move(second, None, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(
+            labels(cx, &state),
+            [("sin".to_string(), false), ("sign".to_string(), true)]
+        );
+        assert_eq!(value(cx, &state), "si");
+        assert!(menu_open(cx, &state));
+    }
+
+    /// The click accepts through the path Tab uses (one undo step), and the
+    /// editor is never blurred: a blur would commit a half-typed expression.
+    #[gpui::test]
+    fn clicking_a_row_accepts_it_and_the_editor_keeps_focus(cx: &mut TestAppContext) {
+        let (cx, state, _) = built_with(cx, "1 + ");
+        let blurs = Rc::new(Cell::new(0));
+        let counter = blurs.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&state, move |_, event: &InputEvent, _| {
+                if matches!(event, InputEvent::Blur) {
+                    counter.set(counter.get() + 1);
+                }
+            })
+            .detach();
+        });
+        type_text(cx, "si");
+        let second = row_centre(cx, 1);
+        cx.simulate_click(second, gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(value(cx, &state), "1 + sign");
+        assert!(!menu_open(cx, &state));
+        assert!(is_focused(cx, &state), "focus stays in the editor");
+        assert_eq!(blurs.get(), 0, "no blur, so no blur-commit");
+
+        cx.update(|window, cx| {
+            window.dispatch_action(Box::new(gpui_base::input::Undo), cx);
+        });
+        assert_eq!(value(cx, &state), "1 + si", "one undo undoes the click");
     }
 
     #[gpui::test]

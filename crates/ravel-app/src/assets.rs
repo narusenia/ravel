@@ -244,6 +244,8 @@ pub enum RavelIcon {
     NodeSceneMerge,
     /// Node header/menu: `scene.camera`.
     NodeSceneCamera,
+    /// Node header/menu: `scene.render`.
+    NodeSceneRender,
     /// Node header/menu: `blur`.
     NodeBlur,
     /// Node header/menu: `transform`.
@@ -544,6 +546,7 @@ impl RavelIcon {
             "scene.add" => Self::NodeSceneAdd,
             "scene.merge" => Self::NodeSceneMerge,
             "scene.camera" => Self::NodeSceneCamera,
+            "scene.render" => Self::NodeSceneRender,
             "blur" => Self::NodeBlur,
             "transform" => Self::NodeTransform,
             "color_correct" => Self::NodeColorCorrect,
@@ -746,6 +749,7 @@ impl RavelIcon {
             Self::NodeSceneAdd => "icons/box.svg",
             Self::NodeSceneMerge => "icons/group.svg",
             Self::NodeSceneCamera => "icons/video.svg",
+            Self::NodeSceneRender => "icons/clapperboard.svg",
             Self::NodeBlur => "icons/droplet.svg",
             Self::NodeTransform => "icons/scaling.svg",
             Self::NodeColorCorrect => "icons/contrast.svg",

@@ -1163,6 +1163,13 @@ fn an_unchanged_mesh_is_not_reallocated_or_reuploaded_on_the_next_frame() {
         let renderer = processor.gpu.as_ref().unwrap();
         renderer.buffer_ids(&prepare_default(&moving_scene(&geometry, 0.0), 64, 40))
     };
+    // The static buffers' three uploads went through the context's counters,
+    // so an upload on a cache hit would show up as a change in them.
+    let uploaded = rig.gpu.transfer_stats();
+    assert!(
+        uploaded.uploads >= 3 && uploaded.upload_bytes > 0,
+        "the first frame uploads vertices, indices and colours: {uploaded:?}"
+    );
 
     // Four more frames with the object animated: a new scene value each time,
     // the same mesh columns.
@@ -1180,6 +1187,12 @@ fn an_unchanged_mesh_is_not_reallocated_or_reuploaded_on_the_next_frame() {
         processor.static_buffer_allocations(),
         1,
         "moving an object must not rebuild its mesh buffers"
+    );
+    let later = rig.gpu.transfer_stats();
+    assert_eq!(
+        (later.uploads, later.upload_bytes),
+        (uploaded.uploads, uploaded.upload_bytes),
+        "a cache hit must not write into the static buffers again"
     );
     let again = processor.gpu.as_ref().unwrap().buffer_ids(&prepare_default(
         &moving_scene(&geometry, 5.0),

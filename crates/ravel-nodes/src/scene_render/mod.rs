@@ -56,8 +56,9 @@
 //! - A Path object strokes at one width measured at its centroid.
 //! - Cap, join and dash attributes are not honoured on Path objects.
 //! - Path objects are clipped against the near plane before projection: only
-//!   the part in front of the camera is drawn (a closed path stays a closed
-//!   polygon). Curves are flattened in scene space first, through the same
+//!   the part in front of the camera is drawn (a closed path is filled as the
+//!   clipped polygon, one per visible piece, and stroked along its real outline
+//!   only, not along the cut). Curves are flattened in scene space first, through the same
 //!   flattener `rasterize` uses, so they are drawn as curves.
 //! - Instances placed in 3D are not drawn yet; instance placement is 2D.
 

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Stateful evaluation and the simulation cache (REQ-CORE-011,
-//! `docs/implementation/stateful-eval-plan.md`).
+//! `docs/implementation/done/stateful-eval-plan.md`).
 //!
 //! Hybrid Pull assumes the value at frame `t` follows from `t` alone. A node
 //! that integrates over time — particles, trails, physics — needs the state

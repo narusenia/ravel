@@ -50,8 +50,7 @@ several plans here wait on its later units rather than on each other.
 | `properties-parameter-editors-plan.md` | Curve and colour-ramp parameter types and inline editors, `math.curve`, `color.ramp` | — (`style-attributes-plan.md` unit 6 for `field.ramp`) | REQ-UI-002, REQ-UI-012, REQ-CORE-012 |
 | `cache-plan.md` | Cache identity, byte budget, the output-stage frame cache, the green cache bar, layer-scoped invalidation and idle read-ahead — **the cross-cutting cache charter**; what is left is the disk tier (`CACHE-11`, measurement-gated) and the f16 pixel loops (`CACHE-Y`) | `gpu-compositing-plan.md` (unit 5 only) | REQ-CORE-006, REQ-CORE-002/011 |
 | `typography-plan.md` | Text layout, glyph geometry, path text, per-character modulation | `done/per-instance-modulation-plan.md` | REQ-MOGRAPH-004 |
-| `stateful-eval-plan.md` | `StatefulProcessor` and the simulation cache — **units 1–4 merged in #639; unit 5 (inputs from outside the scope) remains** | — | REQ-CORE-011 |
-| `particle-plan.md` | Particle simulation as point geometry | `stateful-eval-plan.md`, `done/per-instance-modulation-plan.md` | REQ-MOGRAPH-002 |
+| `particle-plan.md` | Particle simulation as point geometry | `done/stateful-eval-plan.md`, `done/per-instance-modulation-plan.md` | REQ-MOGRAPH-002 |
 | `effects-library-plan.md` | Colour, blur, distortion, generation, stylise, and time nodes | — | REQ-MOGRAPH-005 |
 | `gpu-resident-geometry-plan.md` | `GpuGeometry`, GPU-side instance expansion, WGSL fields — **phase 0 measured; verdict: proceed; unit 1 (`GpuGeometry`, `BufferPool`, shared VRAM allowance) merged in #638, unit 2 (WGSL fields) in #641** | — | REQ-CORE-009, REQ-GPU-001/003 |
 | `style-attributes-plan.md` | Fill and stroke as per-element attributes | — | REQ-CORE-010, REQ-MOGRAPH-001 |
@@ -88,7 +87,7 @@ rotate gesture exists anywhere, which is what `OVL-7` adds.
 
 Three plans all change `EvalRequest` / `EvalUpdate`
 (`done/attribute-spreadsheet-plan.md` unit 1 makes them multi-target;
-`stateful-eval-plan.md` unit 3 adds a provisional-result flag;
+`done/stateful-eval-plan.md` unit 3 adds a provisional-result flag;
 `done/viewer-overlay-manipulator-plan.md` unit 2 rides on the multi-target form to
 pull overlay data). **The order settled with the multi-target form landing
 first** (2026-08-06, #302), so the other two now extend a shape that exists
@@ -119,7 +118,7 @@ of float channels.
 caching, time remapping, and graph-internal iteration share is settled. The
 evaluator caches one value per `(path, node)` — `frame` is a validity check,
 not a key — and `PathSegment` is now the one place that splits it.
-`stateful-eval-plan.md` keeps a dedicated `SimTrack` for the sequential
+`done/stateful-eval-plan.md` keeps a dedicated `SimTrack` for the sequential
 fill pattern but must key it on `NodeKey` rather than inventing a key type.
 
 `settings-screen-plan.md` owns the settings dialog **and the apply path that
@@ -140,7 +139,7 @@ one `CacheIdentity`, the quantised time key, cache precision, the single byte
 budget (the texture pool's `LruBudget` becomes subordinate to it), the
 output-stage frame cache, and the hit-rate API. Three other plans must not
 invent their own version of these — `motion-blur-plan.md` unit 2 (time-based
-validity) is absorbed into it, `stateful-eval-plan.md` gets its simulation
+validity) is absorbed into it, `done/stateful-eval-plan.md` gets its simulation
 reservation from it, and `done/render-export-plan.md` relies on its precision
 requirement so a render never eats a preview-quality frame. It also takes over
 seven cache issues (HIGH-03, HIGH-16, MED-CORE-02/03/06/07 and the
@@ -196,6 +195,7 @@ with the decisions the user has to make; it has no units in `backlog.md` or
 
 | File | Subject | Merged | Related requirements |
 |---|---|---|---|
+| `done/stateful-eval-plan.md` | Stateful evaluation and the simulation cache (REQ-CORE-011): `StatefulProcessor` (`initial` / `step` / `output` / `byte_size`) with a per-node `SimTrack` keyed like the node cache, filled frame by frame and thinned to sparse checkpoints under the sim reserve; staleness decided at pull time by a premise hash of the upstream subgraph, fps and composition basis, extended to what the upstream reads outside its scope (binding producers, `layer.ref` targets, shell readers, invalidation epochs); provisional results on long forward jumps with a background fill on the eval worker. Scope bindings (`net.in`) are re-pulled at the shifted frame, so sims and stateless time shifts inside subnets and adjustment layers see each frame's input | #639, #644 — 2026-11-10 | REQ-CORE-011, REQ-CORE-005, REQ-CORE-006 |
 | `done/edit-operations-plan.md` | The typed edit-operation layer `ravel_core::edit`: `EditOp` (compositions, layers, nodes, connections, `SetParameter`) applied `Document` → `Document` with typed errors carrying stable `code()`s, all-or-nothing `apply_batch` with in-batch aliases (`as`), and the parameter write rules moved out of `ravel-app`. The UI goes through `ProjectState::commit_edit_ops` (one batch = one undo step) or, for frame-aware and selection-wide parameter writes, `edit_ops_skipping_refused`; `docs/dev/add-edit-operation.md` is the checklist. Writes to expression-driven channels are not refused yet — to decide before `AI-3` | #613, #614, #615, #616 — 2026-10-27 | REQ-PLUGIN-006, REQ-PLUGIN-007 |
 | `done/absent-attribute-fill-plan.md` | One source of truth in `ravel-core` (`geometry::absent`) for what a reserved attribute reads as when its column is absent, used by every place that fills missing rows — `geometry.merge`, `expand_instances`, piece attributes, `field.apply`'s created column, `style`'s `unset` — and by `rasterize`'s defaults, so a merge or expansion no longer blanks the side that lacked `scale` / `alpha` / `Cd` / `fill` (`MED-CORE-13`). Unreserved columns keep the typed zero. Inherited style attributes are filled with the `rasterize` template defaults and fallback attributes are copied row by row from the same side | #591 | REQ-CORE-010, REQ-MOGRAPH-001 |
 | `done/instance-transform-shear-plan.md` | Exact composition of instance placements (`MED-GPU-09`): a reserved instance attribute `shear` (F32, absent = 0) makes `rot` / `scale` / `shear` represent any 2×2, so nesting, `geometry.transform` and the root placement compose exactly and drawing, bounds, expansion and pieces agree. Image instances carry the inverse 2×2 in the unused `stroke_color` slot | #585, #586 | REQ-MOGRAPH-001, REQ-RENDER-001 |

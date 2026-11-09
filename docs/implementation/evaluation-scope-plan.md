@@ -7,7 +7,7 @@
 REQ-CORE-006（キャッシュ）、REQ-CORE-011（ステートフル評価）、
 REQ-LAYER-003/007。
 
-**順序**: `stateful-eval-plan.md`（SIM-1）**より前**。理由は下記。
+**順序**: `done/stateful-eval-plan.md`（SIM-1）**より前**。理由は下記。
 
 ## 問題
 
@@ -39,7 +39,7 @@ struct CacheEntry {
 | 機能 | 必要なこと | 現行キーでの帰結 |
 |---|---|---|
 | `effects-library-plan.md` FX-5 タイムリマップ | 下流が frame `f` のまま上流を `f'` で評価 | 正しさは検証条件が守るが、`f` と `f'` の要求が**互いを上書きし続けて再計算**する |
-| `stateful-eval-plan.md` SIM-3 sim キャッシュ | フレーム連続区間を保持 | 不可能。**同計画は別 map（`sim_cache`）の新設で回避している** |
+| `done/stateful-eval-plan.md` SIM-3 sim キャッシュ | フレーム連続区間を保持 | 不可能。**同計画は別 map（`sim_cache`）の新設で回避している** |
 | 本計画 グラフ内反復 | 同一サブグラフの N 回評価 | 不可能 |
 
 **3 つが同じ制約に別々の回避策で当たっている。** このまま進めると
@@ -53,7 +53,7 @@ struct CacheEntry {
 
 ## なぜ今か
 
-**`stateful-eval-plan.md` の SIM-1 が「今すぐ着手できる」状態にある。**
+**`done/stateful-eval-plan.md` の SIM-1 が「今すぐ着手できる」状態にある。**
 あの計画は sim キャッシュを別 map で持つと書いてあり、着手すれば
 分裂の 1 個目が既成事実になる。3 機構が揃ってからの統合は、
 評価エンジンのキャッシュ経路を全面的に再検証する作業になる。
@@ -103,7 +103,7 @@ LRU を汚す。
 
 したがって sim は専用の `SimTrack` を維持する。ただし
 **キーは `NodeKey` を共有**し、独自のキー型を作らない。
-`stateful-eval-plan.md` はこの点だけ修正する。
+`done/stateful-eval-plan.md` はこの点だけ修正する。
 
 ### 反復の対象は「要素」ではなく「ピース」
 
@@ -120,7 +120,7 @@ Houdini の for-each には要素単位と piece 単位があるが、
 
 ### 反復は 1 段。ネスト不可
 
-`stateful-eval-plan.md` が sim の多段を禁じているのと同じ理由。
+`done/stateful-eval-plan.md` が sim の多段を禁じているのと同じ理由。
 `PathSegment::Iteration` が 2 つ以上積まれたら評価エラー。
 
 ### 要素スコープ（group 相当）は属性規約とする

@@ -73,7 +73,7 @@ pub struct XProcessor { ctx, pipeline, pool }
 
 理由: 現行の `NodeKey` は 1 ノードにつき値を 1 つしか持てず、`frame` は
 キーではなく検証条件なので、同じ上流を `f` と `f'` で要求すると
-**互いを上書きし続けて再計算する**。同じ制約に `stateful-eval-plan.md` と
+**互いを上書きし続けて再計算する**。同じ制約に `done/stateful-eval-plan.md` と
 グラフ内反復も当たっており、3 つが別々の回避策を持つのを避ける。
 
 時間系は最後の単位に置き、他が全部済んでから着手する。

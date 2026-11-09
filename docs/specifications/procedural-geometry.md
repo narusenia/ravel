@@ -511,7 +511,7 @@ Hybrid Pull（REQ-CORE-002）は「フレーム t の値は t だけから決ま
 ### 規約
 
 実装は `ravel-core/src/eval/sim.rs`（設計の経緯は
-[`stateful-eval-plan.md`](../implementation/stateful-eval-plan.md)）。
+[`stateful-eval-plan.md`](../implementation/done/stateful-eval-plan.md)）。
 
 ```rust
 pub trait StatefulProcessor: Send + Sync + 'static {

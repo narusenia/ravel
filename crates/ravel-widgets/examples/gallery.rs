@@ -42,6 +42,7 @@ use gpui::{
 };
 use gpui_base::Button as BaseButton;
 use ravel_core::animation::{Interpolation, Keyframe, KeyframeCurve};
+use ravel_core::expression::{Scope, vocabulary};
 use ravel_core::param_curve::CurveParam;
 use ravel_core::param_ramp::RampParam;
 use ravel_core::types::Vec2;
@@ -113,10 +114,11 @@ struct GalleryInputs {
     text_compact: StateRow,
     number: StateRow,
     number_compact: StateRow,
-    /// The expression editor: a clean one, one with a stray character, and a
-    /// disabled one. Each field needs its own entity for the reason
+    /// The expression editor: a clean one, one with a stray character, a
+    /// compact one, and an empty one over the field vocabulary to type into
+    /// (completion). Each field needs its own entity for the reason
     /// [`StateRow`] gives.
-    expression: [Entity<EditorState>; 3],
+    expression: [Entity<EditorState>; 4],
     /// The two parameter editors own scrub fields of their own, so they are
     /// entities for the same reason the rows above are.
     param_curve: Entity<ParamCurveEditorState>,
@@ -132,15 +134,38 @@ struct GalleryInputs {
 
 impl GalleryInputs {
     fn new(window: &mut Window, cx: &mut App) -> Self {
+        let inputs = Self::build(window, cx);
+        // The invalid editor underlines where its source fails to compile;
+        // editing it clears the underline, as fixing the text should.
+        let [_, bad, ..] = &inputs.expression;
+        let source = bad.read(cx).value().to_string();
+        if let Err(error) = ravel_core::expression::compile(&source, &Scope::parameter_context()) {
+            ravel_widgets::set_expression_error(bad, Some((error.span, &error.to_string())), cx);
+        }
+        inputs
+    }
+
+    fn build(window: &mut Window, cx: &mut App) -> Self {
         Self {
             text: StateRow::new("Ravel", window, cx),
             text_compact: StateRow::new("Ravel", window, cx),
             number: StateRow::new("24", window, cx),
             number_compact: StateRow::new("24", window, cx),
             expression: [
-                expression_editor_state("sin(@P.x * 2) + pi ? 1.5 : max(a, 3)", window, cx),
-                expression_editor_state("sin(1 + $) * 2.", window, cx),
-                expression_editor_state("a + b", window, cx),
+                expression_editor_state(
+                    "sin(@P.x * 2) + pi ? 1.5 : max(a, 3)",
+                    vocabulary(&Scope::field_context()),
+                    window,
+                    cx,
+                ),
+                expression_editor_state(
+                    "sin(1 + $) * 2.",
+                    vocabulary(&Scope::parameter_context()),
+                    window,
+                    cx,
+                ),
+                expression_editor_state("a + b", vocabulary(&Scope::field_context()), window, cx),
+                expression_editor_state("", vocabulary(&Scope::field_context()), window, cx),
             ],
             param_curve: cx.new(|cx| ParamCurveEditorState::new(CurveParam::default(), cx)),
             param_ramp: cx.new(|cx| ParamRampEditorState::new(RampParam::default(), cx)),
@@ -864,25 +889,30 @@ fn input_section(theme: &RavelTheme, inputs: &GalleryInputs) -> AnyElement {
 /// it and it takes another. On the disabled row they do neither, which is UX
 /// invariant 6 — a control that cannot act must not react.
 fn expression_editor_section(theme: &RavelTheme, inputs: &GalleryInputs) -> AnyElement {
-    let [clean, bad, disabled] = &inputs.expression;
+    let [clean, bad, compact, completing] = &inputs.expression;
     div()
         .flex()
         .flex_col()
         .gap(theme.spacing.sm)
         .child(labelled(
             theme,
-            "colours",
+            "colours · field scope (`@` offers attributes)",
             ExpressionEditor::new(clean).w(px(360.0)),
         ))
         .child(labelled(
             theme,
-            "invalid · danger border and an error run",
+            "invalid · parameter scope (no `@` completion) · danger border, error run and underline",
             ExpressionEditor::new(bad).invalid(true).w(px(360.0)),
         ))
         .child(labelled(
             theme,
-            "compact",
-            ExpressionEditor::new(disabled).compact().w(px(360.0)),
+            "compact · field scope",
+            ExpressionEditor::new(compact).compact().w(px(360.0)),
+        ))
+        .child(labelled(
+            theme,
+            "completion · focus and type `si`, `fr` or `@` (Up/Down, Tab/Enter, Escape)",
+            ExpressionEditor::new(completing).w(px(360.0)),
         ))
         .into_any_element()
 }

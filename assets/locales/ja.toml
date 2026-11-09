@@ -2084,3 +2084,17 @@ themes = "テーマを読み込み中…"
 settings = "設定を適用中…"
 keybindings = "キーバインドを読み込み中…"
 layout = "ワークスペースを復元中…"
+
+# The word a completion row shows beside a name that is not a function
+# (a function shows its argument count instead).
+[expression_editor.kind]
+function = "関数"
+constant = "定数"
+variable = "変数"
+attribute = "属性"
+
+[expression_editor.arity]
+# 補完メニューの関数の引数の数。`{count}`・`{min}`・`{max}` は数に置き換わる。
+one = "引数 1 個"
+exact = "引数 {count} 個"
+range = "引数 {min}〜{max} 個"

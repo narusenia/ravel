@@ -15,6 +15,10 @@ gpui = { workspace = true }
 # The unstyled interaction/focus/accessibility primitives the widgets are built
 # on. `gpui-component` is deliberately absent — see the crate docs.
 gpui-base = { workspace = true }
+# `CompletionProvider` and `present_completion_items` speak `lsp_types::CompletionItem`,
+# and `gpui-base` re-exports only `Position`. The version and the `proposed`
+# feature are the ones `gpui-base` already resolves, so the lockfile gains no package.
+lsp-types = { version = "0.97", features = ["proposed"] }
 serde = { workspace = true }
 
 [dev-dependencies]

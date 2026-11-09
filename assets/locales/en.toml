@@ -2097,3 +2097,18 @@ themes = "Loading themes…"
 settings = "Applying settings…"
 keybindings = "Loading keybindings…"
 layout = "Restoring workspace…"
+
+# The word a completion row shows beside a name that is not a function
+# (a function shows its argument count instead).
+[expression_editor.kind]
+function = "function"
+constant = "constant"
+variable = "variable"
+attribute = "attribute"
+
+[expression_editor.arity]
+# A function's argument count in the completion menu. `{count}`, `{min}` and
+# `{max}` are replaced with numbers.
+one = "1 argument"
+exact = "{count} arguments"
+range = "{min} to {max} arguments"

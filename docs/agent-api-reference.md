@@ -625,6 +625,8 @@ attach(&ParameterValue, frame, &ctx) -> Option<ParameterValue>
     // attaching does not move the picture
 set_source(&ParameterValue, component, source) -> Option<ParameterValue>
     // stores the source WHETHER OR NOT IT COMPILES
+compile_error(source) -> Option<String>                // draft message
+compile_diagnostic(source) -> Option<(String, Span)>   // + the compiler's own byte span
 detach(&ParameterValue, frame, &ctx) -> Option<ParameterValue>
     // freezes each driven component; leaves the others' keyframes alone
 ```
@@ -3271,16 +3273,37 @@ NumberInput::new(&Entity<InputState>).compact() / .density(..) / .invalid(..)
 
 // expression_editor.rs — `gpui_base::EditorState` (one row, no line numbers,
 // Enter submits) in the same frame, coloured by `highlight_tokens`.
-expression_editor_state(value, &mut Window, &mut App) -> Entity<EditorState>
-    // read with `.read(cx).value()`; subscribe to `InputEvent::{Change, PressEnter}`
+expression_editor_state(value, Vocabulary, &mut Window, &mut App) -> Entity<EditorState>
+    // read with `.read(cx).value()`; subscribe to `InputEvent::{Change, PressEnter}`.
+    // The `Vocabulary` is what completion offers (`vocabulary(&Scope::parameter_context())`
+    // or `field_context()`); the caller decides, the widget only uses it.
 ExpressionEditor::new(&Entity<EditorState>).compact() / .invalid(..)
     .accessibility_label(..) .tab_index(..)   // `Styled`
+    // Completion menu: drawn under the field (`deferred(anchored())`, tokens, no
+    // animation, no focus handle). Up/Down move, Tab/Enter accept as ONE undo
+    // step, Escape closes — and with the menu closed every one of them is the
+    // editor's own. No key is bound here: Tab, Shift+Enter and paste are the
+    // kit's `IndentInline` / `Enter{shift}` / `Paste` actions caught in the
+    // capture phase on the field; Shift+Enter inserts nothing, a paste with line
+    // breaks is flattened by `single_line`.
+set_expression_error(&Entity<EditorState>, Option<(Span, &str)>, &mut App)
+    // Danger underline at the span (widened to one visible character when the
+    // span is empty); `None` clears. Positions come from `Span::line_column`
+    // (1-based there, the kit's `Position` is 0-based). The kit drops the
+    // underline on any edit, so the host sets it again after each `Change`.
+    // Writes the state: call from an event handler, not `render`.
+underline_range(text, Span) -> Option<Range<usize>>  / diagnostic_positions(text, &Range<usize>) -> Range<Position>
+diagnostic_colors(&Colors) -> DiagnosticColors   // error = danger; projected by `expression_editor_state`
+expression_completion::complete(&Vocabulary, text, caret) -> Option<(Word, Vec<Candidate>)>
+expression_completion::word_at(text, caret) -> Option<Word>   // { range, attribute }
+    // Pure. After `@` only attributes; else functions, constants, variables.
+    // Case-insensitive prefix; an exact match leads; `None` when the word is
+    // already complete and nothing longer matches (so Enter still submits).
 token_color(TokenClass, &Colors) -> Hsla      // pure, exhaustive `match`
 style_runs(&[(Span, TokenClass)], &Range<usize>, &Colors) -> Vec<(Range<usize>, HighlightStyle)>
     // gapless cover of the range; what `InputHighlighter::styles` returns.
     // A palette switch: the host calls `refresh_expression_colours(&state, cx)`
     // after `set_active_tokens` (no observer; `observe-global` is linted)
-    // No completion, popup or Tab / Shift+Enter / paste handling yet.
 
 // scrub_input.rs — the AE gesture: drag a label sideways to change a value.
 ScrubInputState / ScrubInput / ScrubEvent::{Change, Commit}

@@ -2687,8 +2687,11 @@ Unknown type keys are skipped silently (plugin space).
   which matches the query case-insensitively against label and description
   and ranks label matches above description-only matches, recently used
   types first.
-- `node_editor` (node_editor.rs): `EdgeStyle { Bezier, Straight, Step }`
-  (default `Bezier`, serialized `snake_case`). It lives here rather than in
+- `node_editor` (node_editor.rs): `FlowDirection { Horizontal, Vertical }`
+  (default `Horizontal`, serialized `snake_case`; `settings.node_editor.flow_direction`,
+  resolved as `ResolvedSettings::node_editor_flow_direction`) and
+  `EdgeStyle { Bezier, Straight, Step }`
+  (default `Bezier`, serialized `snake_case`). They live here rather than in
   `ravel-app` because `ravel-project` persists it as `settings.node_editor`
   and cannot see the GUI crate; `ravel-app`'s `node_editor::EdgeStyle` is a
   re-export, so there is one definition.
@@ -3584,6 +3587,36 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   port colour of its domain's data type, so a node's header matches the port
   dots of the data it deals with. A pair table in that file's tests pins the
   1:1 mapping.
+- Flow direction (`NGR-5`): `painting::port_screen_center(node, node_screen,
+  zoom, flow, is_output, index)` is the **one** port-geometry function;
+  paint, `port_at_local_pos`, `find_snap_target` and the edge endpoints all call
+  it. `compute_node_size(node, zoom, show_param_values, flow)` is the one size
+  function and returns the **full extent**: horizontal as before; vertical is a
+  small icon-only box (`vertical_box_size`, 72x24, widens to
+  `ports * 2 * PORT_HIT_RADIUS`) plus the label column to its right
+  (`paint_vertical_label` draws name and, under the values flag, muted
+  values). The column width is measured: `NodeEditorPanel::measure_label_columns`
+  fills `label_widths` (`painting::LabelWidths`, zoom 1.0, text-keyed cache) when
+  the graph changes, and `compute_node_size_labeled` takes
+  `LabelWidths::column(show_values)`; paint elides at extent minus box. Ports live on the box only, so `port_screen_center` takes no size;
+  `node_size_or_default` is the extent fallback every node hit test and anchor
+  shares. `step_points` / `flow_bezier` route edges
+  for both axes. The panel mirrors the flow from the settings global (an
+  `observe_global::<AppSettings>`), so `panels::set_node_flow_direction` /
+  `toggle_node_flow_direction` (behind `CommandId::ViewToggleNodeFlowDirection`)
+  are the only writers. `painting::paint_port_label` draws the name tag a
+  vertical node shows on port hover and at a dragged wire's snapped target.
+- Toolbar (`NGR-9`): `NodeEditorPanel::build_toolbar` renders flow direction,
+  edge style, align, parameter values and fit as icon-only buttons (tooltip +
+  accessibility label each; the stateful two pick their glyph from
+  `toolbar_flow_face` / `toolbar_edge_face`; `RavelIcon::{FlowHorizontal,
+  FlowVertical, AlignNodes, ParamValues}` were added for it). Each button's `on_click` is a
+  plain closure (not `cx.listener`, which would hold the panel mid-update)
+  that calls `focus_handle.dispatch_action(command_action(cmd))`, so the
+  Action takes the same route a key or menu item does.
+  `CommandId::ViewCycleNodeEdgeStyle` (`EdgeStyle::cycled`, written by
+  `panels::cycle_node_edge_style`) exists for it; the context menu still sets a
+  style directly through `set_edge_style`.
 - Auto layout: `node_editor/layout.rs::auto_layout(&graph, &targets, &sizes,
   LayoutAxis) -> HashMap<NodeId, (f32, f32)>` (`NGR-1`) — a pure function that
   returns new positions and never touches the `Graph`. **Fewer than two usable
@@ -3777,8 +3810,9 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   `SettingsLayer::node_editor.edge_style: Option<EdgeStyle>`, the resolved one
   is `ResolvedSettings::node_editor_edge_style` (default `Bezier`), and the
   node editor's context menu writes it to `Global` — it is a preference, not a
-  property of a project or a window. Nothing applies it centrally: the panel
-  reads it when it is built.
+  property of a project or a window. `node_editor.flow_direction` (`NGR-5`)
+  rides beside it. Nothing applies either centrally: each panel reads them when
+  built and follows the settings global afterwards.
   Two more switches ride the same path and are likewise read where they act,
   not applied centrally: `playback.stop_returns_to_play_start`
   (`ResolvedSettings::stop_returns_to_play_start`, default `false`) is read by

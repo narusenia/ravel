@@ -38,9 +38,10 @@ use ravel_core::runtime::InvalidationHint;
 use ravel_core::types::FrameRate;
 use ravel_i18n::t;
 use ravel_ui::document::{NetworkPath, replace_network_renaming_pin, resolve_network};
+use ravel_ui::node_editor::FlowDirection;
 use ravel_ui::properties::expression;
 use ravel_widgets::ActiveTokens as _;
-use ravel_widgets::{Enter, Escape, Input, InputEvent, InputState};
+use ravel_widgets::{Button, Enter, Escape, Icon, Input, InputEvent, InputState};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -52,7 +53,7 @@ use crate::node_editor::hover_popover::{
     HOVER_DWELL, HoverPopover, hover_info, hover_popover_element,
 };
 use crate::node_editor::layout::{LayoutAxis, auto_layout};
-use crate::node_editor::painting::{self, EvalReadout, PortHit, compute_node_size, node_width};
+use crate::node_editor::painting::{self, EvalReadout, PortHit};
 use crate::node_editor::palette::{PaletteEvent, SearchPalette, retain_connectable};
 use crate::node_editor::viewport::Viewport;
 use crate::project_state::ProjectState;
@@ -69,6 +70,8 @@ pub const KEY_CONTEXT: &str = "NodeEditor";
 
 /// Names the node a drop adds, so the wire of the same batch can reach it.
 const NEW_NODE_ALIAS: &str = "new";
+/// Gap between a node and the hover popover opened beside it, in pixels.
+const POPOVER_GAP: f32 = 8.0;
 const CUSTOM_PATH_TYPE_KEY: &str = "shape.custom_path";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -587,7 +590,21 @@ pub struct NodeEditorPanel {
     node_categories: HashMap<NodeId, NodeCategory>,
     /// Localized display label per node, rebuilt with [`Self::node_sizes`].
     node_labels: HashMap<NodeId, String>,
+    /// Measured width of each node's top-down label column (zoom 1.0), rebuilt
+    /// with [`Self::node_labels`]. Measuring needs the text system, which the
+    /// size function does not have, so it happens here and the sizes read it.
+    label_widths: HashMap<NodeId, painting::LabelWidths>,
+    /// Text → width at zoom 1.0, keyed by (monospace, text): a rebuild after a
+    /// graph change re-measures only the strings that are new.
+    text_widths: HashMap<(bool, String), f32>,
     edge_style: EdgeStyle,
+    /// Which way the graph flows, mirrored from the settings global (see the
+    /// observer in [`Self::new`]) so the sizes, hit tests and painting of one
+    /// frame all read the same value.
+    flow_direction: FlowDirection,
+    /// The port dot under the pointer while idle, drawn with its name in
+    /// top-down flow (which has no port-name rows). `None` in horizontal flow.
+    hovered_port: Option<PortHit>,
     clipboard: Option<ClipboardContent>,
     drag: DragMode,
     pointer_hint: PointerHint,
@@ -642,6 +659,43 @@ pub struct NodeEditorPanel {
     /// perform.
     #[allow(dead_code)]
     param_values_sub: Subscription,
+    /// Follows the edge style and flow direction settings, whichever route
+    /// wrote them.
+    #[allow(dead_code)]
+    settings_sub: Subscription,
+}
+
+/// The toolbar glyph and tooltip for the flow direction in force — the glyph
+/// shows the current direction, the tooltip names it.
+fn toolbar_flow_face(flow: FlowDirection) -> (RavelIcon, String) {
+    match flow {
+        FlowDirection::Horizontal => (
+            RavelIcon::FlowHorizontal,
+            t!("panel.node_graph_menu.flow_direction_horizontal"),
+        ),
+        FlowDirection::Vertical => (
+            RavelIcon::FlowVertical,
+            t!("panel.node_graph_menu.flow_direction_vertical"),
+        ),
+    }
+}
+
+/// The same for the edge style.
+fn toolbar_edge_face(style: EdgeStyle) -> (RavelIcon, String) {
+    match style {
+        EdgeStyle::Bezier => (
+            RavelIcon::InterpolationBezier,
+            t!("panel.node_graph_menu.edge_style_bezier"),
+        ),
+        EdgeStyle::Straight => (
+            RavelIcon::InterpolationLinear,
+            t!("panel.node_graph_menu.edge_style_straight"),
+        ),
+        EdgeStyle::Step => (
+            RavelIcon::InterpolationStep,
+            t!("panel.node_graph_menu.edge_style_step"),
+        ),
+    }
 }
 
 impl NodeEditorPanel {
@@ -754,6 +808,29 @@ impl NodeEditorPanel {
                 cx.notify();
             });
 
+        // The edge style and flow direction are settings: whichever route
+        // wrote them (menu command, context menu, toolbar, another editor),
+        // this instance follows the settings global.
+        let settings_sub =
+            cx.observe_global::<crate::app_settings::AppSettings>(|this: &mut Self, cx| {
+                let resolved = crate::app_settings::resolved(cx);
+                let mut changed = false;
+                if resolved.node_editor_edge_style != this.edge_style {
+                    this.edge_style = resolved.node_editor_edge_style;
+                    changed = true;
+                }
+                if resolved.node_editor_flow_direction != this.flow_direction {
+                    this.flow_direction = resolved.node_editor_flow_direction;
+                    this.hovered_port = None;
+                    this.measure_label_columns(cx);
+                    this.refresh_node_sizes();
+                    changed = true;
+                }
+                if changed {
+                    cx.notify();
+                }
+            });
+
         let focus_handle = cx.focus_handle();
         let focus_subscriptions = super::track_panel_focus(instance, &focus_handle, window, cx);
 
@@ -780,7 +857,11 @@ impl NodeEditorPanel {
             show_param_values: super::show_node_param_values(cx),
             node_categories: HashMap::new(),
             node_labels: HashMap::new(),
+            label_widths: HashMap::new(),
+            text_widths: HashMap::new(),
             edge_style: crate::app_settings::resolved(cx).node_editor_edge_style,
+            flow_direction: super::node_flow_direction(cx),
+            hovered_port: None,
             clipboard: None,
             drag: DragMode::None,
             pointer_hint: PointerHint::default(),
@@ -803,6 +884,7 @@ impl NodeEditorPanel {
             timings_sub,
             visibility_sub,
             param_values_sub,
+            settings_sub,
         }
     }
 
@@ -978,7 +1060,12 @@ impl NodeEditorPanel {
             return;
         };
         // Measured sizes are zoomed; the fallback matches `fit_view`'s.
-        let (w, h) = self.node_sizes.get(&node).copied().unwrap_or((160.0, 60.0));
+        let (w, h) = painting::node_size_or_default(
+            &self.node_sizes,
+            target,
+            self.viewport.zoom,
+            self.flow_direction,
+        );
         let (canvas_w, canvas_h) = self.canvas_size.get();
         let rect = (
             target.metadata.position.0,
@@ -1017,6 +1104,7 @@ impl NodeEditorPanel {
         self.node_sizes.clear();
         self.node_categories.clear();
         self.node_labels.clear();
+        self.label_widths.clear();
         self.displayed_timings.clear();
         // Reopening the same network yields the same node ids: without this,
         // an open popover would resurrect over the reopened node with no
@@ -2330,7 +2418,10 @@ impl NodeEditorPanel {
             &self.graph,
             &Self::selected_nodes(cx),
             &sizes,
-            LayoutAxis::Horizontal,
+            match self.flow_direction {
+                FlowDirection::Horizontal => LayoutAxis::Horizontal,
+                FlowDirection::Vertical => LayoutAxis::Vertical,
+            },
         );
 
         let mut changed = false;
@@ -2365,7 +2456,12 @@ impl NodeEditorPanel {
             .nodes()
             .filter(|n| !n.metadata.synthetic)
             .map(|n| {
-                let (w, h) = self.node_sizes.get(&n.id).copied().unwrap_or((160.0, 60.0));
+                let (w, h) = painting::node_size_or_default(
+                    &self.node_sizes,
+                    n,
+                    self.viewport.zoom,
+                    self.flow_direction,
+                );
                 let unzoomed_w = w / self.viewport.zoom;
                 let unzoomed_h = h / self.viewport.zoom;
                 (
@@ -2445,9 +2541,77 @@ impl NodeEditorPanel {
         cx.notify();
     }
 
+    /// Adopt `flow` through the settings layer; the settings observer in
+    /// [`Self::new`] re-measures and repaints every Node Editor, this one
+    /// included. Positions are untouched — an alignment is a separate,
+    /// undoable command.
+    fn set_flow_direction(&mut self, flow: FlowDirection, cx: &mut Context<Self>) {
+        super::set_node_flow_direction(flow, cx);
+    }
+
+    /// Re-measure from the cached label widths: zoom, the values flag and the
+    /// flow direction all land here, and none of them changes the text.
     fn refresh_node_sizes(&mut self) {
-        self.node_sizes =
-            Self::compute_all_sizes(&self.graph, self.viewport.zoom, self.show_param_values);
+        self.node_sizes = Self::compute_all_sizes(
+            &self.graph,
+            self.viewport.zoom,
+            self.show_param_values,
+            self.flow_direction,
+            &self.label_widths,
+        );
+    }
+
+    /// Measure every node's label column at zoom 1.0 — the name and the widest
+    /// value line — through the text system, caching per text. Runs wherever
+    /// the text can change (a graph change: rename, parameter edit, undo); zoom
+    /// and the values flag reuse the result. Value text is the frame-0 sample,
+    /// so playback never changes it and nothing here runs per frame.
+    fn measure_label_columns(&mut self, cx: &App) {
+        const MAX_CACHED_TEXTS: usize = 8192;
+        // Only the top-down body has a label column; switching to it
+        // measures (see the settings observer).
+        if self.flow_direction != FlowDirection::Vertical {
+            self.label_widths.clear();
+            return;
+        }
+        if self.text_widths.len() > MAX_CACHED_TEXTS {
+            self.text_widths.clear();
+        }
+        // A private line layout cache: the window's is only reachable while painting.
+        let system = WindowTextSystem::new(cx.text_system().clone());
+        let (ui, mono) = (crate::fonts::ui_font(cx), crate::fonts::mono_font(cx));
+        let cache = &mut self.text_widths;
+        let mut measure = |text: &str, is_mono: bool| -> f32 {
+            *cache.entry((is_mono, text.to_string())).or_insert_with(|| {
+                let (font, size) = if is_mono {
+                    (mono.clone(), painting::VERTICAL_VALUE_FONT)
+                } else {
+                    (ui.clone(), painting::VERTICAL_NAME_FONT)
+                };
+                let run = TextRun {
+                    len: text.len(),
+                    font,
+                    color: Hsla::default(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                    letter_spacing: None,
+                };
+                system
+                    .layout_line(text, px(size), &[run], None)
+                    .width
+                    .into()
+            })
+        };
+        self.label_widths = self
+            .graph
+            .nodes()
+            .filter(|n| !n.metadata.synthetic)
+            .map(|n| {
+                let label = self.node_labels.get(&n.id).map_or(&*n.type_key, |l| l);
+                (n.id, painting::measure_label_widths(n, label, &mut measure))
+            })
+            .collect();
     }
 
     /// Rebuild everything derived from the displayed graph. Called from the
@@ -2472,8 +2636,6 @@ impl NodeEditorPanel {
     /// switch, so nothing invalidates them today; a future switch has to
     /// call this (see the note in `node_locale`).
     fn refresh_graph_caches(&mut self, cx: &App) {
-        self.node_sizes =
-            Self::compute_all_sizes(&self.graph, self.viewport.zoom, self.show_param_values);
         // Nodes without a registered template (and synthetic ones) get no
         // header tint, so they are simply absent from the map.
         self.node_categories = self
@@ -2492,6 +2654,10 @@ impl NodeEditorPanel {
             .nodes()
             .map(|n| (n.id, crate::node_locale::display_label(n, &self.registry)))
             .collect();
+        // Labels first: the top-down label column is measured from them, and
+        // the sizes read the measurement.
+        self.measure_label_columns(cx);
+        self.refresh_node_sizes();
         self.displayed_timings = Self::collect_readouts(&self.graph, cx);
     }
 
@@ -2531,27 +2697,54 @@ impl NodeEditorPanel {
         graph: &Graph,
         zoom: f32,
         show_param_values: bool,
+        flow: FlowDirection,
+        label_widths: &HashMap<NodeId, painting::LabelWidths>,
     ) -> HashMap<NodeId, (f32, f32)> {
         graph
             .nodes()
-            .map(|n| (n.id, compute_node_size(n, zoom, show_param_values)))
+            .map(|n| {
+                let label_w = label_widths.get(&n.id).map_or(
+                    // Unmeasured: the widest column.
+                    f32::MAX,
+                    |widths| widths.column(show_param_values),
+                );
+                (
+                    n.id,
+                    painting::compute_node_size_labeled(n, zoom, show_param_values, flow, label_w),
+                )
+            })
             .collect()
     }
 
     fn node_at_local_pos(&self, lx: f32, ly: f32) -> Option<NodeId> {
-        Self::node_hit_at(&self.graph, &self.viewport, &self.node_sizes, lx, ly)
+        Self::node_hit_at(
+            &self.graph,
+            &self.viewport,
+            self.flow_direction,
+            &self.node_sizes,
+            lx,
+            ly,
+        )
     }
 
     /// The frontmost port at the point, unless a higher-painted node body
     /// occludes it. Ports still win over their own node body.
     fn port_at_local_pos(&self, lx: f32, ly: f32) -> Option<PortHit> {
-        Self::port_hit_at(&self.graph, &self.viewport, &self.node_sizes, lx, ly)
+        Self::port_hit_at(
+            &self.graph,
+            &self.viewport,
+            self.flow_direction,
+            &self.node_sizes,
+            lx,
+            ly,
+        )
     }
 
     fn pointer_hint_at(&self, lx: f32, ly: f32) -> PointerHint {
         Self::pointer_hint_at_in(
             &self.graph,
             &self.viewport,
+            self.flow_direction,
             &self.node_sizes,
             self.edge_style,
             lx,
@@ -2562,19 +2755,39 @@ impl NodeEditorPanel {
     fn pointer_hint_at_in(
         graph: &Graph,
         viewport: &Viewport,
+        flow: FlowDirection,
         node_sizes: &HashMap<NodeId, (f32, f32)>,
         edge_style: EdgeStyle,
         lx: f32,
         ly: f32,
     ) -> PointerHint {
-        if Self::port_hit_at(graph, viewport, node_sizes, lx, ly).is_some() {
+        if Self::port_hit_at(graph, viewport, flow, node_sizes, lx, ly).is_some() {
             PointerHint::Port
-        } else if Self::node_hit_at(graph, viewport, node_sizes, lx, ly).is_some() {
+        } else if Self::node_hit_at(graph, viewport, flow, node_sizes, lx, ly).is_some() {
             PointerHint::Node
-        } else if painting::edge_at_local_pos(graph, viewport, lx, ly, 5.0, edge_style).is_some() {
+        } else if painting::edge_at_local_pos(graph, viewport, lx, ly, 5.0, edge_style, flow)
+            .is_some()
+        {
             PointerHint::Edge
         } else {
             PointerHint::Empty
+        }
+    }
+
+    /// Track the port dot under the idle pointer for its name tag. Only the
+    /// top-down flow needs it (horizontal nodes print their port names), and
+    /// a repaint is asked for only when the dot changed.
+    fn update_hovered_port(&mut self, lx: f32, ly: f32, cx: &mut Context<Self>) {
+        let next = if self.flow_direction == FlowDirection::Vertical {
+            self.port_at_local_pos(lx, ly)
+        } else {
+            None
+        };
+        let key =
+            |hit: &Option<PortHit>| hit.as_ref().map(|h| (h.node_id, h.is_output, h.port_index));
+        if key(&next) != key(&self.hovered_port) {
+            self.hovered_port = next;
+            cx.notify();
         }
     }
 
@@ -2611,12 +2824,13 @@ impl NodeEditorPanel {
     fn port_hit_at(
         graph: &Graph,
         viewport: &Viewport,
+        flow: FlowDirection,
         node_sizes: &HashMap<NodeId, (f32, f32)>,
         lx: f32,
         ly: f32,
     ) -> Option<PortHit> {
-        let port = painting::port_at_local_pos(graph, viewport, lx, ly)?;
-        let Some(body) = Self::node_hit_at(graph, viewport, node_sizes, lx, ly) else {
+        let port = painting::port_at_local_pos(graph, viewport, flow, lx, ly)?;
+        let Some(body) = Self::node_hit_at(graph, viewport, flow, node_sizes, lx, ly) else {
             return Some(port);
         };
         if body == port.node_id {
@@ -2638,6 +2852,7 @@ impl NodeEditorPanel {
     fn node_hit_at(
         graph: &Graph,
         viewport: &Viewport,
+        flow: FlowDirection,
         node_sizes: &HashMap<NodeId, (f32, f32)>,
         lx: f32,
         ly: f32,
@@ -2646,10 +2861,7 @@ impl NodeEditorPanel {
         for node in painting::z_ordered(graph) {
             let (sx, sy) =
                 viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-            let (w, h) = node_sizes
-                .get(&node.id)
-                .copied()
-                .unwrap_or((node_width(viewport.zoom), 60.0));
+            let (w, h) = painting::node_size_or_default(node_sizes, node, viewport.zoom, flow);
             if lx >= sx && lx <= sx + w && ly >= sy && ly <= sy + h {
                 hit = Some(node.id);
             }
@@ -2707,6 +2919,7 @@ impl NodeEditorPanel {
                 ly,
                 5.0,
                 self.edge_style,
+                self.flow_direction,
             )
             .is_none()
         {
@@ -2765,9 +2978,15 @@ impl NodeEditorPanel {
                 node_origins: origins,
                 moved: false,
             };
-        } else if let Some(edge_id) =
-            painting::edge_at_local_pos(&self.graph, &self.viewport, lx, ly, 5.0, self.edge_style)
-        {
+        } else if let Some(edge_id) = painting::edge_at_local_pos(
+            &self.graph,
+            &self.viewport,
+            lx,
+            ly,
+            5.0,
+            self.edge_style,
+            self.flow_direction,
+        ) {
             if !event.modifiers.shift {
                 self.selected_edges.clear();
                 self.clear_selected_nodes(cx);
@@ -2923,7 +3142,14 @@ impl NodeEditorPanel {
                 cx.notify();
             }
             DragMode::Connect { from, .. } => {
-                let snap = painting::find_snap_target(&self.graph, &self.viewport, from, lx, ly);
+                let snap = painting::find_snap_target(
+                    &self.graph,
+                    &self.viewport,
+                    self.flow_direction,
+                    from,
+                    lx,
+                    ly,
+                );
                 self.drag = DragMode::Connect {
                     from: from.clone(),
                     to_point: (lx, ly),
@@ -2947,11 +3173,12 @@ impl NodeEditorPanel {
                     let (nx, ny) = self
                         .viewport
                         .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-                    let (nw, nh) = self
-                        .node_sizes
-                        .get(&node.id)
-                        .copied()
-                        .unwrap_or((node_width(self.viewport.zoom), 60.0));
+                    let (nw, nh) = painting::node_size_or_default(
+                        &self.node_sizes,
+                        node,
+                        self.viewport.zoom,
+                        self.flow_direction,
+                    );
                     if nx + nw > sx && nx < ex && ny + nh > sy && ny < ey {
                         sel.insert(node.id);
                     }
@@ -2964,16 +3191,18 @@ impl NodeEditorPanel {
             DragMode::None => {
                 let hint = self.pointer_hint_at(lx, ly);
                 self.update_pointer_hint(hint, cx);
+                self.update_hovered_port(lx, ly, cx);
 
                 // Idle hover tracking: re-arm the dwell when the
                 // hovered node changes; repaint when an open popover
-                // just closed.
+                // just closed, and when a new node is hovered so the
+                // popover's anchor is laid out there before it opens.
                 let hovered = self.node_at_local_pos(lx, ly);
                 let (repaint, arm) = self.hover_popover.pointer_moved(hovered);
                 if arm {
                     self.arm_hover_dwell(cx);
                 }
-                if repaint {
+                if repaint || arm {
                     cx.notify();
                 }
             }
@@ -3294,6 +3523,96 @@ impl NodeEditorPanel {
         params
     }
 
+    /// The toolbar: the node editor's view options in one row — flow
+    /// direction, edge style, alignment, parameter values, fit.
+    ///
+    /// **Every button dispatches the Action its menu item and key dispatch**
+    /// (`command_action`), from this panel's focus handle so the nearest
+    /// `on_action` is this panel's own wherever focus was a moment ago; there
+    /// is no second path into the setters. The stateful items read their
+    /// current value from the same fields the canvas paints from, which follow
+    /// the settings and the View-menu flag, so a change made from the menu or
+    /// a key shows here on the next frame. The row wraps rather than clips: a
+    /// narrow panel moves a button to a second line instead of hiding it
+    /// (UX rule 5), and the buttons are tab stops that activate on Enter and
+    /// Space through the widget's one handler (rule 10).
+    fn build_toolbar(&self, cx: &mut Context<Self>) -> Div {
+        // Not `cx.listener`: that holds this panel mid-update, and the panel's
+        // own `on_action` handler (alignment, fit) would then update it again.
+        let dispatch = |command: CommandId| {
+            let handle = self.focus_handle.clone();
+            move |_event: &ClickEvent, window: &mut Window, cx: &mut App| {
+                handle.dispatch_action(
+                    crate::workspace::command_action(command).as_ref(),
+                    window,
+                    cx,
+                );
+            }
+        };
+        let (flow_icon, flow_label) = toolbar_flow_face(self.flow_direction);
+        let (edge_icon, edge_label) = toolbar_edge_face(self.edge_style);
+        // Rule 6: with nothing drawn there is nothing to align or fit.
+        let has_nodes = self.graph.nodes().any(|n| !n.metadata.synthetic);
+        // Icon-only buttons: the tooltip names the *current* value for the
+        // stateful ones, and doubles as the accessibility label (rule 7 — a
+        // glyph alone does not say what it does).
+        let icon_button = |id: &'static str, icon: RavelIcon, label: SharedString| {
+            Button::new(id)
+                // Test hook for `VisualTestContext::debug_bounds`.
+                .debug_selector(|| id.into())
+                .compact()
+                .ghost()
+                .icon(Icon::new(icon))
+                .tooltip(label.clone())
+                .accessibility_label(label)
+        };
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .flex_none()
+            .gap_1()
+            .px_1()
+            .py(px(2.0))
+            .border_b_1()
+            .border_color(cx.tokens().colors.border)
+            .child(
+                icon_button("node-editor-flow-direction", flow_icon, flow_label.into())
+                    .on_click(dispatch(CommandId::ViewToggleNodeFlowDirection)),
+            )
+            .child(
+                icon_button("node-editor-edge-style", edge_icon, edge_label.into())
+                    .on_click(dispatch(CommandId::ViewCycleNodeEdgeStyle)),
+            )
+            .child(
+                icon_button(
+                    "node-editor-auto-layout",
+                    RavelIcon::AlignNodes,
+                    t!(CommandId::NodeAutoLayout.label_key()).into(),
+                )
+                .disabled(!has_nodes)
+                .on_click(dispatch(CommandId::NodeAutoLayout)),
+            )
+            .child(
+                icon_button(
+                    "node-editor-param-values",
+                    RavelIcon::ParamValues,
+                    t!(CommandId::ViewToggleNodeParamValues.label_key()).into(),
+                )
+                .selected(self.show_param_values)
+                .on_click(dispatch(CommandId::ViewToggleNodeParamValues)),
+            )
+            .child(
+                icon_button(
+                    "node-editor-fit",
+                    RavelIcon::ZoomFit,
+                    t!(CommandId::ViewFit.label_key()).into(),
+                )
+                .disabled(!has_nodes)
+                .on_click(dispatch(CommandId::ViewFit)),
+            )
+    }
+
     fn build_breadcrumb_bar(&self, cx: &mut Context<Self>) -> Div {
         let colors = cx.tokens().colors;
         let crumbs = self.breadcrumbs(cx);
@@ -3371,7 +3690,24 @@ impl Render for NodeEditorPanel {
         let node_sizes = self.node_sizes.clone();
         let canvas_origin = self.canvas_origin.clone();
         let edge_style = self.edge_style;
+        let flow = self.flow_direction;
         let colors = cx.tokens().colors;
+        // Top-down nodes print no port names, so a name is drawn where the
+        // user is pointing: the dot under the idle pointer, or the target a
+        // dragged wire has snapped to (no dwell delay).
+        let port_label = if flow == FlowDirection::Vertical {
+            match &self.drag {
+                DragMode::None => self.hovered_port.as_ref(),
+                DragMode::Connect { snap, .. } => snap.as_ref(),
+                _ => None,
+            }
+            .and_then(|hit| {
+                painting::port_name(&self.graph, hit)
+                    .map(|name| (name.to_string(), hit.center, hit.is_output))
+            })
+        } else {
+            None
+        };
         let draft_line = match &self.drag {
             DragMode::Connect {
                 from,
@@ -3403,6 +3739,7 @@ impl Render for NodeEditorPanel {
         let show_param_values = self.show_param_values;
 
         let breadcrumb = self.build_breadcrumb_bar(cx);
+        let toolbar = self.build_toolbar(cx);
 
         // Hover info popover (DISC-2): always rendered, open or closed, so
         // the keyed PopoverState survives across frames. The zero-size
@@ -3410,6 +3747,29 @@ impl Render for NodeEditorPanel {
         // without adding a canvas hit target, and the content is rebuilt
         // from the document on every repaint, so animated values follow the
         // displayed frame without any evaluation request.
+        // The anchor follows the hovered node even before the dwell opens
+        // the popover: the popover positions itself from the trigger's
+        // previous layout, so an anchor that only moved on the opening frame
+        // would open at the canvas origin until something repainted.
+        let hovered_node = self
+            .hover_popover
+            .target()
+            .and_then(|id| self.graph.node(id));
+        let anchor = hovered_node.map_or(point(px(0.0), px(0.0)), |node| {
+            let (sx, sy) = self
+                .viewport
+                .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+            let (w, _) = painting::node_size_or_default(
+                &self.node_sizes,
+                node,
+                self.viewport.zoom,
+                self.flow_direction,
+            );
+            // Beside the node, not under it: a popover too tall for the room
+            // below flips or slides upward, and from under the node that
+            // lands it on top of the node it describes.
+            point(px(sx + w + POPOVER_GAP), px(sy))
+        });
         let hover_popover = match self
             .hover_popover
             .open_target()
@@ -3419,17 +3779,9 @@ impl Render for NodeEditorPanel {
                 let frame = self.current_local_frame(cx).unwrap_or(0);
                 let eval = self.display_eval_context(cx);
                 let info = hover_info(node, &self.registry, frame, &eval);
-                let (sx, sy) = self
-                    .viewport
-                    .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-                let (_, h) = self
-                    .node_sizes
-                    .get(&node.id)
-                    .copied()
-                    .unwrap_or((node_width(self.viewport.zoom), 60.0));
-                hover_popover_element(Some(&info), point(px(sx), px(sy + h)), true, cx)
+                hover_popover_element(Some(&info), anchor, true, cx)
             }
-            None => hover_popover_element(None, point(px(0.0), px(0.0)), false, cx),
+            None => hover_popover_element(None, anchor, false, cx),
         };
 
         // With no network open, say *why*: a multi-layer selection is a closed
@@ -3552,6 +3904,7 @@ impl Render for NodeEditorPanel {
                                     ly,
                                     5.0,
                                     this.edge_style,
+                                    this.flow_direction,
                                 )
                                 .is_none();
                             if empty {
@@ -3624,14 +3977,27 @@ impl Render for NodeEditorPanel {
                 let sizes_snap = self.node_sizes.clone();
                 let selected_snap = Self::selected_nodes(cx);
                 let es = self.edge_style;
+                let flow = self.flow_direction;
                 move |menu, window, cx| {
                     let (lx, ly) = right_click.get();
                     let hit_edge =
-                        painting::edge_at_local_pos(&graph_snap, &vp_snap, lx, ly, 5.0, es);
-                    let hit_node =
-                        NodeEditorPanel::node_hit_at(&graph_snap, &vp_snap, &sizes_snap, lx, ly);
-                    let hit_port =
-                        NodeEditorPanel::port_hit_at(&graph_snap, &vp_snap, &sizes_snap, lx, ly);
+                        painting::edge_at_local_pos(&graph_snap, &vp_snap, lx, ly, 5.0, es, flow);
+                    let hit_node = NodeEditorPanel::node_hit_at(
+                        &graph_snap,
+                        &vp_snap,
+                        flow,
+                        &sizes_snap,
+                        lx,
+                        ly,
+                    );
+                    let hit_port = NodeEditorPanel::port_hit_at(
+                        &graph_snap,
+                        &vp_snap,
+                        flow,
+                        &sizes_snap,
+                        lx,
+                        ly,
+                    );
 
                     let entity_add = entity.clone();
                     let groups = add_node_menu.clone();
@@ -3866,8 +4232,55 @@ impl Render for NodeEditorPanel {
                         );
                     }
 
+                    let entity_flow = entity.clone();
+                    menu = menu.separator().submenu(
+                        t!("panel.node_graph_menu.flow_direction"),
+                        window,
+                        cx,
+                        move |sub, _window, _cx| {
+                            let horizontal = entity_flow.clone();
+                            let vertical = entity_flow.clone();
+                            sub.item(
+                                PopupMenuItem::new(t!(
+                                    "panel.node_graph_menu.flow_direction_horizontal"
+                                ))
+                                .checked(flow == FlowDirection::Horizontal)
+                                .on_click(
+                                    move |_, _window, cx| {
+                                        horizontal
+                                            .update(cx, |this, cx| {
+                                                this.set_flow_direction(
+                                                    FlowDirection::Horizontal,
+                                                    cx,
+                                                );
+                                            })
+                                            .ok();
+                                    },
+                                ),
+                            )
+                            .item(
+                                PopupMenuItem::new(t!(
+                                    "panel.node_graph_menu.flow_direction_vertical"
+                                ))
+                                .checked(flow == FlowDirection::Vertical)
+                                .on_click(
+                                    move |_, _window, cx| {
+                                        vertical
+                                            .update(cx, |this, cx| {
+                                                this.set_flow_direction(
+                                                    FlowDirection::Vertical,
+                                                    cx,
+                                                );
+                                            })
+                                            .ok();
+                                    },
+                                ),
+                            )
+                        },
+                    );
+
                     let entity_es = entity.clone();
-                    menu.separator().submenu(
+                    menu.submenu(
                         t!("panel.node_graph_menu.edge_style"),
                         window,
                         cx,
@@ -3929,6 +4342,7 @@ impl Render for NodeEditorPanel {
                             &bounds,
                             &selected_edges,
                             edge_style,
+                            flow,
                             &colors,
                             window,
                         );
@@ -3942,12 +4356,20 @@ impl Render for NodeEditorPanel {
                             &categories,
                             &labels,
                             show_param_values,
+                            flow,
                             &colors,
                             window,
                             cx,
                         );
                         if let Some((from, to)) = draft_line {
-                            painting::paint_connection_draft(from, to, &bounds, &colors, window);
+                            painting::paint_connection_draft(
+                                from, to, flow, &bounds, &colors, window,
+                            );
+                        }
+                        if let Some((name, center, is_output)) = &port_label {
+                            painting::paint_port_label(
+                                name, *center, *is_output, &bounds, &colors, window, cx,
+                            );
                         }
                         if let Some((start, current)) = selection_box {
                             painting::paint_selection_box(start, current, &bounds, &colors, window);
@@ -4062,6 +4484,7 @@ impl Render for NodeEditorPanel {
             .on_action(cx.listener(Self::on_extract_subnet))
             .on_action(cx.listener(Self::on_auto_layout))
             .child(breadcrumb)
+            .child(toolbar)
             .child(canvas_area)
             .children(palette_overlay)
             .children(rename_overlay)
@@ -4631,7 +5054,14 @@ mod tests {
         .into();
 
         assert_eq!(
-            NodeEditorPanel::node_hit_at(&graph, &viewport, &sizes, 10.0, 10.0),
+            NodeEditorPanel::node_hit_at(
+                &graph,
+                &viewport,
+                FlowDirection::Horizontal,
+                &sizes,
+                10.0,
+                10.0
+            ),
             Some(NodeId::new(1))
         );
     }
@@ -4653,8 +5083,20 @@ mod tests {
             zoom: 1.0,
         };
 
-        let shown = NodeEditorPanel::compute_all_sizes(&graph, viewport.zoom, true);
-        let hidden = NodeEditorPanel::compute_all_sizes(&graph, viewport.zoom, false);
+        let shown = NodeEditorPanel::compute_all_sizes(
+            &graph,
+            viewport.zoom,
+            true,
+            FlowDirection::Horizontal,
+            &HashMap::new(),
+        );
+        let hidden = NodeEditorPanel::compute_all_sizes(
+            &graph,
+            viewport.zoom,
+            false,
+            FlowDirection::Horizontal,
+            &HashMap::new(),
+        );
         let (_, shown_h) = shown[&NodeId::new(1)];
         let (_, hidden_h) = hidden[&NodeId::new(1)];
         assert!(hidden_h < shown_h, "hiding the rows must shrink the node");
@@ -4663,18 +5105,39 @@ mod tests {
         // empty canvas without.
         let y = (hidden_h + shown_h) / 2.0;
         assert_eq!(
-            NodeEditorPanel::node_hit_at(&graph, &viewport, &shown, 10.0, y),
+            NodeEditorPanel::node_hit_at(
+                &graph,
+                &viewport,
+                FlowDirection::Horizontal,
+                &shown,
+                10.0,
+                y
+            ),
             Some(NodeId::new(1))
         );
         assert_eq!(
-            NodeEditorPanel::node_hit_at(&graph, &viewport, &hidden, 10.0, y),
+            NodeEditorPanel::node_hit_at(
+                &graph,
+                &viewport,
+                FlowDirection::Horizontal,
+                &hidden,
+                10.0,
+                y
+            ),
             None,
             "the hit box must not keep the height of rows nobody paints"
         );
         // The header is body either way: the toggle moves the bottom edge and
         // nothing else.
         assert_eq!(
-            NodeEditorPanel::node_hit_at(&graph, &viewport, &hidden, 10.0, 10.0),
+            NodeEditorPanel::node_hit_at(
+                &graph,
+                &viewport,
+                FlowDirection::Horizontal,
+                &hidden,
+                10.0,
+                10.0
+            ),
             Some(NodeId::new(1))
         );
     }
@@ -4702,10 +5165,31 @@ mod tests {
         .into();
         let (x, y) = painting::output_port_screen_center((0.0, 0.0), 0, 1.0);
 
-        assert!(painting::port_at_local_pos(&graph, &viewport, x, y).is_some());
-        assert!(NodeEditorPanel::port_hit_at(&graph, &viewport, &sizes, x, y).is_none());
+        assert!(
+            painting::port_at_local_pos(&graph, &viewport, FlowDirection::Horizontal, x, y)
+                .is_some()
+        );
+        assert!(
+            NodeEditorPanel::port_hit_at(
+                &graph,
+                &viewport,
+                FlowDirection::Horizontal,
+                &sizes,
+                x,
+                y
+            )
+            .is_none()
+        );
         assert_eq!(
-            NodeEditorPanel::pointer_hint_at_in(&graph, &viewport, &sizes, EdgeStyle::Bezier, x, y,),
+            NodeEditorPanel::pointer_hint_at_in(
+                &graph,
+                &viewport,
+                FlowDirection::Horizontal,
+                &sizes,
+                EdgeStyle::Bezier,
+                x,
+                y,
+            ),
             PointerHint::Node,
             "hover follows the same frontmost target as mouse-down"
         );
@@ -7043,6 +7527,380 @@ mod tests {
             .unwrap();
     }
 
+    // ----- top-down flow (NGR-5) -----------------------------------------------
+
+    /// The View command writes the setting; the panel follows it, re-measures
+    /// the nodes narrower, and leaves every position where the document has it
+    /// — switching is not an alignment.
+    #[gpui::test]
+    fn switching_the_flow_direction_re_measures_without_moving_nodes(cx: &mut TestAppContext) {
+        let (window, project, path, blur) = setup(cx);
+        pile_up_nodes(&project, &path, 2, cx);
+        cx.update(|cx| {
+            crate::app_settings::install(crate::app_settings::GlobalSettingsFile::default(), cx)
+        });
+
+        let (before_positions, before_width) = window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.flow_direction, FlowDirection::Horizontal);
+                (positions(panel), panel.node_sizes[&blur].0)
+            })
+            .unwrap();
+
+        // What `CommandId::ViewToggleNodeFlowDirection` does.
+        cx.update(crate::panels::toggle_node_flow_direction);
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.flow_direction, FlowDirection::Vertical);
+                let node = panel.graph.node(blur).unwrap();
+                assert!(
+                    painting::vertical_box_size(node, panel.viewport.zoom).0 < before_width,
+                    "the top-down box is narrower than the horizontal node"
+                );
+                assert_eq!(
+                    positions(panel),
+                    before_positions,
+                    "no auto-layout on switch"
+                );
+            })
+            .unwrap();
+
+        // A panel opened afterwards starts in the chosen flow.
+        let reopened = cx.add_window(|window, cx| {
+            NodeEditorPanel::new(ravel_ui::layout::PanelInstanceId(1), window, cx)
+        });
+        reopened
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.flow_direction, FlowDirection::Vertical);
+            })
+            .unwrap();
+
+        cx.update(crate::panels::toggle_node_flow_direction);
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.flow_direction, FlowDirection::Horizontal);
+                assert_eq!(
+                    panel.node_sizes[&blur].0, before_width,
+                    "flipping back restores it"
+                );
+            })
+            .unwrap();
+    }
+
+    /// The name beside a top-down box is part of the node: a press on it hits
+    /// the node, a press past the label does not, and ports stay on the box.
+    #[gpui::test]
+    fn the_vertical_label_is_part_of_the_nodes_hit_area(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+        cx.update(|cx| {
+            crate::app_settings::install(crate::app_settings::GlobalSettingsFile::default(), cx)
+        });
+        cx.update(crate::panels::toggle_node_flow_direction);
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                let node = panel.graph.node(blur).unwrap().clone();
+                let z = panel.viewport.zoom;
+                let (sx, sy) = panel
+                    .viewport
+                    .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+                let (box_w, box_h) = painting::vertical_box_size(&node, z);
+                let (extent_w, _) = panel.node_sizes[&blur];
+
+                let on_label = (sx + box_w + 20.0 * z, sy + box_h / 2.0);
+                assert_eq!(panel.node_at_local_pos(on_label.0, on_label.1), Some(blur));
+                assert!(
+                    panel.port_at_local_pos(on_label.0, on_label.1).is_none(),
+                    "the label carries no port"
+                );
+                assert!(
+                    panel
+                        .node_at_local_pos(sx + extent_w + 5.0, sy + 2.0)
+                        .is_none()
+                );
+            })
+            .unwrap();
+    }
+
+    /// The label column is measured from the real text: a short name leaves the
+    /// extent — and with it the hover popover's anchor — just right of the
+    /// name, a longer name widens it, and a rename re-measures.
+    #[gpui::test]
+    fn the_vertical_extent_tracks_the_measured_label(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+        cx.update(|cx| {
+            crate::app_settings::install(crate::app_settings::GlobalSettingsFile::default(), cx)
+        });
+        cx.update(crate::panels::toggle_node_flow_direction);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // Values off: the fixture's value lines are wider than the name.
+                panel.show_param_values = false;
+                panel.refresh_node_sizes();
+                let z = panel.viewport.zoom;
+                let node = panel.graph.node(blur).unwrap().clone();
+                let (box_w, _) = painting::vertical_box_size(&node, z);
+                let cap = painting::compute_node_size(&node, z, false, FlowDirection::Vertical).0;
+
+                let short_w = panel.node_sizes[&blur].0;
+                assert!(short_w > box_w, "the label has some width");
+                assert!(
+                    short_w < cap,
+                    "{short_w} is not narrower than the cap {cap}"
+                );
+
+                // Rename to something long: the extent widens (to the cap).
+                let mut renamed = (*node).clone();
+                renamed.metadata.label = Some("A very long user supplied node name indeed".into());
+                panel.graph = panel.graph.clone().replace_node(Arc::new(renamed));
+                panel.refresh_graph_caches(cx);
+                assert_eq!(panel.node_sizes[&blur].0, cap, "a long name is capped");
+
+                // And back to a short one.
+                let mut renamed = (**panel.graph.node(blur).unwrap()).clone();
+                renamed.metadata.label = Some("Out".into());
+                panel.graph = panel.graph.clone().replace_node(Arc::new(renamed));
+                panel.refresh_graph_caches(cx);
+                assert!(panel.node_sizes[&blur].0 < short_w);
+
+                // The popover opens just right of that short extent.
+                let (sx, _) = panel
+                    .viewport
+                    .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+                let (w, _) = panel.node_sizes[&blur];
+                assert!(
+                    w - box_w < 60.0 * z,
+                    "the anchor ({}) hugs the label",
+                    sx + w
+                );
+            })
+            .unwrap();
+    }
+
+    /// A marquee that only touches the label still takes the node.
+    #[gpui::test]
+    fn a_marquee_over_the_vertical_label_selects_the_node(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+        cx.update(|cx| {
+            crate::app_settings::install(crate::app_settings::GlobalSettingsFile::default(), cx)
+        });
+        cx.update(crate::panels::toggle_node_flow_direction);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let node = panel.graph.node(blur).unwrap().clone();
+                let z = panel.viewport.zoom;
+                let (sx, sy) = panel
+                    .viewport
+                    .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+                let (box_w, _) = painting::vertical_box_size(&node, z);
+                let origin = panel.canvas_origin.get();
+                // A band wholly right of the box, inside the label column.
+                let from = (sx + box_w + 30.0 * z, sy - 4.0);
+                let to = (sx + box_w + 60.0 * z, sy + 10.0);
+                panel.drag = DragMode::SelectBox {
+                    start: from,
+                    current: from,
+                };
+                panel.canvas_mouse_moved(
+                    &pointer_move((to.0 + origin.0, to.1 + origin.1), Some(MouseButton::Left)),
+                    cx,
+                );
+                assert!(NodeEditorPanel::selected_nodes(cx).contains(&blur));
+            })
+            .unwrap();
+    }
+
+    /// Top-down nodes print no port names, so the dot under the idle pointer
+    /// is tracked for its name tag; horizontal nodes never track it.
+    #[gpui::test]
+    fn the_hovered_port_is_tracked_only_in_vertical_flow(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+        cx.update(|cx| {
+            crate::app_settings::install(crate::app_settings::GlobalSettingsFile::default(), cx)
+        });
+        cx.update(crate::panels::toggle_node_flow_direction);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                let node = panel.graph.node(blur).unwrap().clone();
+                let screen = panel
+                    .viewport
+                    .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+                let (x, y) = painting::port_screen_center(
+                    &node,
+                    screen,
+                    panel.viewport.zoom,
+                    panel.flow_direction,
+                    false,
+                    0,
+                );
+                panel.update_hovered_port(x, y, cx);
+                let hovered = panel.hovered_port.clone().expect("the dot is hovered");
+                assert_eq!((hovered.node_id, hovered.is_output), (blur, false));
+                assert!(painting::port_name(&panel.graph, &hovered).is_some());
+
+                panel.update_hovered_port(x + 500.0, y + 500.0, cx);
+                assert!(panel.hovered_port.is_none(), "leaving the dot clears it");
+            })
+            .unwrap();
+    }
+
+    /// In top-down flow the alignment passes the vertical axis: a connected
+    /// chain stacks downwards, one layer per row, without overlapping.
+    #[gpui::test]
+    fn aligning_in_vertical_flow_stacks_the_layers_downwards(cx: &mut TestAppContext) {
+        let (window, project, path, _blur) = setup(cx);
+        let extra = pile_up_nodes(&project, &path, 2, cx);
+        cx.update(|cx| {
+            crate::app_settings::install(crate::app_settings::GlobalSettingsFile::default(), cx)
+        });
+        cx.update(crate::panels::toggle_node_flow_direction);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.connect_ports(
+                    extra[0],
+                    OutputPortIndex(0),
+                    extra[1],
+                    InputPortIndex(0),
+                    cx,
+                );
+                panel.clear_selected_nodes(cx);
+                panel.auto_layout_nodes(cx);
+                let after = positions(panel);
+                assert!(
+                    after[&extra[1]].1 > after[&extra[0]].1,
+                    "the downstream layer is below: {after:?}"
+                );
+                assert!(!rects_overlap(&drawn_rects(panel)));
+            })
+            .unwrap();
+    }
+
+    // ----- toolbar (NGR-9) ---------------------------------------------------
+
+    /// Every toolbar button is on screen and a click runs the panel's own
+    /// command handler — the same result as the key or the menu item, because
+    /// the click dispatches the same Action. The alignment is the one the
+    /// panel handles itself, so it is the one this window can observe.
+    #[gpui::test]
+    fn the_toolbar_shows_five_controls_and_a_click_aligns(cx: &mut TestAppContext) {
+        let (window, project, path, _blur) = setup(cx);
+        pile_up_nodes(&project, &path, 2, cx);
+        let before = window
+            .update(cx, |panel, _window, _cx| positions(panel))
+            .unwrap();
+        assert!(
+            rects_overlap(
+                &window
+                    .update(cx, |panel, _window, _cx| drawn_rects(panel))
+                    .unwrap()
+            ),
+            "the fixture starts with nodes on top of each other"
+        );
+
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        for id in [
+            "node-editor-flow-direction",
+            "node-editor-edge-style",
+            "node-editor-auto-layout",
+            "node-editor-param-values",
+            "node-editor-fit",
+        ] {
+            assert!(visual.debug_bounds(id).is_some(), "{id} is not on screen");
+        }
+
+        let align = visual
+            .debug_bounds("node-editor-auto-layout")
+            .expect("align button")
+            .center();
+        visual.simulate_click(align, gpui::Modifiers::none());
+        visual.run_until_parked();
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_ne!(positions(panel), before, "the click aligned the network");
+                assert!(!rects_overlap(&drawn_rects(panel)));
+            })
+            .unwrap();
+    }
+
+    /// Narrow panel: the row wraps onto a second line instead of clipping, so
+    /// every control stays on screen (UX rule 5). The test font is far wider
+    /// than the real one, so only the wrapping is asserted, not the widths.
+    #[gpui::test]
+    fn a_narrow_toolbar_wraps_instead_of_dropping_controls(cx: &mut TestAppContext) {
+        let (window, _project, _path, _blur) = setup(cx);
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.simulate_resize(size(px(60.0), px(400.0)));
+        visual.run_until_parked();
+        let ys: Vec<_> = [
+            "node-editor-flow-direction",
+            "node-editor-edge-style",
+            "node-editor-auto-layout",
+            "node-editor-param-values",
+            "node-editor-fit",
+        ]
+        .into_iter()
+        .map(|id| {
+            visual
+                .debug_bounds(id)
+                .unwrap_or_else(|| panic!("{id} vanished at a narrow width"))
+                .origin
+                .y
+        })
+        .collect();
+        assert!(
+            ys.iter().any(|y| *y > ys[0]),
+            "the buttons stayed on one row: {ys:?}"
+        );
+    }
+
+    /// The toolbar is icon-only, so the glyph carries the current value and
+    /// the tooltip names it: every state of the two stateful buttons has its
+    /// own glyph and its own non-empty text, in the locale in force.
+    #[test]
+    fn the_stateful_toolbar_buttons_show_their_value_by_glyph_and_tooltip() {
+        let flows: Vec<_> = [FlowDirection::Horizontal, FlowDirection::Vertical]
+            .into_iter()
+            .map(toolbar_flow_face)
+            .collect();
+        let edges: Vec<_> = [EdgeStyle::Bezier, EdgeStyle::Straight, EdgeStyle::Step]
+            .into_iter()
+            .map(toolbar_edge_face)
+            .collect();
+        for faces in [&flows, &edges] {
+            for (i, (icon, tip)) in faces.iter().enumerate() {
+                assert!(!tip.is_empty());
+                for (other_icon, other_tip) in &faces[i + 1..] {
+                    assert_ne!(icon, other_icon, "one glyph for two states");
+                    assert_ne!(tip, other_tip);
+                }
+            }
+        }
+    }
+
+    /// The toolbar reads the same fields the canvas paints from, so a change
+    /// made elsewhere (menu command, settings) shows on its buttons.
+    #[gpui::test]
+    fn the_toolbar_follows_the_settings(cx: &mut TestAppContext) {
+        let (window, _project, _path, _blur) = setup(cx);
+        cx.update(|cx| {
+            crate::app_settings::install(crate::app_settings::GlobalSettingsFile::default(), cx)
+        });
+        cx.update(crate::panels::toggle_node_flow_direction);
+        cx.update(crate::panels::cycle_node_edge_style);
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.flow_direction, FlowDirection::Vertical);
+                assert_eq!(panel.edge_style, EdgeStyle::Straight);
+            })
+            .unwrap();
+    }
+
     // ----- edge style persistence (NGR-3) ------------------------------------
 
     /// The style used to live and die with the panel. It is a setting now, so
@@ -8472,8 +9330,59 @@ mod tests {
             .unwrap();
     }
 
-    /// The popover anchor wrapper is laid out at the hovered node's
-    /// bottom-left corner in window coordinates: gpui-component's Popover
+    /// The anchor is already on the hovered node while the dwell runs: the
+    /// popover positions itself from the wrapper's previous layout, so an
+    /// anchor that moved only on the opening frame opened the popover at the
+    /// canvas origin whenever nothing else repainted (playback stopped).
+    #[gpui::test]
+    fn the_popover_anchor_sits_on_the_hovered_node_before_it_opens(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.hover_popover.pointer_moved(Some(blur));
+                cx.notify();
+            })
+            .unwrap();
+        let mut visual = VisualTestContext::from_window(*window, cx);
+        visual.update(|window, _cx| window.refresh());
+        visual.run_until_parked();
+        let open = window
+            .update(cx, |panel, _window, _cx| panel.hover_popover.open_target())
+            .unwrap();
+        assert_eq!(open, None, "still inside the dwell");
+        let bounds = visual
+            .debug_bounds("node-hover-popover-anchor")
+            .expect("the anchor wrapper renders while closed");
+        let (expected_x, expected_y) = window
+            .update(cx, |panel, _window, _cx| {
+                let node = panel.graph.node(blur).expect("blur node");
+                let (sx, sy) = panel
+                    .viewport
+                    .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+                let (w, _) = painting::node_size_or_default(
+                    &panel.node_sizes,
+                    node,
+                    panel.viewport.zoom,
+                    panel.flow_direction,
+                );
+                let (ox, oy) = panel.canvas_origin.get();
+                (ox + sx + w + POPOVER_GAP, oy + sy)
+            })
+            .unwrap();
+        let origin_x: f32 = bounds.origin.x.into();
+        let origin_y: f32 = bounds.origin.y.into();
+        assert!(
+            (origin_x - expected_x).abs() < 1.0,
+            "x {origin_x} vs {expected_x}"
+        );
+        assert!(
+            (origin_y - expected_y).abs() < 1.0,
+            "y {origin_y} vs {expected_y}"
+        );
+    }
+
+    /// The popover anchor wrapper is laid out just right of the hovered
+    /// node's top-right corner in window coordinates: gpui-component's Popover
     /// resolves its position from the wrapper's prepaint bounds, so the
     /// wrapper itself must land on the node — positioning only the trigger
     /// child would leave the popover opening at the canvas origin.
@@ -8504,13 +9413,14 @@ mod tests {
                 let (sx, sy) = panel
                     .viewport
                     .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-                let (_, h) = panel
-                    .node_sizes
-                    .get(&blur)
-                    .copied()
-                    .unwrap_or((node_width(panel.viewport.zoom), 60.0));
+                let (w, _) = painting::node_size_or_default(
+                    &panel.node_sizes,
+                    node,
+                    panel.viewport.zoom,
+                    panel.flow_direction,
+                );
                 let (ox, oy) = panel.canvas_origin.get();
-                (ox + sx, oy + sy + h)
+                (ox + sx + w + POPOVER_GAP, oy + sy)
             })
             .unwrap();
 
@@ -8518,7 +9428,7 @@ mod tests {
         let origin_y: f32 = bounds.origin.y.into();
         assert!(
             (origin_x - expected_x).abs() < 1.0,
-            "anchor x {origin_x} must match the node's left edge {expected_x}"
+            "anchor x {origin_x} must sit just right of the node {expected_x}"
         );
         assert!(
             (origin_y - expected_y).abs() < 1.0,

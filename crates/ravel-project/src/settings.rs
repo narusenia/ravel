@@ -19,7 +19,7 @@
 use std::path::Path;
 
 use ravel_core::cache_budget::CacheBudgetConfig;
-use ravel_ui::node_editor::EdgeStyle;
+use ravel_ui::node_editor::{EdgeStyle, FlowDirection};
 use serde::{Deserialize, Serialize};
 
 /// Bytes in one mebibyte. Limits are written in MiB in `settings.toml` — the
@@ -357,19 +357,20 @@ impl CacheLayer {
 /// projects, which is what the global layer expresses and neither the panel's
 /// own state nor `ui_state.json` can (`node-graph-readability-plan.md`).
 ///
-/// `flow_direction` joins this section with the top-down flow mode (`NGR-5`).
-/// It is deliberately absent until then: a setting that changes nothing is a
-/// dead row on the settings screen.
+/// `flow_direction` is the top-down flow mode (`NGR-5`), held the same way.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeEditorLayer {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge_style: Option<EdgeStyle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_direction: Option<FlowDirection>,
 }
 
 impl NodeEditorLayer {
     fn merge(&self, over: &NodeEditorLayer) -> NodeEditorLayer {
         NodeEditorLayer {
             edge_style: over.edge_style.or(self.edge_style),
+            flow_direction: over.flow_direction.or(self.flow_direction),
         }
     }
 }
@@ -493,6 +494,8 @@ pub struct ResolvedSettings {
     pub cache_disk_enabled: bool,
     /// How the node editor draws its edges.
     pub node_editor_edge_style: EdgeStyle,
+    /// Which way the node editor flows (ports left/right or top/bottom).
+    pub node_editor_flow_direction: FlowDirection,
 }
 
 impl Default for ResolvedSettings {
@@ -527,6 +530,7 @@ impl Default for ResolvedSettings {
             cache_disk_enabled: false,
             // The style the editor has always started on.
             node_editor_edge_style: EdgeStyle::Bezier,
+            node_editor_flow_direction: FlowDirection::Horizontal,
         }
     }
 }
@@ -588,6 +592,10 @@ impl ResolvedSettings {
                 .node_editor
                 .edge_style
                 .unwrap_or(d.node_editor_edge_style),
+            node_editor_flow_direction: merged
+                .node_editor
+                .flow_direction
+                .unwrap_or(d.node_editor_flow_direction),
         }
     }
 
@@ -944,6 +952,7 @@ disk_enabled = false
         let global = SettingsLayer {
             node_editor: NodeEditorLayer {
                 edge_style: Some(EdgeStyle::Step),
+                flow_direction: Some(FlowDirection::Vertical),
             },
             ..Default::default()
         };
@@ -951,25 +960,40 @@ disk_enabled = false
         // Inheritance: the project layer says nothing, so global stands.
         let inherited = ResolvedSettings::from_layers(&[global.clone(), SettingsLayer::default()]);
         assert_eq!(inherited.node_editor_edge_style, EdgeStyle::Step);
+        assert_eq!(
+            inherited.node_editor_flow_direction,
+            FlowDirection::Vertical
+        );
 
         // Override: the later layer wins.
         let project = SettingsLayer {
             node_editor: NodeEditorLayer {
                 edge_style: Some(EdgeStyle::Straight),
+                flow_direction: Some(FlowDirection::Horizontal),
             },
             ..Default::default()
         };
         let overridden = ResolvedSettings::from_layers(&[global, project]);
         assert_eq!(overridden.node_editor_edge_style, EdgeStyle::Straight);
+        assert_eq!(
+            overridden.node_editor_flow_direction,
+            FlowDirection::Horizontal
+        );
     }
 
     /// The section round-trips through the file, and a settings file written
     /// before it existed still reads — which is why no format version moves.
     #[test]
     fn the_node_editor_section_round_trips_and_is_optional() {
-        let layer = SettingsLayer::from_toml("[node_editor]\nedge_style = \"straight\"\n")
-            .expect("the section parses");
+        let layer = SettingsLayer::from_toml(
+            "[node_editor]\nedge_style = \"straight\"\nflow_direction = \"vertical\"\n",
+        )
+        .expect("the section parses");
         assert_eq!(layer.node_editor.edge_style, Some(EdgeStyle::Straight));
+        assert_eq!(
+            layer.node_editor.flow_direction,
+            Some(FlowDirection::Vertical)
+        );
         let back = SettingsLayer::from_toml(&layer.to_toml().unwrap()).unwrap();
         assert_eq!(layer, back);
 
@@ -978,6 +1002,10 @@ disk_enabled = false
         assert_eq!(
             ResolvedSettings::resolve(&older).node_editor_edge_style,
             EdgeStyle::Bezier
+        );
+        assert_eq!(
+            ResolvedSettings::resolve(&older).node_editor_flow_direction,
+            FlowDirection::Horizontal
         );
     }
 

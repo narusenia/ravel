@@ -122,6 +122,14 @@ pub enum RavelIcon {
     InterpolationLinear,
     /// Curve graph: step interpolation.
     InterpolationStep,
+    /// Node editor toolbar: the graph flows left to right.
+    FlowHorizontal,
+    /// Node editor toolbar: the graph flows top to bottom.
+    FlowVertical,
+    /// Node editor toolbar: auto-layout the nodes.
+    AlignNodes,
+    /// Node editor toolbar: show the parameter values in the node bodies.
+    ParamValues,
     /// Keyframe toggle: no key at the current frame (hollow ◇).
     Diamond,
     /// Keyframe toggle: a key sits at the current frame (filled ◆).
@@ -675,6 +683,10 @@ impl RavelIcon {
             Self::InterpolationBezier => "icons/interpolation-bezier.svg",
             Self::InterpolationLinear => "icons/interpolation-linear.svg",
             Self::InterpolationStep => "icons/interpolation-step.svg",
+            Self::FlowHorizontal => "icons/arrow-right-left.svg",
+            Self::FlowVertical => "icons/arrow-down-up.svg",
+            Self::AlignNodes => "icons/align-horizontal-distribute-center.svg",
+            Self::ParamValues => "icons/table-properties.svg",
             Self::Diamond => "icons/diamond.svg",
             Self::DiamondFilled => "icons/diamond-filled.svg",
             Self::Circle => "icons/circle.svg",
@@ -966,6 +978,10 @@ mod tests {
             RavelIcon::InterpolationBezier,
             RavelIcon::InterpolationLinear,
             RavelIcon::InterpolationStep,
+            RavelIcon::FlowHorizontal,
+            RavelIcon::FlowVertical,
+            RavelIcon::AlignNodes,
+            RavelIcon::ParamValues,
         ] {
             let path = icon.path();
             assert!(

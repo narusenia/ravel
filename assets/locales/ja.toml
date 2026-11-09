@@ -47,6 +47,8 @@ lua_console = "Luaコンソール"
 render_queue = "レンダーキュー"
 attribute_spreadsheet = "アトリビュートスプレッドシート"
 node_param_values = "パラメータ値を表示"
+node_flow_direction = "ノードの流れ方向を切り替え"
+node_edge_style = "ノードのエッジスタイルを切り替え"
 cycle_preview_resolution = "プレビュー解像度を切り替え"
 fit = "全体表示"
 
@@ -195,6 +197,9 @@ edge_style = "エッジスタイル"
 edge_style_bezier = "エッジ: ベジェ"
 edge_style_straight = "エッジ: 直線"
 edge_style_step = "エッジ: ステップ"
+flow_direction = "流れの向き"
+flow_direction_horizontal = "流れ: 左から右"
+flow_direction_vertical = "流れ: 上から下"
 
 [panel.node_graph_menu.category]
 geometry = "ジオメトリ"

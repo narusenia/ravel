@@ -109,6 +109,8 @@ macro_rules! for_each_command {
             ViewToggleRenderQueue,
             ViewToggleAttributeSpreadsheet,
             ViewToggleNodeParamValues,
+            ViewToggleNodeFlowDirection,
+            ViewCycleNodeEdgeStyle,
             ViewCyclePreviewResolution,
             ViewerChannelRgb,
             ViewerChannelRed,
@@ -1911,6 +1913,17 @@ impl RavelWorkspace {
                 // every Node Editor observes it and re-measures its nodes.
                 CommandId::ViewToggleNodeParamValues => {
                     panels::toggle_node_param_values(cx);
+                }
+                // The node editor's flow direction is a persisted preference
+                // (the global settings layer), so it is written there and
+                // every Node Editor follows the settings global.
+                CommandId::ViewToggleNodeFlowDirection => {
+                    panels::toggle_node_flow_direction(cx);
+                }
+                // The edge style is the same kind of preference: stepped here
+                // so the toolbar and the View menu share one writer.
+                CommandId::ViewCycleNodeEdgeStyle => {
+                    panels::cycle_node_edge_style(cx);
                 }
                 // The viewer's preview resolution factor (REQ-UI-004). Handled
                 // here rather than in the Viewer panel's `on_action`: the

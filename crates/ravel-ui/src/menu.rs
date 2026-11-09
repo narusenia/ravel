@@ -197,6 +197,10 @@ impl MenuBar {
                 // answers instead — the rows appear or the nodes shrink —
                 // which is a stronger signal than a tick in a closed menu.
                 MenuItem::action(CommandId::ViewToggleNodeParamValues),
+                // Not a `check` item either: the direction is a persisted
+                // setting the shell does not hold, and the canvas answers.
+                MenuItem::action(CommandId::ViewToggleNodeFlowDirection),
+                MenuItem::action(CommandId::ViewCycleNodeEdgeStyle),
                 // Also not a `check` item, and it could not be one: it cycles
                 // through three states rather than toggling, and the factor
                 // lives in the application's project state, not in this

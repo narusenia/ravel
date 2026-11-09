@@ -697,6 +697,44 @@ pub(crate) fn toggle_node_param_values(cx: &mut App) -> bool {
     shown
 }
 
+/// Which way the Node Editor flows, from the settings in force.
+pub fn node_flow_direction(cx: &App) -> ravel_ui::node_editor::FlowDirection {
+    crate::app_settings::resolved(cx).node_editor_flow_direction
+}
+
+/// Write the flow direction to the global settings layer — the one entry
+/// every route (View menu command, context menu, toolbar) goes through. Each
+/// Node Editor follows the settings global, so none is pushed at.
+pub(crate) fn set_node_flow_direction(flow: ravel_ui::node_editor::FlowDirection, cx: &mut App) {
+    crate::app_settings::update(
+        crate::app_settings::SettingsScope::Global,
+        |layer| layer.node_editor.flow_direction = Some(flow),
+        cx,
+    );
+}
+
+/// Step the node editor's edge style to the next one (the View menu command).
+pub(crate) fn cycle_node_edge_style(cx: &mut App) {
+    let next = crate::app_settings::resolved(cx)
+        .node_editor_edge_style
+        .cycled();
+    crate::app_settings::update(
+        crate::app_settings::SettingsScope::Global,
+        |layer| layer.node_editor.edge_style = Some(next),
+        cx,
+    );
+}
+
+/// Flip horizontal and top-down flow (the View menu command).
+pub(crate) fn toggle_node_flow_direction(cx: &mut App) {
+    use ravel_ui::node_editor::FlowDirection;
+    let next = match node_flow_direction(cx) {
+        FlowDirection::Horizontal => FlowDirection::Vertical,
+        FlowDirection::Vertical => FlowDirection::Horizontal,
+    };
+    set_node_flow_direction(next, cx);
+}
+
 /// Install the flag: [`crate::project_state::ProjectState`] on a project load
 /// or File ▸ New.
 pub(crate) fn set_show_node_param_values(shown: bool, cx: &mut App) {

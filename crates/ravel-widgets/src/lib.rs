@@ -29,6 +29,7 @@ pub mod checkbox;
 pub mod color_picker;
 pub mod curve_editor;
 pub mod curve_view;
+pub mod expression_editor;
 pub mod fonts;
 pub mod icon;
 pub mod input;
@@ -72,6 +73,18 @@ pub use color_picker::{
 };
 
 pub use icon::{Icon, IconPath, UiIcon};
+
+pub use expression_editor::{
+    EXPRESSION_LANGUAGE, ExpressionEditor, expression_editor_state, refresh_expression_colours,
+    style_runs, token_color,
+};
+
+/// The expression editor's state, re-exported.
+///
+/// `gpui-base`'s own type, surfaced for the reason [`InputState`] is: a host
+/// that owns the state needs no `gpui-base` dependency to name it. Events are
+/// the same [`InputEvent`] a text input emits.
+pub use gpui_base::input::EditorState;
 
 pub use input::{Input, InputFace, InputLayers, frame_is_focused, input_layers};
 

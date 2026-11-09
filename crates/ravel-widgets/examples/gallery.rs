@@ -54,10 +54,10 @@ use ravel_widgets::curve_view::{
 use ravel_widgets::tokens::{Density, RavelTheme, ThemeMode, ThemeSpec};
 use ravel_widgets::{
     Button, ButtonVariant, CHECKBOX_MARK_SIZE, CHECKBOX_SIZE, Checkbox, CheckboxState, ColorPicker,
-    ColorPickerState, Icon, Input, InputState, NumberInput, ParamCurveEditor,
-    ParamCurveEditorState, ParamRampEditor, ParamRampEditorState, SHOW_DELAY, TooltipExt as _,
-    TooltipOverlay, UiIcon, button_layers, checkbox_layers, hex_color_string, hsla_from_hsv,
-    input_layers, swatch, with_alpha,
+    ColorPickerState, EditorState, ExpressionEditor, Icon, Input, InputState, NumberInput,
+    ParamCurveEditor, ParamCurveEditorState, ParamRampEditor, ParamRampEditorState, SHOW_DELAY,
+    TooltipExt as _, TooltipOverlay, UiIcon, button_layers, checkbox_layers,
+    expression_editor_state, hex_color_string, hsla_from_hsv, input_layers, swatch, with_alpha,
 };
 
 /// One labelled block of the gallery.
@@ -113,6 +113,10 @@ struct GalleryInputs {
     text_compact: StateRow,
     number: StateRow,
     number_compact: StateRow,
+    /// The expression editor: a clean one, one with a stray character, and a
+    /// disabled one. Each field needs its own entity for the reason
+    /// [`StateRow`] gives.
+    expression: [Entity<EditorState>; 3],
     /// The two parameter editors own scrub fields of their own, so they are
     /// entities for the same reason the rows above are.
     param_curve: Entity<ParamCurveEditorState>,
@@ -133,6 +137,11 @@ impl GalleryInputs {
             text_compact: StateRow::new("Ravel", window, cx),
             number: StateRow::new("24", window, cx),
             number_compact: StateRow::new("24", window, cx),
+            expression: [
+                expression_editor_state("sin(@P.x * 2) + pi ? 1.5 : max(a, 3)", window, cx),
+                expression_editor_state("sin(1 + $) * 2.", window, cx),
+                expression_editor_state("a + b", window, cx),
+            ],
             param_curve: cx.new(|cx| ParamCurveEditorState::new(CurveParam::default(), cx)),
             param_ramp: cx.new(|cx| ParamRampEditorState::new(RampParam::default(), cx)),
             color: cx.new(|cx| {
@@ -159,6 +168,10 @@ const SECTIONS: &[(&str, SectionFn)] = &[
     (
         "input · the frame, its states, and a ring you can click",
         input_section,
+    ),
+    (
+        "expression_editor · the input frame with syntax colours",
+        expression_editor_section,
     ),
     (
         "number_input · the same frame with a step on each side",
@@ -850,6 +863,30 @@ fn input_section(theme: &RavelTheme, inputs: &GalleryInputs) -> AnyElement {
 /// The step buttons are ghost buttons: hover one and it takes a surface, press
 /// it and it takes another. On the disabled row they do neither, which is UX
 /// invariant 6 — a control that cannot act must not react.
+fn expression_editor_section(theme: &RavelTheme, inputs: &GalleryInputs) -> AnyElement {
+    let [clean, bad, disabled] = &inputs.expression;
+    div()
+        .flex()
+        .flex_col()
+        .gap(theme.spacing.sm)
+        .child(labelled(
+            theme,
+            "colours",
+            ExpressionEditor::new(clean).w(px(360.0)),
+        ))
+        .child(labelled(
+            theme,
+            "invalid · danger border and an error run",
+            ExpressionEditor::new(bad).invalid(true).w(px(360.0)),
+        ))
+        .child(labelled(
+            theme,
+            "compact",
+            ExpressionEditor::new(disabled).compact().w(px(360.0)),
+        ))
+        .into_any_element()
+}
+
 fn number_input_section(theme: &RavelTheme, inputs: &GalleryInputs) -> AnyElement {
     let row = |title: &str, states: &StateRow, density: Density| {
         let dress = move |input: NumberInput| match density {
@@ -1203,11 +1240,13 @@ impl Render for Gallery {
                     .text_color(theme.colors.foreground)
                     .child(format!("Switch to {next:?}"))
                     .on_click(move |_, _window, cx| {
-                        weak.update(cx, |this, cx| {
-                            this.mode = next;
-                            cx.notify();
-                        })
-                        .ok();
+                        let editors = weak
+                            .update(cx, |this, cx| {
+                                this.mode = next;
+                                cx.notify();
+                                this.inputs.expression.clone()
+                            })
+                            .ok();
                         // `Icon`, `Button` and `Tooltip` read the installed
                         // token set rather than taking colors as arguments, so
                         // the toggle has to move both or the section and its
@@ -1221,6 +1260,11 @@ impl Render for Gallery {
                             .resolve(),
                             cx,
                         );
+                        // A highlighter snapshots the tokens, so each
+                        // expression editor is told after the install.
+                        for editor in editors.iter().flatten() {
+                            ravel_widgets::refresh_expression_colours(editor, cx);
+                        }
                     }),
             );
 

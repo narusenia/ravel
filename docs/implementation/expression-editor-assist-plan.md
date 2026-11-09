@@ -181,6 +181,10 @@ kit フォークの改造は要らない。検証は kit（rev `7eafdc2`）の�
 - 色は `tokens.rs` から取る。足りないトークンがあれば**トークン側へ足す**
   （ライト / ダーク両方）。リテラルの色を書かない
 - `examples/gallery.rs` の `SECTIONS` に 1 行足し、両パレットで描く
+- **実装メモ**: `lsp-types` は補完 API（EXED-4）が要るまで足していない（EXED-3 は
+  型を使わない）。パレット切替でハイライタの色が古くならないよう、ホストが
+  `refresh_expression_colours` を呼ぶ（`observe_global` は lint が禁じるため、
+  オブザーバにしていない）
 
 **完了条件**
 

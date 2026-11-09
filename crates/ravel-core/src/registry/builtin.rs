@@ -3095,8 +3095,9 @@ fn scatter_path_array() -> NodeTemplate {
 
 /// `particle.simulate`: frame-sequential point particles (REQ-MOGRAPH-002).
 ///
-/// The one stateful geometry node. The emitter is any geometry; an
-/// unconnected emitter emits from the origin. Lengths are in composition
+/// The one stateful geometry node. The emitter is any geometry (`emit_from`
+/// picks its path, points or instances; `auto` takes the first that exists);
+/// an unconnected emitter emits from the origin. Lengths are in composition
 /// pixels, time in frames except `rate` and the velocities, which are per
 /// second so a change of frame rate does not change the motion.
 ///
@@ -3114,6 +3115,11 @@ fn particle_simulate() -> NodeTemplate {
     .with_param(float_parameter("life_variance", 0.0))
     .with_param(int_parameter("max_points", PARTICLE_MAX_POINTS_DEFAULT))
     .with_param(int_parameter("seed", 0))
+    .with_param(string_parameter("emit_from", "auto"))
+    .with_param_options("emit_from", ["auto", "points", "path", "instances"])
+    .with_param(float_parameter("jitter", 0.0))
+    .with_param(string_parameter("velocity_mode", "fixed"))
+    .with_param_options("velocity_mode", ["fixed", "random", "normal"])
     .with_param(channel2_parameter("initial_velocity", 0.0, 0.0))
     .with_param(float_parameter("initial_spread", 0.0))
     .with_param(float_parameter("drag", 0.0))
@@ -3122,6 +3128,7 @@ fn particle_simulate() -> NodeTemplate {
     .with_param_range("life_variance", 0.0..=1e6, 0.0..=100.0)
     .with_param_range("max_points", 0.0..=1e7, 0.0..=100_000.0)
     .with_param_range("seed", 0.0..=1e9, 0.0..=1000.0)
+    .with_param_range("jitter", 0.0..=1e6, 0.0..=100.0)
     .with_param_range("initial_velocity", -1e6..=1e6, -500.0..=500.0)
     .with_param_range("initial_spread", 0.0..=1e6, 0.0..=200.0)
     .with_param_range("drag", 0.0..=1e3, 0.0..=5.0)
@@ -3129,7 +3136,16 @@ fn particle_simulate() -> NodeTemplate {
         "emission",
         ["rate", "life", "life_variance", "max_points", "seed"],
     )
-    .with_param_group("motion", ["initial_velocity", "initial_spread", "drag"])
+    .with_param_group("emitter", ["emit_from", "jitter"])
+    .with_param_group(
+        "motion",
+        [
+            "velocity_mode",
+            "initial_velocity",
+            "initial_spread",
+            "drag",
+        ],
+    )
 }
 
 fn scatter_scatter() -> NodeTemplate {

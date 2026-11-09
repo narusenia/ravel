@@ -1766,6 +1766,9 @@ transform = "Transform"
 label = "Particle Simulate"
 description = "Simulates point particles frame by frame from an emitter geometry. Output is a point geometry with id, index, age, life and velocity."
 [node."particle.simulate".params]
+emit_from = "Which part of the emitter geometry particles are born at: its first path (by arc length), its points, or its instances. auto takes the path if there is one, else the points, else the instances."
+jitter = "Random offset of the birth position, as a disc radius in pixels."
+velocity_mode = "How the launch direction is chosen: fixed (initial_velocity as given), random (a random direction at its speed), or normal (away from the emitter at its speed)."
 rate = "Particles emitted per second."
 life = "Lifetime of a particle in frames."
 life_variance = "Random spread of the lifetime in frames, plus or minus."
@@ -1776,6 +1779,7 @@ initial_spread = "Random extra launch speed in pixels per second."
 drag = "Slows a particle in proportion to its speed (per second)."
 [node."particle.simulate".group]
 emission = "Emission"
+emitter = "Emitter"
 motion = "Motion"
 
 [node."attribute.set"]

@@ -1754,6 +1754,9 @@ transform = "トランスフォーム"
 label = "パーティクル・シミュレート"
 description = "エミッタジオメトリからポイントパーティクルをフレーム逐次でシミュレートする。出力は id / index / age / life / velocity を持つポイントジオメトリ。"
 [node."particle.simulate".params]
+emit_from = "エミッタジオメトリのどこから発生させるか。最初のパス（弧長）/ ポイント / インスタンス。auto はパスがあればパス、なければポイント、なければインスタンス。"
+jitter = "発生位置のランダムなずれ（円の半径、ピクセル）。"
+velocity_mode = "発射方向の決め方。fixed は initial_velocity のまま、random はその速さでランダムな方向、normal はその速さでエミッタから外向き。"
 rate = "1 秒あたりの発生数。"
 life = "パーティクルの寿命（フレーム）。"
 life_variance = "寿命のランダムな幅（フレーム、±）。"
@@ -1764,6 +1767,7 @@ initial_spread = "発射速度に足すランダムな速さ（ピクセル/秒�
 drag = "速さに比例して減速する（毎秒）。"
 [node."particle.simulate".group]
 emission = "発生"
+emitter = "エミッタ"
 motion = "運動"
 
 [node."attribute.set"]

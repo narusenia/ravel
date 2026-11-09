@@ -19,8 +19,9 @@ pub mod triangulate;
 
 pub use attribute::{AttrName, AttributeArray, AttributeSet, AttributeType, GeometryError};
 pub use container::{
-    Domain, Geometry, GeometrySummary, InstanceColumns, InstanceImage, InstanceSource,
-    InstanceTransform, MAX_INSTANCE_DEPTH, Positions, Primitive,
+    Domain, Geometry, GeometrySummary, InstanceColumns, InstanceColumns3, InstanceImage,
+    InstancePlacement3, InstanceSource, InstanceTransform, MAX_INSTANCE_DEPTH, Positions,
+    Primitive,
 };
 pub use field::{
     AddField, AngleField, AttributeField, BlendField, CombineMode, ComponentField, ComponentMask,

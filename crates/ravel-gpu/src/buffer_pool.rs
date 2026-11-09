@@ -34,10 +34,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ravel_core::cache_budget::{SharedCacheBudget, Tier};
+use ravel_core::cache_budget::SharedCacheBudget;
 
 use crate::device::GpuContext;
 use crate::texture_pool::LruBudget;
+use crate::vram_allowance::{IdleShare, VramAllowance};
 
 /// The smallest class: wgpu's storage-binding offset alignment is 256, and a
 /// class below it would only multiply near-empty buffers.
@@ -160,7 +161,7 @@ pub struct BufferPool {
     idle: HashMap<u64, PooledBuffer>,
     by_key: HashMap<BufferKey, Vec<u64>>,
     lru: LruBudget,
-    budget: Option<SharedCacheBudget>,
+    share: Option<IdleShare>,
     total_created: u64,
 }
 
@@ -172,7 +173,7 @@ impl BufferPool {
             idle: HashMap::new(),
             by_key: HashMap::new(),
             lru: LruBudget::new(budget_bytes),
-            budget: None,
+            share: None,
             total_created: 0,
         }
     }
@@ -181,11 +182,27 @@ impl BufferPool {
     /// re-read on every release (see
     /// [`TexturePool::with_shared_budget`](crate::TexturePool::with_shared_budget)).
     pub fn with_shared_budget(ctx: GpuContext, budget: SharedCacheBudget) -> Self {
-        let headroom = budget.headroom(Tier::Vram);
+        Self::with_vram_allowance(ctx, VramAllowance::new(budget))
+    }
+
+    /// Like [`Self::with_shared_budget`], sharing the idle allowance with the
+    /// [`TexturePool`](crate::TexturePool) (and any other pool) built from the
+    /// same [`VramAllowance`]: idle textures and idle buffers together stay
+    /// inside the headroom. **Build the application's two pools this way.**
+    pub fn with_vram_allowance(ctx: GpuContext, allowance: VramAllowance) -> Self {
+        let share = IdleShare::new(allowance);
         Self {
-            budget: Some(budget),
-            ..Self::new(ctx, headroom)
+            share: Some(share),
+            ..Self::new(ctx, 0)
         }
+        .with_initial_allowance()
+    }
+
+    fn with_initial_allowance(mut self) -> Self {
+        if let Some(share) = &self.share {
+            self.lru.set_budget(share.initial_allowance());
+        }
+        self
     }
 
     /// Idle (pooled) bytes.
@@ -231,6 +248,9 @@ impl BufferPool {
                 ids.retain(|&x| x != id);
             }
             self.lru.remove(id);
+            if let Some(share) = &mut self.share {
+                share.publish(self.lru.used());
+            }
             if let Some(buffer) = self.idle.remove(&id) {
                 log::trace!("buffer pool: reused {} bytes", key.capacity);
                 return buffer;
@@ -262,8 +282,9 @@ impl BufferPool {
         self.by_key.entry(key).or_default().push(id);
         self.idle.insert(id, buffer);
 
-        if let Some(budget) = &self.budget {
-            self.lru.set_budget(budget.headroom(Tier::Vram));
+        if let Some(share) = &mut self.share {
+            let allowance = share.refresh(self.lru.used());
+            self.lru.set_budget(allowance);
         }
         for id in self.lru.evict_overflow() {
             if let Some(evicted) = self.idle.remove(&id) {
@@ -276,6 +297,9 @@ impl BufferPool {
                     self.lru.used()
                 );
             }
+        }
+        if let Some(share) = &mut self.share {
+            share.publish(self.lru.used());
         }
     }
 }
@@ -393,6 +417,66 @@ mod tests {
             !ctx.is_buffer_pending_use(buffer.id()),
             "readback must flush a writer first"
         );
+    }
+
+    #[test]
+    fn idle_textures_and_idle_buffers_share_one_vram_allowance() {
+        use crate::texture_desc::{TextureFormat, TextureUsage};
+        use crate::texture_pool::{TextureKey, TexturePool};
+        use ravel_core::cache_budget::{CacheBudgetConfig, Tier};
+
+        let Some(ctx) = GpuContext::new_blocking().ok() else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        // 8x8 Rgba32Float is 1 KiB; the tier holds two of them.
+        let budget = SharedCacheBudget::new(CacheBudgetConfig {
+            vram_bytes: 2048,
+            ram_bytes: 0,
+            disk_bytes: 0,
+            sim_reserve_ratio: 0.0,
+        });
+        let allowance = VramAllowance::new(budget.clone());
+        let mut textures = TexturePool::with_vram_allowance(ctx.clone(), allowance.clone());
+        let mut buffers = BufferPool::with_vram_allowance(ctx, allowance.clone());
+        let key = TextureKey::new(
+            8,
+            8,
+            TextureFormat::Rgba32Float,
+            TextureUsage::TEXTURE_BINDING | TextureUsage::COPY_DST,
+        );
+
+        let (a, b) = (textures.acquire(key), textures.acquire(key));
+        textures.release(a);
+        textures.release(b);
+        assert_eq!(
+            textures.idle_bytes(),
+            2048,
+            "the textures fill the headroom"
+        );
+
+        // Independent pools would each keep their half of the 2048 and hold
+        // 3072 idle together; the shared allowance leaves the buffers nothing.
+        let buffer = buffers.acquire(1024, BufferUsage::COLUMN);
+        buffers.release(buffer);
+        assert_eq!(
+            buffers.idle_bytes(),
+            0,
+            "no headroom was left for the buffer"
+        );
+        let idle = textures.idle_bytes() + buffers.idle_bytes();
+        assert!(
+            idle <= budget.headroom(Tier::Vram),
+            "idle {idle} exceeds the budget"
+        );
+        assert_eq!(allowance.idle_bytes(), idle, "the total tracks both pools");
+
+        // Dropping a pool hands its share back.
+        drop(textures);
+        let buffer = buffers.acquire(1024, BufferUsage::COLUMN);
+        buffers.release(buffer);
+        assert_eq!(buffers.idle_bytes(), 1024);
+        assert_eq!(allowance.idle_bytes(), 1024);
     }
 
     #[test]

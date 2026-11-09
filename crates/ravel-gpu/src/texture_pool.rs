@@ -31,11 +31,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ravel_core::cache_budget::{SharedCacheBudget, Tier};
+use ravel_core::cache_budget::SharedCacheBudget;
 use ravel_core::types::{FrameBuffer, PixelFormat};
 
 use crate::device::{GpuContext, GpuDeviceState};
 use crate::texture_desc::{TextureFormat, TextureUsage};
+use crate::vram_allowance::{IdleShare, VramAllowance};
 
 /// Identifies textures that are interchangeable for pooling purposes.
 ///
@@ -270,7 +271,7 @@ pub struct TexturePool {
     /// The VRAM authority, when the pool is subordinate to one. The idle
     /// allowance is then recomputed from it on every release instead of
     /// being a limit of the pool's own (`cache-plan.md`, `CACHE-3`).
-    budget: Option<SharedCacheBudget>,
+    share: Option<IdleShare>,
     /// Running count of textures created by this pool (for diagnostics).
     total_created: u64,
     /// The CPU frames uploaded during the current upload scope, if one is
@@ -328,7 +329,7 @@ impl TexturePool {
             idle: HashMap::new(),
             by_key: HashMap::new(),
             lru: LruBudget::new(budget_bytes),
-            budget: None,
+            share: None,
             total_created: 0,
             uploads: None,
         }
@@ -343,13 +344,22 @@ impl TexturePool {
     /// place. Textures a cache is holding used to be invisible to the pool's
     /// accounting entirely, which is why the two halves never added up.
     pub fn with_shared_budget(ctx: GpuContext, budget: SharedCacheBudget) -> Self {
-        let headroom = budget.headroom(Tier::Vram);
+        Self::with_vram_allowance(ctx, VramAllowance::new(budget))
+    }
+
+    /// Like [`Self::with_shared_budget`], but sharing the idle allowance with
+    /// other pools built from the same [`VramAllowance`] — a
+    /// [`BufferPool`](crate::BufferPool) next to this one — so their idle sets
+    /// together stay inside the budget's headroom instead of each taking all
+    /// of it.
+    pub fn with_vram_allowance(ctx: GpuContext, allowance: VramAllowance) -> Self {
+        let share = IdleShare::new(allowance);
         Self {
             ctx,
             idle: HashMap::new(),
             by_key: HashMap::new(),
-            lru: LruBudget::new(headroom),
-            budget: Some(budget),
+            lru: LruBudget::new(share.initial_allowance()),
+            share: Some(share),
             total_created: 0,
             uploads: None,
         }
@@ -456,6 +466,9 @@ impl TexturePool {
                 ids.retain(|&x| x != id);
             }
             self.lru.remove(id);
+            if let Some(share) = &mut self.share {
+                share.publish(self.lru.used());
+            }
             if let Some(tex) = self.idle.remove(&id) {
                 log::trace!(
                     "texture pool: reused {}x{} {:?}",
@@ -500,9 +513,9 @@ impl TexturePool {
         // already locked by the caller. That is the only permitted order —
         // dropping a cached GPU frame runs pool-then-budget, so a budget
         // holder that reached into the pool would deadlock.
-        if let Some(budget) = &self.budget {
-            let headroom = budget.headroom(Tier::Vram);
-            self.lru.set_budget(headroom);
+        if let Some(share) = &mut self.share {
+            let allowance = share.refresh(self.lru.used());
+            self.lru.set_budget(allowance);
         }
 
         let evicted = self.lru.evict_overflow();
@@ -523,6 +536,10 @@ impl TexturePool {
             }
         }
 
+        if let Some(share) = &mut self.share {
+            share.publish(self.lru.used());
+        }
+
         // The accounting above just counted these bytes as freed. A cached
         // bind group still referencing one of the evicted textures would pin
         // its VRAM through the texture views, so the entries must go with it
@@ -537,7 +554,7 @@ impl TexturePool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ravel_core::cache_budget::{CacheBudgetConfig, CacheKind};
+    use ravel_core::cache_budget::{CacheBudgetConfig, CacheKind, Tier};
 
     #[test]
     fn a_shared_budget_pool_starts_at_the_tier_headroom() {

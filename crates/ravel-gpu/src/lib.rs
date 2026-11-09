@@ -45,6 +45,7 @@ pub mod texture_desc;
 pub mod texture_pool;
 pub mod transfer;
 pub mod translate;
+pub mod vram_allowance;
 
 // `interop` is deliberately absent from the re-exports below: reaching the
 // backend, in either direction, should read as leaving the abstraction, so
@@ -72,3 +73,4 @@ pub use transfer::{
     read_texture, read_texture_shared, upload_buffer, upload_texture,
 };
 pub use translate::{ShaderTarget, TranslatedShader, translate_wgsl};
+pub use vram_allowance::VramAllowance;

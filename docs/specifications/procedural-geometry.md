@@ -124,6 +124,7 @@ CPU 経路は texel を読むので、GPU 常駐フレームで来た画像は�
 | `orient` | Instance | Vec4 | 姿勢（クォータニオン）。**3D のみ**（REQ-3D-003） | —（3D は未配線） |
 | `scale3` | Instance | Vec3 | スケール。**3D のみ** | —（同上） |
 | `N` | Point/Primitive | Vec3 | 法線。**3D のみ**（ライティングが読む） | —（同上） |
+| `uv` | Point | Vec2 | テクスチャ座標。**3D のみ**。`(0, 0)` が画像の左上で `v` は下向きに増える（FrameBuffer の行と同じ向き）。`scene.render` は画像を**この列で**サンプルし、暗黙の矩形 UV を持たない | —（列が無ければ `(0, 0)`） |
 | `Cd` | Point/Instance | Color | 色（＝塗り色。`style.fill` が書く）。**Point ドメインの `Cd` は、パスの頂点に書くと線の頂点色になる**（塗りには効かない。下記） | Instance: 白（色味）。Primitive: `rasterize` の `color`。Point: パスの頂点なら所属プリミティブの線色、それ以外は `color` |
 | `alpha` | Point/Instance | F32 | 不透明度 | 1 |
 | `pscale` | Point | F32 | ポイント描画径 | 2（`DEFAULT_PSCALE`） |

@@ -139,6 +139,8 @@ git worktree add .worktrees/<単位 ID 小文字> -b <prefix>/<kebab-case> <base
 - `base` は `main`（`--stack` なら依存ブランチ）
 - **新しい worktree では `mise trust` を一度実行する**。しないと `mise run` が
   全部 `Config files … are not trusted` で落ちる
+- worktree を切る前に `mise run worktrees:setup`（冪等）。全 worktree が主ワークツリーの
+  `target/` を共有し、依存を 1 から作り直さない。並行ビルドは cargo のロックで順番待ちになる
 
 ## 4. ブリーフを渡す
 

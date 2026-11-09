@@ -22,6 +22,10 @@ clippy、`*.md` を含むときだけ `docs:check` が走る（lint-patterns と
 - **新しい clone や新しい `git worktree` では最初に `mise trust`** を実行する。
   mise が知らないパスでは `mise.toml` が untrusted 扱いになり、すべての
   `mise run` がタスク実行前に失敗する
+- **clone ごとに一度 `mise run worktrees:setup`**。`.worktrees/` 配下の全 worktree が
+  主ワークツリーの `target/` でビルドする（`.worktrees/.cargo/config.toml` を書く）。
+  無いと新しい worktree は依存を全部作り直す。2 つの worktree で同時にビルドすると
+  cargo のロックで順番待ちになる
 - `lint-patterns.sh` を緩めて通さない。例外は
   `scripts/lint-patterns.allow` に理由付きで 1 行足す（`.agents/rules/` が
   その例外を文書化しているときだけ）

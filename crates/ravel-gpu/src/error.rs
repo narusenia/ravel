@@ -58,6 +58,11 @@ pub enum GpuError {
     /// disagrees with the declared size).
     #[error("frame buffer layout not uploadable: {0}")]
     FrameLayout(String),
+
+    /// A geometry could not be made resident or read back: a column type with
+    /// no GPU layout was asked for, or a readback came back the wrong size.
+    #[error("geometry not transferable: {0}")]
+    GeometryLayout(String),
 }
 
 /// Convenience result alias for GPU operations.

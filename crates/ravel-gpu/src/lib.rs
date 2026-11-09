@@ -12,6 +12,8 @@
 //!   rasterizer draws with, batched into the same encoder.
 //! * [`TexturePool`] — texture reuse with LRU eviction under a VRAM budget.
 //! * [`BufferPool`] — the same for storage, vertex and index buffers.
+//! * [`GpuGeometry`] — the GPU-resident counterpart of the CPU geometry
+//!   container: attribute columns as pooled storage buffers.
 //! * [`ShaderManager`] — WGSL compilation, caching, validation, hot reload.
 //! * [`translate`] — WGSL to MSL / HLSL / SPIR-V, for the backends that do not
 //!   speak WGSL.
@@ -34,6 +36,7 @@ pub mod device;
 pub mod dispatch;
 pub mod error;
 pub mod frame;
+pub mod geometry;
 pub mod interop;
 pub mod raster;
 pub mod shader;
@@ -59,6 +62,7 @@ pub use device::{
 pub use dispatch::{ComputeDispatch, DispatchSnapshot, QuadDraw, QuadRun, TextureBinding};
 pub use error::{GpuError, GpuResult};
 pub use frame::GpuFrameBuffer;
+pub use geometry::{GpuColumn, GpuGeometry, column_stride, column_wgsl_type};
 pub use raster::{BlendMode, ColorTarget, RasterPipeline};
 pub use shader::{CompiledShader, ShaderManager, validate_wgsl};
 pub use texture_desc::{TextureFormat, TextureUsage};

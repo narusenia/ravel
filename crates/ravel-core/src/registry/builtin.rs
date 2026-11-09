@@ -239,6 +239,10 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(shape_line());
     reg.register(shape_grid());
     reg.register(shape_custom_path());
+    reg.register(mesh_box());
+    reg.register(mesh_sphere());
+    reg.register(mesh_cylinder());
+    reg.register(mesh_plane());
     reg.register(scatter_grid());
     reg.register(scatter_circular());
     reg.register(scatter_path_array());
@@ -2923,6 +2927,87 @@ fn shape_star() -> NodeTemplate {
         .with_transform_section()
 }
 
+/// What every `mesh.*` primitive declares: a geometry output and a 3D
+/// `center` the Viewer can grab (X and Y; the canvas is two-dimensional).
+///
+/// No transform section: `geometry.transform` does not rotate `N`, so a
+/// section here would let a rotated primitive carry stale normals. The
+/// object transform of `scene.add` is the placement that moves them.
+fn mesh_primitive(type_key: &str, label: &str) -> NodeTemplate {
+    NodeTemplate::new(type_key, label, NodeCategory::Geometry)
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::GEOMETRY,
+        })
+        .with_param(channel3_parameter("center", 0.0, 0.0, 0.0))
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_role("center", ParamRole::Position)
+}
+
+/// An `Int` division count, at least 1, the way the 3D primitives spell them.
+fn mesh_segments(template: NodeTemplate, key: &str, default: i32, min: f32) -> NodeTemplate {
+    template
+        .with_param(Parameter {
+            key: key.into(),
+            value: ParameterValue::Int(default),
+        })
+        .with_param_range(key, min..=1000.0, min..=64.0)
+}
+
+/// `mesh.box`: an axis-aligned box of `size`, divided per axis.
+fn mesh_box() -> NodeTemplate {
+    let template = mesh_primitive("mesh.box", "Box")
+        .with_param(channel3_parameter("size", 100.0, 100.0, 100.0))
+        .with_param_range("size", 0.0..=1e5, 0.0..=1000.0);
+    let template = mesh_segments(template, "segments_x", 1, 1.0);
+    let template = mesh_segments(template, "segments_y", 1, 1.0);
+    mesh_segments(template, "segments_z", 1, 1.0)
+}
+
+/// `mesh.sphere`: a UV sphere about the Y axis.
+fn mesh_sphere() -> NodeTemplate {
+    let template = mesh_primitive("mesh.sphere", "Sphere")
+        .with_param(Parameter {
+            key: "radius".into(),
+            value: ParameterValue::Float(50.0),
+        })
+        .with_param_range("radius", 0.0..=1e5, 0.0..=500.0);
+    let template = mesh_segments(template, "segments", 32, 3.0);
+    mesh_segments(template, "rings", 16, 2.0)
+}
+
+/// `mesh.cylinder`: a cylinder about the Y axis, optionally capped.
+fn mesh_cylinder() -> NodeTemplate {
+    let template = mesh_primitive("mesh.cylinder", "Cylinder")
+        .with_param(Parameter {
+            key: "radius".into(),
+            value: ParameterValue::Float(50.0),
+        })
+        .with_param(Parameter {
+            key: "height".into(),
+            value: ParameterValue::Float(100.0),
+        })
+        .with_param(Parameter {
+            key: "caps".into(),
+            value: ParameterValue::Bool(true),
+        })
+        .with_param_range("radius", 0.0..=1e5, 0.0..=500.0)
+        .with_param_range("height", 0.0..=1e5, 0.0..=1000.0);
+    let template = mesh_segments(template, "segments", 32, 3.0);
+    mesh_segments(template, "height_segments", 1, 1.0)
+        .with_param_group("shape", ["center", "radius", "height"])
+        .with_param_group("divisions", ["segments", "height_segments", "caps"])
+}
+
+/// `mesh.plane`: a rectangle in the XY plane facing the camera.
+fn mesh_plane() -> NodeTemplate {
+    let template = mesh_primitive("mesh.plane", "Plane")
+        .with_param(channel2_parameter("size", 100.0, 100.0))
+        .with_param_range("size", 0.0..=1e5, 0.0..=1000.0);
+    let template = mesh_segments(template, "segments_x", 1, 1.0);
+    mesh_segments(template, "segments_y", 1, 1.0)
+}
+
 fn scatter_grid() -> NodeTemplate {
     NodeTemplate::new("scatter.grid", "Grid", NodeCategory::Geometry)
         .with_variadic_input_group(InputPort {
@@ -3615,14 +3700,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 135);
+        assert_eq!(reg.all_templates().count(), 139);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 40);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 44);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
@@ -4672,6 +4757,10 @@ mod tests {
             "geometry.switch",
             "geometry.transform",
             "geometry.twist",
+            "mesh.box",
+            "mesh.cylinder",
+            "mesh.plane",
+            "mesh.sphere",
             "style.dash",
             "style.fill",
             "style.stroke",

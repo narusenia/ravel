@@ -1723,3 +1723,26 @@ fn a_scaled_object_flattens_its_curves_to_the_same_pixel_tolerance() {
         "gpu",
     );
 }
+
+/// The primitives' `uv` is what this sampler reads: a `mesh.plane` textured
+/// with the 2 x 2 quad shows red, green / blue, white at its top-left,
+/// top-right, bottom-left and bottom-right, the same as a hand-built quad with
+/// `NATURAL_UV`.
+#[test]
+fn a_mesh_plane_shows_a_texture_the_right_way_up() {
+    let mut params = ResolvedParams::default();
+    params.set("size", ravel_core::eval::ResolvedValue::Vec2([16.0, 16.0]));
+    params.set(
+        "center",
+        ravel_core::eval::ResolvedValue::Vec3([16.0, 16.0, 0.0]),
+    );
+    let plane = crate::mesh_primitives::PlaneProcessor::from_node(&node())
+        .process(&node(), &ctx(32, 32), &[], &params, &mut Evaluator::new())
+        .unwrap();
+    let plane = plane.downcast_ref::<Geometry>().unwrap().clone();
+    let scene = scene_of(pixel_camera(32, 32), vec![plane]);
+    let mut prepared = prepare_default(&scene, 32, 32);
+    prepared.meshes[0].texture = Some(Arc::new(quad_texture()));
+    let out = cpu::render(&prepared).unwrap();
+    assert_quadrants(&out, [RED, GREEN, BLUE, Color::WHITE], 1e-5);
+}

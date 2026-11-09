@@ -1667,6 +1667,48 @@ pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."shape.custom_path".group]
 transform = "トランスフォーム"
 
+[node."mesh.box"]
+label = "ボックス"
+description = "法線と UV を持つボックスメッシュを作成する。辺を鋭く保つため、面ごとに頂点を持つ。"
+[node."mesh.box".params]
+center = "ボックスの中心。"
+size = "幅・高さ・奥行き。"
+segments_x = "X 方向の分割数。"
+segments_y = "Y 方向の分割数。"
+segments_z = "Z 方向の分割数。"
+
+[node."mesh.sphere"]
+label = "球"
+description = "法線と UV を持つ、Y 軸まわりの UV 球メッシュを作成する。"
+[node."mesh.sphere".params]
+center = "球の中心。"
+radius = "半径。"
+segments = "Y 軸まわりの分割数（3 以上）。"
+rings = "極から極への分割数（2 以上）。"
+
+[node."mesh.cylinder"]
+label = "円柱"
+description = "法線と UV を持つ、Y 軸まわりの円柱メッシュを作成する。"
+[node."mesh.cylinder".params]
+center = "円柱の中心。"
+radius = "半径。"
+height = "Y 方向の高さ。"
+segments = "軸まわりの分割数（3 以上）。"
+height_segments = "高さ方向の分割数。"
+caps = "両端を円盤で塞ぐ。"
+[node."mesh.cylinder".group]
+shape = "形状"
+divisions = "分割"
+
+[node."mesh.plane"]
+label = "平面"
+description = "法線と UV を持つ、カメラに向いた XY 平面上の矩形メッシュを作成する。"
+[node."mesh.plane".params]
+center = "平面の中心。"
+size = "幅と高さ。"
+segments_x = "X 方向の分割数。"
+segments_y = "Y 方向の分割数。"
+
 [node."scatter.grid"]
 label = "グリッド"
 description = "ソースジオメトリを規則的なグリッド上にインスタンス化する。"

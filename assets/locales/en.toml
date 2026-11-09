@@ -1679,6 +1679,48 @@ pivot = "Origin of the rotation and scale while use_centroid is off."
 [node."shape.custom_path".group]
 transform = "Transform"
 
+[node."mesh.box"]
+label = "Box"
+description = "Creates a box mesh with normals and UVs. Each face is its own set of vertices so edges stay sharp."
+[node."mesh.box".params]
+center = "Center of the box."
+size = "Width, height and depth."
+segments_x = "Divisions along X."
+segments_y = "Divisions along Y."
+segments_z = "Divisions along Z."
+
+[node."mesh.sphere"]
+label = "Sphere"
+description = "Creates a UV sphere mesh about the Y axis with normals and UVs."
+[node."mesh.sphere".params]
+center = "Center of the sphere."
+radius = "Radius."
+segments = "Divisions around the Y axis (at least 3)."
+rings = "Divisions from pole to pole (at least 2)."
+
+[node."mesh.cylinder"]
+label = "Cylinder"
+description = "Creates a cylinder mesh about the Y axis with normals and UVs."
+[node."mesh.cylinder".params]
+center = "Center of the cylinder."
+radius = "Radius."
+height = "Height along Y."
+segments = "Divisions around the axis (at least 3)."
+height_segments = "Divisions along the height."
+caps = "Close both ends with a disc."
+[node."mesh.cylinder".group]
+shape = "Shape"
+divisions = "Divisions"
+
+[node."mesh.plane"]
+label = "Plane"
+description = "Creates a rectangular mesh in the XY plane, facing the camera, with normals and UVs."
+[node."mesh.plane".params]
+center = "Center of the plane."
+size = "Width and height."
+segments_x = "Divisions along X."
+segments_y = "Divisions along Y."
+
 [node."scatter.grid"]
 label = "Grid"
 description = "Instances the source geometry on a regular grid."

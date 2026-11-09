@@ -28,7 +28,7 @@ pub use field::{
     ExpressionField, FalloffField, FalloffShape, Field, FieldApply, FieldError,
     FieldExpressionError, FieldSample, FieldValue, GradientField, ImageSamplerField, LengthField,
     MaxField, MultiplyField, NoiseField, RadialField, RampField, TimeField, TimeMode, apply_field,
-    component_index, group_selection,
+    component_index, created_column, created_column_type, group_selection,
 };
 pub use field_wgsl::{
     APPLY_ROW_WIDTH, APPLY_WORKGROUP, ApplyKernelSpec, AttributeLookup, FieldProgram, FieldWgsl,

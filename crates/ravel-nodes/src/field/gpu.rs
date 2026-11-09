@@ -31,11 +31,22 @@
 //! # What it declines (`Ok(None)`)
 //!
 //! A field tree with no WGSL version (`field.expression` is one), a `Detail`
-//! domain, a missing or non-modulatable target, a sampled type that does not
-//! match the target, a group that is not a Bool column of the right length —
-//! every case where the CPU path raises an error, warns and falls back, or
-//! creates a column. The CPU path is the reference for all of them, so it
-//! produces the exact error or warning.
+//! domain, a non-modulatable target, a sampled type that does not match the
+//! target, a missing target with `create_if_missing` off (or created and left
+//! unmodulated by `amount == 0`), a group that is not a Bool column of the right
+//! length — every case where the CPU path raises an error or warns and falls
+//! back. The CPU path is the reference for all of them, so it produces the exact
+//! error or warning.
+//!
+//! # Creating a missing target
+//!
+//! A target the geometry lacks is created with the CPU path's own rule, shared
+//! rather than restated: [`created_column_type`] picks the type and
+//! [`created_column`] fills it (`alpha` starts at 1, `Cd` white or its path's
+//! colour, anything unreserved the sampled type zeroed). A CPU geometry builds
+//! the column and uploads it; a resident one builds it on the host, reading
+//! back only the colour columns a *derived* colour follows (none for a constant
+//! default). The kernel then treats it as the existing column.
 //!
 //! # Calling the field from another kernel
 //!
@@ -50,9 +61,11 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
 use ravel_core::eval::EvalContext;
+use ravel_core::geometry::absent::{Absent, absent};
 use ravel_core::geometry::{
     APPLY_ROW_WIDTH, APPLY_WORKGROUP, ApplyKernelSpec, AttributeArray, AttributeLookup,
-    AttributeType, Domain, Field, FieldApply, FieldProgram, Geometry, apply_kernel,
+    AttributeType, Domain, Field, FieldApply, FieldProgram, Geometry, apply_kernel, created_column,
+    created_column_type, names,
 };
 use ravel_core::types::NodeData;
 use ravel_gpu::{
@@ -207,10 +220,10 @@ impl GpuFieldBackend {
         {
             return Ok(None);
         }
-        let Some((target_type, target_length)) = view.attribute_info(spec.target) else {
-            return Ok(None);
-        };
-        if !is_modulatable(target_type) || target_length != count {
+        // A missing target is created the way the CPU path creates it, or the
+        // CPU path answers with its `AttributeNotFound`.
+        let existing_info = view.attribute_info(spec.target);
+        if existing_info.is_none() && !spec.create_if_missing {
             return Ok(None);
         }
         let group = (!spec.group.is_empty()).then_some(spec.group);
@@ -224,12 +237,28 @@ impl GpuFieldBackend {
             return Ok(None);
         };
         let sampled_type = program.root_type();
+        // The created column's type is the CPU rule (`created_column_type`),
+        // which may differ from the sampled type (`Cd` is a Color however the
+        // field samples).
+        let creating = existing_info.is_none();
+        let (target_type, target_length) = existing_info.unwrap_or((
+            created_column_type(domain, spec.target, sampled_type),
+            count,
+        ));
+        if !is_modulatable(target_type) || target_length != count {
+            return Ok(None);
+        }
         if sampled_type != AttributeType::F32 && sampled_type != target_type {
             return Ok(None);
         }
 
-        // "No modulation" is exact: the column is returned untouched.
+        // "No modulation" is exact: the column is returned untouched. A column
+        // that had to be created still appears (the CPU inserts it), which the
+        // CPU path does.
         let amount = spec.amount.clamp(0.0, 1.0);
+        if amount == 0.0 && creating {
+            return Ok(None);
+        }
         if amount == 0.0 {
             return Ok(Some(match input {
                 Input::Cpu(geometry) => Arc::new((*geometry).clone()),
@@ -251,8 +280,40 @@ impl GpuFieldBackend {
         let Some(positions) = columns.get("P") else {
             return Ok(None);
         };
-        let Some(existing) = columns.get(spec.target) else {
-            return Ok(None);
+        let existing = if creating {
+            let array = match input {
+                Input::Cpu(geometry) => {
+                    created_column(geometry, domain, spec.target, sampled_type, count)
+                }
+                Input::Resident(geometry) => {
+                    // Only a colour that follows another (a point's `Cd` follows
+                    // its path's) reads columns; read back just those, and
+                    // nothing at all for a constant default.
+                    let derived = target_type == AttributeType::Color
+                        && matches!(absent(domain, spec.target), Some(Absent::Inherited));
+                    let wanted: &[(Domain, &str)] = if derived {
+                        &[
+                            (Domain::Primitive, names::STROKE_COLOR),
+                            (Domain::Primitive, names::CD),
+                            (domain, names::STROKE_COLOR),
+                            (domain, names::CD),
+                        ]
+                    } else {
+                        &[]
+                    };
+                    let host = geometry.host_with_columns(wanted)?;
+                    created_column(&host, domain, spec.target, sampled_type, count)
+                }
+            };
+            match GpuColumn::upload(&self.ctx, &self.pool, &array) {
+                Some(column) => column,
+                None => return Ok(None),
+            }
+        } else {
+            match columns.get(spec.target) {
+                Some(column) => column,
+                None => return Ok(None),
+            }
         };
         let group_column = match group {
             Some(name) => match columns.get(name) {

@@ -407,6 +407,22 @@ impl GpuGeometry {
             })
     }
 
+    /// The CPU geometry (topology and host columns) with only the listed
+    /// resident columns read back: enough for code that derives something from a
+    /// few columns without paying for a full [`Self::to_geometry`]. A name that
+    /// is not resident is skipped.
+    pub fn host_with_columns(&self, wanted: &[(Domain, &str)]) -> GpuResult<Geometry> {
+        let mut geometry = (*self.host).clone();
+        for (domain, name) in wanted {
+            if let Some(column) = self.column(*domain, name) {
+                set_mut(&mut geometry, *domain)
+                    .insert(*name, column.read(&self.ctx)?)
+                    .map_err(|e| GpuError::GeometryLayout(e.to_string()))?;
+            }
+        }
+        Ok(geometry)
+    }
+
     /// A column that stayed on the CPU (`Str`, or any `Detail` attribute).
     pub fn host_attribute(&self, domain: Domain, name: &str) -> Option<&Arc<AttributeArray>> {
         self.host.attribute_set(domain).get(name)

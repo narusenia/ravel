@@ -289,6 +289,20 @@ fn check_parity(
     spec: &FieldApply<'_>,
     tolerance: f32,
 ) -> f32 {
+    check_parity_reading_back(gpu, name, field, geometry, spec, tolerance, 0)
+}
+
+/// [`check_parity`], allowing a resident input `readbacks` column readbacks:
+/// a created colour that follows another column reads that column.
+fn check_parity_reading_back(
+    gpu: &(GpuContext, GpuFieldBackend, Arc<Mutex<BufferPool>>),
+    name: &str,
+    field: &FieldValue,
+    geometry: &Geometry,
+    spec: &FieldApply<'_>,
+    tolerance: f32,
+    readbacks: u64,
+) -> f32 {
     let (context, backend, pool) = gpu;
     let ctx = ctx();
     let cpu = apply_field(geometry, spec, field.0.as_ref(), &ctx).expect("CPU reference");
@@ -306,15 +320,15 @@ fn check_parity(
     // A resident geometry in, a resident geometry out, nothing read back until
     // the comparison.
     let resident = GpuGeometry::from_geometry(context.clone(), pool, geometry).unwrap();
-    let readbacks = context.transfer_stats().readbacks;
+    let before_readbacks = context.transfer_stats().readbacks;
     let out = backend
         .apply(&resident, spec, field.0.as_ref(), &ctx)
         .expect("GPU apply")
         .unwrap_or_else(|| panic!("{name}: the GPU path declined a resident input"));
     assert_eq!(
         context.transfer_stats().readbacks,
-        readbacks,
-        "{name}: a resident input must not be read back"
+        before_readbacks + readbacks,
+        "{name}: a resident input must not be read back beyond the columns a created colour follows"
     );
     let out = out
         .downcast_ref::<GpuGeometry>()
@@ -1048,8 +1062,7 @@ fn a_field_without_a_wgsl_version_is_left_to_the_cpu() {
     }
 
     // The same goes for what the call asks for: a target the field's type does
-    // not fit (the CPU path reports the error), a missing target (it creates
-    // it), a group that is not a Bool column, the detail domain.
+    // not fit (the CPU path reports the error), a missing target the CPU path must create or reject, a group that is not a Bool column, the detail domain.
     let vector = fv(DirectionToField {
         target: Vec2(0.0, 0.0),
     });
@@ -1061,9 +1074,24 @@ fn a_field_without_a_wgsl_version_is_left_to_the_cpu() {
             FieldApply::new(Domain::Point, "v3"),
         ),
         (
-            "a missing target",
+            "a missing target with creation switched off",
             &scalar,
-            FieldApply::new(Domain::Point, "created"),
+            FieldApply::new(Domain::Point, "created").with_create_if_missing(false),
+        ),
+        (
+            "a missing target a vector field cannot fill",
+            &vector,
+            FieldApply::new(Domain::Point, "Cd"),
+        ),
+        (
+            "a missing target that is not modulatable",
+            &scalar,
+            FieldApply::new(Domain::Point, "fill"),
+        ),
+        (
+            "a missing target left unmodulated",
+            &scalar,
+            FieldApply::new(Domain::Point, "created").with_amount(0.0),
         ),
         (
             "a non-Bool group",
@@ -1277,4 +1305,133 @@ fn an_empty_attribute_set_gives_the_builder_nothing_to_read() {
         COUNT,
     );
     assert!(program.is_none());
+}
+
+/// A target the geometry does not have is created on the GPU path with the CPU
+/// path's initial value and type: parity of the whole result, new column
+/// included, from a CPU and from a resident input.
+#[test]
+fn a_missing_target_is_created_the_way_the_cpu_creates_it() {
+    let Some(gpu) = adapter() else { return };
+    let geometry = geometry();
+    let ramp_field = fv(RampField::new(
+        fv(noise(2, 0.8, 2)),
+        RampParam::black_to_white(),
+    ));
+    let vector = fv(DirectionToField {
+        target: Vec2(1.0, 2.0),
+    });
+    let scalar = fv(noise(3, 0.5, 2));
+    for (name, field, spec) in [
+        // An unreserved name takes the sampled type, zeroed.
+        (
+            "a new scalar column",
+            &scalar,
+            FieldApply::new(Domain::Point, "created").with_combine(CombineMode::Add),
+        ),
+        (
+            "a new vector column",
+            &vector,
+            FieldApply::new(Domain::Point, "created2").with_combine(CombineMode::Add),
+        ),
+        // Reserved names start from what a reader sees without them.
+        (
+            "alpha starts at one",
+            &scalar,
+            FieldApply::new(Domain::Point, "alpha").with_combine(CombineMode::Multiply),
+        ),
+        (
+            "pscale starts at two",
+            &scalar,
+            FieldApply::new(Domain::Point, "pscale").with_combine(CombineMode::Add),
+        ),
+        (
+            "stroke_width keeps its declared type",
+            &scalar,
+            FieldApply::new(Domain::Point, "stroke_width").with_combine(CombineMode::Add),
+        ),
+        // A colour a scalar field cannot name the type of: declared Color, and
+        // `stroke_color` follows the point's own `Cd` until it is modulated.
+        (
+            "stroke_color starts from Cd",
+            &scalar,
+            FieldApply::new(Domain::Point, "stroke_color")
+                .with_combine(CombineMode::Multiply)
+                .with_components(ComponentMask::parse("rgb")),
+        ),
+        (
+            "stroke_color from a ramp",
+            &ramp_field,
+            FieldApply::new(Domain::Point, "stroke_color").with_amount(0.5),
+        ),
+        (
+            "a group leaves the rest at the initial value",
+            &scalar,
+            FieldApply::new(Domain::Point, "alpha")
+                .with_combine(CombineMode::Add)
+                .with_group("flag"),
+        ),
+    ] {
+        // A colour that follows another reads that one column.
+        let readbacks = u64::from(spec.target == "stroke_color");
+        check_parity_reading_back(&gpu, name, field, &geometry, &spec, 1e-4, readbacks);
+    }
+}
+
+/// `Cd` on a geometry with no colours of its own starts from the colour of the
+/// path the point sits on, which the GPU path reads back from only the
+/// colour columns of a resident geometry.
+#[test]
+fn a_created_point_colour_follows_its_path_on_both_representations() {
+    let Some(gpu) = adapter() else { return };
+    let mut path = Geometry::from_points((0..8).map(|i| Vec2(i as f32, 0.0)).collect());
+    path.push_primitive(ravel_core::geometry::Primitive::Path {
+        verts: 0..4,
+        closed: false,
+    });
+    path.push_primitive(ravel_core::geometry::Primitive::Path {
+        verts: 4..8,
+        closed: false,
+    });
+    path.primitive_attrs_mut()
+        .insert(
+            "Cd",
+            AttributeArray::Color(vec![
+                Color::new(1.0, 0.0, 0.0, 1.0),
+                Color::new(0.0, 1.0, 0.0, 1.0),
+            ]),
+        )
+        .unwrap();
+    let field = fv(ConstantField(0.5));
+    let spec = FieldApply::new(Domain::Point, "Cd").with_combine(CombineMode::Multiply);
+    let (context, backend, pool) = &gpu;
+    let cpu = apply_field(&path, &spec, field.0.as_ref(), &ctx()).unwrap();
+    let first = cpu.points().get("Cd").unwrap().as_color("Cd").unwrap()[0];
+    assert_eq!(
+        (first.r, first.g),
+        (0.5, 0.0),
+        "the CPU follows the first path"
+    );
+    let from_cpu = backend
+        .apply(&path, &spec, field.0.as_ref(), &ctx())
+        .unwrap()
+        .expect("handled");
+    assert_matches(
+        "cpu input",
+        &cpu,
+        from_cpu.downcast_ref::<Geometry>().unwrap(),
+        "Cd",
+        1e-6,
+    );
+    let resident = GpuGeometry::from_geometry(context.clone(), pool, &path).unwrap();
+    let from_resident = backend
+        .apply(&resident, &spec, field.0.as_ref(), &ctx())
+        .unwrap()
+        .expect("handled");
+    let back = from_resident
+        .downcast_ref::<GpuGeometry>()
+        .unwrap()
+        .to_geometry()
+        .unwrap();
+    assert_matches("resident input", &cpu, &back, "Cd", 1e-6);
 }

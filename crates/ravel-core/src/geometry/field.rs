@@ -2187,13 +2187,26 @@ impl<'a> FieldApply<'a> {
 /// The declared type wins only for the colour / style names and for reserved
 /// names whose absent reading is a float, vector or colour; a reserved `I32`
 /// or `Bool` reading keeps the sampled type and a typed-zero fill, as before.
-fn created_column(
+pub fn created_column(
     geometry: &Geometry,
     domain: Domain,
     target: &str,
     sampled: AttributeType,
     length: usize,
 ) -> AttributeArray {
+    absent_column(
+        geometry,
+        domain,
+        target,
+        created_column_type(domain, target, sampled),
+        length,
+    )
+}
+
+/// The type [`created_column`] gives the column it invents for `target`, when
+/// the field samples as `sampled`. Public so the GPU path takes the same rule
+/// instead of restating it.
+pub fn created_column_type(domain: Domain, target: &str, sampled: AttributeType) -> AttributeType {
     // A reserved colour or style attribute takes its declared type even when
     // that makes the combine fail: `combine_arrays` then reports the same
     // unsupported-type error a geometry that already had a `fill` column would
@@ -2202,7 +2215,7 @@ fn created_column(
     // ignoring it. `I32` / `Bool` / `Str` are not modulatable: created here so
     // `combine_arrays` reports the type it always reported, rather than this
     // function inventing a second error for the same case.
-    let attr_type = match target {
+    match target {
         names::CD | names::STROKE_COLOR => AttributeType::Color,
         names::STROKE_WIDTH => AttributeType::F32,
         names::FILL => AttributeType::Bool,
@@ -2220,8 +2233,7 @@ fn created_column(
             }
             _ => sampled,
         },
-    };
-    absent_column(geometry, domain, target, attr_type, length)
+    }
 }
 
 /// Returns a geometry clone with a field combined into one numeric attribute.

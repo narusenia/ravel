@@ -11,6 +11,7 @@
 //! * [`RasterPipeline`] / [`QuadDraw`] — the instanced render pass the
 //!   rasterizer draws with, batched into the same encoder.
 //! * [`TexturePool`] — texture reuse with LRU eviction under a VRAM budget.
+//! * [`BufferPool`] — the same for storage, vertex and index buffers.
 //! * [`ShaderManager`] — WGSL compilation, caching, validation, hot reload.
 //! * [`translate`] — WGSL to MSL / HLSL / SPIR-V, for the backends that do not
 //!   speak WGSL.
@@ -27,6 +28,7 @@
 //! resolution limits, matching Ravel's architecture.
 
 pub mod binding;
+pub mod buffer_pool;
 pub mod compute;
 pub mod device;
 pub mod dispatch;
@@ -48,6 +50,7 @@ pub mod translate;
 // concerns with two different allowed sets (`gpu-native-handle-escape`,
 // `gpu-device-sharing`).
 pub use binding::{BindingDesc, BindingKind, ShaderVisibility};
+pub use buffer_pool::{BufferKey, BufferPool, BufferUsage, PooledBuffer};
 pub use compute::{ComputePipeline, workgroup_count, workgroup_count_2d};
 pub use device::{
     AdapterInfo, DeviceType, GpuBackend, GpuContext, GpuDeviceSnapshot, GpuDeviceState,
@@ -61,7 +64,7 @@ pub use shader::{CompiledShader, ShaderManager, validate_wgsl};
 pub use texture_desc::{TextureFormat, TextureUsage};
 pub use texture_pool::{LruBudget, PooledTexture, TextureKey, TexturePool};
 pub use transfer::{
-    PendingReadback, begin_read_texture, padded_bytes_per_row, read_texture, read_texture_shared,
-    upload_texture,
+    PendingReadback, begin_read_buffer, begin_read_texture, padded_bytes_per_row, read_buffer,
+    read_texture, read_texture_shared, upload_buffer, upload_texture,
 };
 pub use translate::{ShaderTarget, TranslatedShader, translate_wgsl};

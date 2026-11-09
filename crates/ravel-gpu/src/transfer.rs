@@ -34,6 +34,7 @@
 
 use std::sync::Arc;
 
+use crate::buffer_pool::{BufferUsage, PooledBuffer};
 use crate::device::GpuContext;
 use crate::error::{GpuError, GpuResult};
 use crate::texture_desc::TextureUsage;
@@ -306,6 +307,90 @@ pub fn begin_read_texture(ctx: &GpuContext, texture: &PooledTexture) -> GpuResul
         bytes_per_row: unpadded_bpr,
         rows: key.height,
     })
+}
+
+/// Upload `data` into the start of `buffer`.
+///
+/// `data` must fit the buffer's capacity and be a multiple of four bytes (the
+/// copy granularity); the buffer must be `COPY_DST`. Counted as one upload on
+/// the context, exactly like a texture upload, so "did this borrow transfer
+/// anything" has one answer for both kinds of resident value.
+pub fn upload_buffer(ctx: &GpuContext, buffer: &PooledBuffer, data: &[u8]) {
+    debug_assert!(
+        buffer.key.usage.contains(BufferUsage::COPY_DST),
+        "upload target must be declared COPY_DST"
+    );
+    debug_assert!(
+        data.len() as u64 <= buffer.capacity(),
+        "upload overruns buffer"
+    );
+    debug_assert!(
+        data.len().is_multiple_of(4),
+        "buffer uploads are whole 32-bit words"
+    );
+    ctx.transfer_counters().record_upload(data.len() as u64);
+    if !data.is_empty() {
+        ctx.queue().write_buffer(buffer.raw(), 0, data);
+    }
+}
+
+/// Submit a readback of the first `len` bytes of `buffer` without waiting.
+///
+/// `len` must be a multiple of four and at most the buffer's capacity; the
+/// buffer must be `COPY_SRC`. The result is a [`PendingReadback`] of one
+/// tightly-packed row, so it is taken the same way a texture readback is.
+pub fn begin_read_buffer(
+    ctx: &GpuContext,
+    buffer: &PooledBuffer,
+    len: u64,
+) -> GpuResult<PendingReadback> {
+    debug_assert!(
+        buffer.key.usage.contains(BufferUsage::COPY_SRC),
+        "readback source must be declared COPY_SRC"
+    );
+    debug_assert!(len <= buffer.capacity() && len.is_multiple_of(4));
+    ctx.transfer_counters().record_readback(len);
+    let capacity = usize::try_from(len)
+        .map_err(|_| GpuError::Readback(format!("readback size {len} does not fit in usize")))?;
+    // The readback's row stride is a `u32`, which bounds a buffer readback to
+    // 4 GiB — beyond any single column a device will bind anyway.
+    let row = u32::try_from(len)
+        .map_err(|_| GpuError::Readback(format!("readback size {len} exceeds 4 GiB")))?;
+    // A zero-length copy is invalid and map_async on a zero-size buffer is
+    // pointless; one word keeps the path uniform and `capacity` hides it.
+    let staged = len.max(4);
+    let lease = ctx.acquire_staging(staged);
+    let mut encoder = ctx
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ravel buffer readback"),
+        });
+    encoder.copy_buffer_to_buffer(buffer.raw(), 0, lease.buffer(), 0, staged);
+    let submission = ctx.queue().submit(Some(encoder.finish()));
+    let (tx, rx) = std::sync::mpsc::channel();
+    lease
+        .buffer()
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+    Ok(PendingReadback {
+        ctx: ctx.clone(),
+        lease: Some(lease),
+        submission,
+        map: rx,
+        mapped: false,
+        capacity,
+        padded_bytes_per_row: row,
+        bytes_per_row: row,
+        rows: 1,
+    })
+}
+
+/// Read the first `len` bytes of `buffer` back into CPU memory, blocking
+/// until the copy completes.
+pub fn read_buffer(ctx: &GpuContext, buffer: &PooledBuffer, len: u64) -> GpuResult<Vec<u8>> {
+    begin_read_buffer(ctx, buffer, len)?.wait_into_vec()
 }
 
 /// A submitted readback whose copy may still be in flight.

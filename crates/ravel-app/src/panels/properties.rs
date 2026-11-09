@@ -67,7 +67,7 @@ use ravel_ui::keyframes::{PropertyRowId, layer_local_frame};
 use ravel_ui::panels::timeline::PropertyGroup;
 use ravel_ui::properties::composition::{apply_composition_field, sections_for_composition};
 use ravel_ui::properties::exposed::{ExposedRow, exposed_section};
-use ravel_ui::properties::expression;
+use ravel_ui::properties::expression::{self, ExpressionScope};
 use ravel_ui::properties::layer::{
     CUSTOM_FIELD_PREFIX, apply_layer_field, layer_field_keyframed, sections_for_layer,
     sections_for_layers, toggle_layer_keyframe,
@@ -82,7 +82,10 @@ use ravel_widgets::{
     Button, ColorPicker, ColorPickerEvent, ColorPickerState, Icon, TooltipExt as _, UiIcon,
 };
 use ravel_widgets::{Checkbox, CheckboxState};
-use ravel_widgets::{Input, InputEvent, InputState};
+use ravel_widgets::{
+    EditorState, ExpressionEditor, Input, InputEvent, InputState, expression_editor_state,
+    set_expression_error,
+};
 use std::sync::Arc;
 
 use crate::assets::RavelIcon;
@@ -1073,6 +1076,7 @@ fn build_field_row(
     field: &PropertyField,
     scrubs: &[(String, Entity<ScrubInputState>)],
     strings: &[(String, Entity<InputState>)],
+    field_expressions: &[(String, Entity<EditorState>, Option<String>)],
     selects: &[(String, Entity<SelectState<Vec<SharedString>>>)],
     colors: &[(String, Entity<ColorPickerState>)],
     expanded_rows: &std::collections::HashSet<String>,
@@ -1238,6 +1242,7 @@ fn build_field_row(
 
         PropertyField::String { key, .. } => {
             let input = strings.iter().find(|(k, _)| k == key).map(|(_, e)| e);
+            let expression = field_expressions.iter().find(|(k, _, _)| k == key);
             let mut row = div()
                 .flex()
                 .flex_col()
@@ -1246,6 +1251,21 @@ fn build_field_row(
                 .child(field_label_cell(field_label(key), muted));
             if let Some(input) = input {
                 row = row.child(Input::new(input).w_full());
+            }
+            if let Some((_, state, error)) = expression {
+                row = row.child(ExpressionEditor::new(state).w_full());
+                if let Some(error) = error {
+                    // Quotes the author's own source, so it is not translated
+                    // (the same message the parameter expression shows).
+                    row = row.child(
+                        div()
+                            .px_1()
+                            .py(px(1.0))
+                            .text_xs()
+                            .text_color(danger)
+                            .child(SharedString::from(error.clone())),
+                    );
+                }
             }
             row
         }
@@ -1655,7 +1675,7 @@ fn expression_toggle_button(
 fn expression_editor_body(
     key: &str,
     row: &ExpressionRow,
-    inputs: &[(String, usize, Entity<InputState>)],
+    inputs: &[(String, usize, Entity<EditorState>)],
     drafts: &[(String, usize, ExpressionDraft)],
     mono: SharedString,
     muted: Hsla,
@@ -1705,7 +1725,7 @@ fn expression_editor_body(
                     // `crate::fonts`), which an expression can contain through a
                     // string literal.
                     .font_family(mono.clone())
-                    .child(Input::new(state).w_full()),
+                    .child(ExpressionEditor::new(state).w_full()),
             ),
         );
         let error = drafts
@@ -1887,6 +1907,23 @@ struct SelectBinding {
 
 struct StringBinding {
     state: Entity<InputState>,
+    #[allow(dead_code)]
+    sub: Subscription,
+}
+
+/// An expression box and the subscription that feeds its edits back.
+struct ExpressionBinding {
+    state: Entity<EditorState>,
+    #[allow(dead_code)]
+    sub: Subscription,
+}
+
+/// The expression box of a string parameter that holds an expression
+/// (`field.expression`), with the compile error of the text it holds.
+struct FieldExpressionBinding {
+    state: Entity<EditorState>,
+    /// The message shown under the box; tracks the text as it is typed.
+    error: Option<String>,
     #[allow(dead_code)]
     sub: Subscription,
 }
@@ -2125,6 +2162,9 @@ pub struct PropertiesGpuiPanel {
     /// of the frame the edit started on, not of a later playback frame.
     edit_vector: Option<(String, Vec<f32>)>,
     strings: Vec<(String, StringBinding)>,
+    /// String parameters that hold an expression, drawn with the expression
+    /// editor instead of a text box (see `string_parameter_scope`).
+    field_expressions: Vec<(String, FieldExpressionBinding)>,
     selects: Vec<(String, SelectBinding)>,
     colors: Vec<(String, ColorBinding)>,
     curves: Vec<(String, CurveBinding)>,
@@ -2139,7 +2179,7 @@ pub struct PropertiesGpuiPanel {
     /// One text Input per expression-driven component, keyed by field key and
     /// component index. Retained for the same reason every other Input is: a
     /// half-typed expression has to survive a document refresh.
-    expression_inputs: Vec<(String, usize, StringBinding)>,
+    expression_inputs: Vec<(String, usize, ExpressionBinding)>,
     /// Uncommitted expression text, keyed by field key and component index.
     ///
     /// The draft is the whole of this editor's edit state, and it exists
@@ -2437,6 +2477,7 @@ impl PropertiesGpuiPanel {
             frame_override: None,
             edit_vector: None,
             strings: Vec::new(),
+            field_expressions: Vec::new(),
             selects: Vec::new(),
             colors: Vec::new(),
             curves: Vec::new(),
@@ -3869,6 +3910,30 @@ impl PropertiesGpuiPanel {
         for (state, value) in updates {
             state.update(cx, |state, cx| state.set_value(value, window, cx));
         }
+        self.sync_field_expression_widgets(window, cx);
+    }
+
+    /// The same sync for the expression boxes of string parameters.
+    fn sync_field_expression_widgets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut updates: Vec<(Entity<EditorState>, String)> = Vec::new();
+        for section in &self.sections {
+            for field in &section.fields {
+                let PropertyField::String { key, value } = field else {
+                    continue;
+                };
+                let Some((_, binding)) = self.field_expressions.iter().find(|(k, _)| k == key)
+                else {
+                    continue;
+                };
+                let state = binding.state.read(cx);
+                if !state.focus_handle(cx).is_focused(window) && state.value().as_ref() != value {
+                    updates.push((binding.state.clone(), value.clone()));
+                }
+            }
+        }
+        for (state, value) in updates {
+            state.update(cx, |state, cx| state.set_value(value, window, cx));
+        }
     }
 
     /// Push refreshed enum values into retained select widgets (same
@@ -4188,6 +4253,7 @@ impl PropertiesGpuiPanel {
         self.expression_inputs.clear();
         self.scrubs.clear();
         self.strings.clear();
+        self.field_expressions.clear();
         self.selects.clear();
         self.colors.clear();
         self.curves.clear();
@@ -4223,6 +4289,9 @@ impl PropertiesGpuiPanel {
                 .is_some_and(Option::is_some)
         });
         self.build_expression_inputs(&node_ids, window, cx);
+        let type_key = self
+            .resolved_nodes(cx)
+            .and_then(|(nodes, _, _)| nodes.first().map(|node| node.type_key.clone()));
 
         for section in &sections {
             for field in &section.fields {
@@ -4276,7 +4345,13 @@ impl PropertiesGpuiPanel {
                     self.scrubs.push((key, ScrubBinding { state: entity, sub }));
                 }
 
-                if let PropertyField::String { key, value } = field {
+                if let PropertyField::String { key, value } = field
+                    && let Some(scope) = type_key
+                        .as_deref()
+                        .and_then(|type_key| expression::string_parameter_scope(type_key, key))
+                {
+                    self.build_field_expression(key, value, scope, &node_ids, window, cx);
+                } else if let PropertyField::String { key, value } = field {
                     let entity =
                         cx.new(|cx| InputState::new(window, cx).default_value(value.clone()));
                     let field_key = key.clone();
@@ -4622,7 +4697,14 @@ impl PropertiesGpuiPanel {
                 let initial = self
                     .expression_draft(&key, component)
                     .map_or_else(|| stored.source.clone(), |draft| draft.source.clone());
-                let entity = cx.new(|cx| InputState::new(window, cx).default_value(initial));
+                let entity = expression_editor_state(
+                    initial,
+                    ExpressionScope::Parameter.vocabulary(),
+                    window,
+                    cx,
+                );
+                crate::theme_tokens::track_expression_editor(&entity, cx);
+                self.show_expression_error(&key, component, &entity, cx);
                 let field_key = key.clone();
                 let ids = node_ids.to_vec();
                 let sub = cx.subscribe_in(
@@ -4635,6 +4717,9 @@ impl PropertiesGpuiPanel {
                         InputEvent::Change => {
                             let source = state.read(cx).value().to_string();
                             this.note_expression_draft(&field_key, component, source, cx);
+                            // The kit clears the underline on every edit, so
+                            // it is put back for the new text.
+                            this.show_expression_error(&field_key, component, state, cx);
                         }
                         InputEvent::Focus => {}
                     },
@@ -4642,10 +4727,108 @@ impl PropertiesGpuiPanel {
                 self.expression_inputs.push((
                     key.clone(),
                     component,
-                    StringBinding { state: entity, sub },
+                    ExpressionBinding { state: entity, sub },
                 ));
             }
         }
+    }
+
+    /// Build the expression box of a string parameter that holds an expression.
+    ///
+    /// Same contract as the plain string box — Enter and blur commit, `Change`
+    /// does not — plus the live error: the text is compiled in `scope` on every
+    /// keystroke for the message beneath the box and the underline in it.
+    fn build_field_expression(
+        &mut self,
+        key: &str,
+        value: &str,
+        scope: ExpressionScope,
+        node_ids: &[NodeId],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let state = expression_editor_state(value.to_string(), scope.vocabulary(), window, cx);
+        crate::theme_tokens::track_expression_editor(&state, cx);
+        let diagnostic = expression::compile_diagnostic_in(value, scope);
+        set_expression_error(
+            &state,
+            diagnostic
+                .as_ref()
+                .map(|(message, span)| (*span, message.as_str())),
+            cx,
+        );
+        let field_key = key.to_string();
+        let ids = node_ids.to_vec();
+        let sub = cx.subscribe_in(
+            &state,
+            window,
+            move |this, state, event: &InputEvent, _window, cx| match event {
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    let value = state.read(cx).value().to_string();
+                    this.commit_string_change(&field_key, value, &ids, cx);
+                }
+                InputEvent::Change => {
+                    let source = state.read(cx).value().to_string();
+                    let diagnostic = expression::compile_diagnostic_in(&source, scope);
+                    set_expression_error(
+                        state,
+                        diagnostic
+                            .as_ref()
+                            .map(|(message, span)| (*span, message.as_str())),
+                        cx,
+                    );
+                    if let Some((_, binding)) = this
+                        .field_expressions
+                        .iter_mut()
+                        .find(|(k, _)| k == &field_key)
+                    {
+                        binding.error = diagnostic.map(|(message, _)| message);
+                    }
+                    cx.notify();
+                }
+                InputEvent::Focus => {}
+            },
+        );
+        self.field_expressions.push((
+            key.to_string(),
+            FieldExpressionBinding {
+                state,
+                error: diagnostic.map(|(message, _)| message),
+                sub,
+            },
+        ));
+    }
+
+    /// The error of what one component shows — the draft's if it has one, the
+    /// document's otherwise — as a span and message.
+    fn expression_error(&self, key: &str, component: usize) -> Option<(Span, String)> {
+        if let Some(draft) = self.expression_draft(key, component) {
+            return draft.error_span.zip(draft.error.clone());
+        }
+        self.expressions
+            .iter()
+            .find(|(field_key, _)| field_key == key)
+            .and_then(|(_, row)| row.components.get(component))
+            .and_then(Option::as_ref)
+            .and_then(|stored| stored.error_span.zip(stored.error.clone()))
+    }
+
+    /// Underline `expression_error` in the box.
+    fn show_expression_error(
+        &self,
+        key: &str,
+        component: usize,
+        state: &Entity<EditorState>,
+        cx: &mut App,
+    ) {
+        let error = self.expression_error(key, component);
+        set_expression_error(
+            state,
+            error
+                .as_ref()
+                .map(|(span, message)| (*span, message.as_str())),
+            cx,
+        );
     }
 
     /// The uncommitted text of one component, if the author has typed into it
@@ -4731,7 +4914,7 @@ impl PropertiesGpuiPanel {
     /// like the other widget syncs. A component with a draft is skipped: the
     /// author is mid-edit and owns the text until they confirm or discard it.
     fn sync_expression_widgets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mut updates: Vec<(Entity<InputState>, String)> = Vec::new();
+        let mut updates: Vec<(Entity<EditorState>, String)> = Vec::new();
         for (key, component, binding) in &self.expression_inputs {
             if self.expression_draft(key, *component).is_some() {
                 continue;
@@ -4960,6 +5143,11 @@ impl Render for PropertiesGpuiPanel {
                 .iter()
                 .map(|(k, b)| (k.clone(), b.state.clone()))
                 .collect();
+            let field_expression_entities: Vec<(String, Entity<EditorState>, Option<String>)> =
+                self.field_expressions
+                    .iter()
+                    .map(|(k, b)| (k.clone(), b.state.clone(), b.error.clone()))
+                    .collect();
             let select_entities: Vec<(String, Entity<SelectState<Vec<SharedString>>>)> = self
                 .selects
                 .iter()
@@ -5001,7 +5189,7 @@ impl Render for PropertiesGpuiPanel {
                 })
                 .collect();
             let expanded_rows = self.expanded_rows.clone();
-            let expression_entities: Vec<(String, usize, Entity<InputState>)> = self
+            let expression_entities: Vec<(String, usize, Entity<EditorState>)> = self
                 .expression_inputs
                 .iter()
                 .map(|(k, component, b)| (k.clone(), *component, b.state.clone()))
@@ -5228,6 +5416,7 @@ impl Render for PropertiesGpuiPanel {
                     });
                 let scrubs = scrub_entities.clone();
                 let strings = string_entities.clone();
+                let field_expressions = field_expression_entities.clone();
                 let selects = select_entities.clone();
                 let colors = color_entities.clone();
                 let curves = curve_entities.clone();
@@ -5253,6 +5442,7 @@ impl Render for PropertiesGpuiPanel {
                             field,
                             &scrubs,
                             &strings,
+                            &field_expressions,
                             &selects,
                             &colors,
                             &expanded_rows,
@@ -10585,6 +10775,132 @@ mod tests {
             .expect("a driven component")
             .source()
             .to_string()
+    }
+
+    /// Replace the whole text the way typing does, which — unlike `set_value` —
+    /// emits `Change`.
+    fn edit_text(state: &Entity<EditorState>, text: &str, window: &mut Window, cx: &mut App) {
+        state.update(cx, |state, cx| {
+            let len = state.value().encode_utf16().count();
+            state.replace_text_in_range(Some(0..len), text, window, cx);
+        });
+    }
+
+    /// How many underlined ranges the box carries.
+    fn underlines(state: &Entity<EditorState>, cx: &mut TestAppContext) -> usize {
+        state.read_with(cx, |state, _| {
+            state
+                .diagnostics()
+                .map_or(0, |set| set.range(0..state.text().len()).count())
+        })
+    }
+
+    fn expression_box(
+        window: &gpui::WindowHandle<PropertiesGpuiPanel>,
+        key: &str,
+        cx: &mut TestAppContext,
+    ) -> Entity<EditorState> {
+        window
+            .read_with(cx, |panel, _| {
+                panel
+                    .expression_inputs
+                    .iter()
+                    .find(|(k, _, _)| k == key)
+                    .map(|(_, _, binding)| binding.state.clone())
+                    .or_else(|| {
+                        panel
+                            .field_expressions
+                            .iter()
+                            .find(|(k, _)| k == key)
+                            .map(|(_, binding)| binding.state.clone())
+                    })
+                    .expect("an expression box")
+            })
+            .unwrap()
+    }
+
+    /// The kit clears the underline on every edit, so the panel has to put the
+    /// new compile result back after each `Change`; this is the wiring, not the
+    /// widget.
+    #[gpui::test]
+    fn the_error_span_reaches_the_editor_after_each_change(cx: &mut TestAppContext) {
+        let (window, _editor, _project, _path, _node_id) =
+            setup_target_for_node(cx, expression_node());
+        let state = expression_box(&window, "amount", cx);
+        assert_eq!(underlines(&state, cx), 0);
+
+        window
+            .update(cx, |_, window, cx| edit_text(&state, "frame *", window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(underlines(&state, cx), 1, "a broken source is underlined");
+
+        window
+            .update(cx, |_, window, cx| {
+                edit_text(&state, "frame * 2", window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(underlines(&state, cx), 0, "fixing it clears the underline");
+    }
+
+    fn field_expression_node(source: &str) -> Node {
+        Node::new(NodeId::next(), "field.expression")
+            .with_param("expression", ParameterValue::String(source.into()))
+    }
+
+    /// `field.expression` gets the expression editor in the field scope, and the
+    /// plain text box is not built for it.
+    #[gpui::test]
+    fn the_field_expression_source_is_an_expression_box_in_the_field_scope(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, _editor, project, path, node_id) =
+            setup_target_for_node(cx, field_expression_node("@P.x"));
+        window
+            .read_with(cx, |panel, _| {
+                assert!(
+                    panel
+                        .field_expressions
+                        .iter()
+                        .any(|(k, _)| k == "expression")
+                );
+                assert!(!panel.strings.iter().any(|(k, _)| k == "expression"));
+            })
+            .unwrap();
+        let state = expression_box(&window, "expression", cx);
+        assert_eq!(underlines(&state, cx), 0);
+        // An idle box is overwritten by the document's text on the next render,
+        // as for every text box; typing happens with the focus in it.
+        window
+            .update(cx, |_, window, cx| {
+                let handle = state.read(cx).focus_handle(cx);
+                window.focus(&handle, cx);
+            })
+            .unwrap();
+
+        window
+            .update(cx, |_, window, cx| edit_text(&state, "@P.x *", window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(underlines(&state, cx), 1, "a broken source is underlined");
+        window
+            .update(cx, |_, window, cx| edit_text(&state, "@P.x", window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(underlines(&state, cx), 0, "the field scope accepts @P");
+
+        // Enter / blur commit it through the ordinary string path: one write.
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.commit_string_change("expression", "@P.x * 2".into(), &[node_id], cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            node_param(&project, &path, node_id, "expression", cx),
+            ParameterValue::String("@P.x * 2".into())
+        );
     }
 
     /// The completion criterion EXPR-4 states: a syntax error is shown *while

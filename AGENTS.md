@@ -135,9 +135,8 @@ Small fixes and single-panel features do not need a plan.
   type: clippy runs when `*.rs` is staged and `mise run docs:check` when
   `*.md` is staged. A commit that stages `*.rs` therefore pays a full
   `cargo clippy --workspace --all-targets`, which exceeds two minutes whenever
-  the target directory is cold (a fresh worktree is, unless `worktrees:setup`
-  ran) — give `git commit` a 10-minute tool timeout instead of letting the
-  default kill it mid-hook.
+  the target directory is cold (a fresh worktree is, unless it was seeded) — give `git commit`
+  a 10-minute tool timeout instead of letting the default kill it mid-hook.
 - `mise run docs:check` verifies documentation consistency (relative links,
   index coverage, issue counts). `scripts/docs.sh` also searches the docs by
   role and resolves unit / issue IDs — the `ravel-docs` skill drives it.
@@ -159,9 +158,10 @@ Small fixes and single-panel features do not need a plan.
 
 - Preserve user changes and unrelated worktree modifications.
 - Worktrees live at `<repo>/.worktrees/<name>` — nowhere else. `/.worktrees/` is
-  gitignored. Run `mise run worktrees:setup` once per clone: it makes every
-  worktree build into the main checkout's `target/` instead of recompiling all
-  dependencies into its own. Any `ravel-worktrees/…` sibling directory is a
+  gitignored. Run `mise run worktree:seed-target` in a fresh worktree before its
+  first build: it clones the main `target/` copy-on-write instead of recompiling
+  every dependency. Never point worktrees at one shared target directory
+  (`mise.toml` says why). Any `ravel-worktrees/…` sibling directory is a
   leftover from an older convention: do not create new ones and do not assume a
   path that is not in `git worktree list`.
 - Remove a worktree from the main checkout, never from inside the worktree being

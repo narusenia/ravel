@@ -48,7 +48,6 @@
 | NGR-6 | Reroute ノード | `node-graph-readability-plan.md` |
 | NGR-7 | エッジへのドロップでノードを挟む | `node-graph-readability-plan.md` |
 | WRG-1 | 式言語の複数文とローカル変数 | `wrangle-plan.md` |
-| EXED-6 | 式エディタを Properties と `field.expression` へ展開、補完のマウス操作、文書（`EXED-4/5` ✅。`SHELL-6` が再利用） | `expression-editor-assist-plan.md` |
 | PATH-0a | ブーリアンの実装方針評価（依存判断） | `path-ops-plan.md` |
 | GPUBK-13 | 文書更新（`GPUBK-14` の判定を要件・仕様へ反映） | `gpu-backend-plan.md` |
 | GPUBK-15 | ディスパッチを 1 コンピュートパスに畳む | `gpu-backend-plan.md` |
@@ -1006,7 +1005,7 @@ Solid の bbox がコンプ解像度分あるのは bbox の計算のせいで�
 | EXPR-6 | ✅ | 属性アクセス（`@attr` 相当） | #320 |
 | EXPR-7 | ✅ | 文書更新 | #320 |
 
-### 式エディタの補完とハイライト（`expression-editor-assist-plan.md`）
+### 式エディタの補完とハイライト（`done/expression-editor-assist-plan.md`）
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
@@ -1015,7 +1014,7 @@ Solid の bbox がコンプ解像度分あるのは bbox の計算のせいで�
 | EXED-3 | ✅ #632 | `ravel-widgets` の式エディタとハイライト（gallery 登録） | EXED-1, EXED-2 |
 | EXED-4 | ✅ #635 | 補完ポップアップとキー処理 | EXED-3 |
 | EXED-5 | ✅ #635 | `Span` によるエラー位置の下線 | EXED-3 |
-| EXED-6 | 🟡 | Properties と `field.expression` への展開、補完のマウス操作、文書（`SHELL-6` が再利用） | EXED-4, EXED-5 |
+| EXED-6 | ✅ #636 | Properties と `field.expression` への展開、補完のマウス操作、文書（`SHELL-6` が再利用） | EXED-4, EXED-5 |
 
 ### 公開パラメータ宣言（REQ-PROJ-006）
 

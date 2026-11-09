@@ -56,6 +56,9 @@
 //! - Path curves are the projection of their control polygon, and a Path
 //!   object strokes at one width measured at its centroid.
 //! - Cap, join and dash attributes are not honoured on Path objects.
+//! - Path objects are clipped against the near plane before projection: only
+//!   the part in front of the camera is drawn (a closed path stays a closed
+//!   polygon), and clipped paths lose their tangents.
 //! - Instances placed in 3D are not drawn yet; instance placement is 2D.
 
 use std::sync::Arc;

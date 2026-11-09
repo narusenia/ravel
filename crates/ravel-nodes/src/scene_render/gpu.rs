@@ -58,7 +58,8 @@ struct ObjectRecord {
     mvp: [f32; 16],
     model: [f32; 16],
     color: [f32; 4],
-    /// `x`: the mesh has vertex colours. `y`: sample the bound texture.
+    /// `x`: the mesh has vertex colours. `y`: sample the bound texture. `z`:
+    /// lights shade it.
     flags: [f32; 4],
 }
 
@@ -75,7 +76,7 @@ fn record_of(object: &MeshObject, has_vertex_colors: bool) -> ObjectRecord {
         flags: [
             f32::from(u8::from(has_vertex_colors)),
             f32::from(u8::from(object.texture.is_some())),
-            0.0,
+            f32::from(u8::from(object.shaded)),
             0.0,
         ],
     }
@@ -384,6 +385,7 @@ impl GpuSceneRenderer {
             color: &premul_binding,
             depth: depth_buffer,
             objects: object_bytes,
+            lights: bytemuck::cast_slice(&prepared.lights),
             placeholder: &placeholder_binding,
             quads: (!batch.is_empty()).then(|| QuadBatch {
                 pipeline: &self.paths,

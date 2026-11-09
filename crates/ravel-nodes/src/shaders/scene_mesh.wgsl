@@ -12,11 +12,22 @@ struct ObjectData {
     model: mat4x4<f32>,
     // Straight-alpha tint multiplied into every fragment.
     color: vec4<f32>,
-    // x: the mesh has vertex colours, y: sample the bound texture.
+    // x: the mesh has vertex colours, y: sample the bound texture,
+    // z: lights shade it (it has normals).
     flags: vec4<f32>,
 }
 
+// One light in scene space. `vector.w` is the kind: 0 ambient, 1 directional
+// (`vector.xyz` is the unit vector toward the light), 2 point (`vector.xyz` is
+// its position). `color.rgb` is colour times intensity, `color.w` a point
+// light's half-strength radius. All-zero padding is a dark ambient light.
+struct LightData {
+    vector: vec4<f32>,
+    color: vec4<f32>,
+}
+
 @group(0) @binding(0) var<storage, read> objects: array<ObjectData>;
+@group(0) @binding(1) var<storage, read> lights: array<LightData>;
 @group(1) @binding(0) var<storage, read> vertex_colors: array<vec4<f32>>;
 @group(2) @binding(0) var albedo: texture_2d<f32>;
 
@@ -26,6 +37,7 @@ struct VertexOutput {
     @location(1) color: vec4<f32>,
     @location(2) normal: vec3<f32>,
     @location(3) @interpolate(flat) object: u32,
+    @location(4) world: vec3<f32>,
 }
 
 @vertex
@@ -45,9 +57,17 @@ fn mesh_vertex(
         vertex_colors[vertex_index],
         record.flags.x > 0.5,
     );
-    // Not normalised and not inverse-transposed: nothing shades with it yet,
-    // and lighting owns the choice (a non-uniform scale needs the latter).
-    output.normal = (record.model * vec4<f32>(normal, 0.0)).xyz;
+    // The inverse transpose of the model's upper 3x3, so a non-uniform scale
+    // keeps the normal perpendicular: for columns a, b, c it is
+    // [b x c, c x a, a x b] / det, and `det` is only needed for its sign (a
+    // mirroring model flips it). Normalised per fragment, after interpolation.
+    let a = record.model[0].xyz;
+    let b = record.model[1].xyz;
+    let c = record.model[2].xyz;
+    let handedness = select(-1.0, 1.0, dot(a, cross(b, c)) >= 0.0);
+    output.normal = (cross(b, c) * normal.x + cross(c, a) * normal.y + cross(a, b) * normal.z)
+        * handedness;
+    output.world = (record.model * vec4<f32>(position, 1.0)).xyz;
     output.object = object;
     return output;
 }
@@ -83,10 +103,42 @@ fn sample_albedo(texel_coord: vec2<f32>, dimensions: vec2<i32>) -> vec4<f32> {
     return accumulated;
 }
 
+/// What the lights deliver to a surface point, per channel: Lambert, summed
+/// over every light. See `ravel_core::scene::light` for the model. The CPU
+/// reference is `light_factor` in `scene_render/cpu.rs`.
+fn light_factor(world: vec3<f32>, interpolated_normal: vec3<f32>) -> vec3<f32> {
+    let length_n = length(interpolated_normal);
+    var n = vec3<f32>(0.0);
+    if length_n > 1e-12 {
+        n = interpolated_normal / length_n;
+    }
+    var total = vec3<f32>(0.0);
+    for (var i = 0u; i < arrayLength(&lights); i += 1u) {
+        let light = lights[i];
+        if light.vector.w < 0.5 {
+            total += light.color.rgb;
+        } else if light.vector.w < 1.5 {
+            total += light.color.rgb * max(dot(n, light.vector.xyz), 0.0);
+        } else {
+            let to_light = light.vector.xyz - world;
+            let distance = length(to_light);
+            if distance > 1e-6 {
+                let ratio = distance / light.color.w;
+                let falloff = 1.0 / (1.0 + ratio * ratio);
+                total += light.color.rgb * falloff * max(dot(n, to_light / distance), 0.0);
+            }
+        }
+    }
+    return total;
+}
+
 @fragment
 fn mesh_fragment(input: VertexOutput) -> @location(0) vec4<f32> {
     let record = objects[input.object];
-    let tint = input.color * record.color;
+    var tint = input.color * record.color;
+    if record.flags.z > 0.5 {
+        tint = vec4<f32>(tint.rgb * light_factor(input.world, input.normal), tint.a);
+    }
     if record.flags.y > 0.5 {
         let dimensions = textureDimensions(albedo);
         let sampled = sample_albedo(input.uv * vec2<f32>(dimensions), vec2<i32>(dimensions));

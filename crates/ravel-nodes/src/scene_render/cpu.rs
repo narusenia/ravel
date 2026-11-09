@@ -17,8 +17,10 @@
 //!   draw a shared edge twice or leave a crack;
 //! - depth is the clip-space `z / w`, interpolated linearly in screen space,
 //!   and the test is `LessEqual` against a buffer cleared to `1`;
-//! - `uv`, vertex colour and every other varying are interpolated
-//!   perspective-correctly;
+//! - `uv`, vertex colour, the scene-space normal and position and every other
+//!   varying are interpolated perspective-correctly;
+//! - lighting is evaluated per fragment from the interpolated normal
+//!   ([`light_factor`] is the twin of the shader's function of that name);
 //! - nothing is back-face culled.
 //!
 //! Triangles that cross the near or far plane are clipped here
@@ -30,7 +32,9 @@ use anyhow::Context as _;
 use ravel_core::scene::Mat4;
 use ravel_core::types::{Color, FrameBuffer};
 
-use super::prepare::{Blended, MeshObject, Prepared, mesh_data};
+use super::prepare::{
+    Blended, KIND_AMBIENT, KIND_DIRECTIONAL, LightRecord, MeshObject, Prepared, mesh_data,
+};
 use crate::rasterize;
 
 /// One clip-space vertex with the varyings the fragment stage reads.
@@ -39,6 +43,10 @@ struct ClipVertex {
     clip: [f32; 4],
     uv: [f32; 2],
     color: [f32; 4],
+    /// Scene space, not normalised.
+    normal: [f32; 3],
+    /// Scene space.
+    world: [f32; 3],
 }
 
 impl ClipVertex {
@@ -58,6 +66,8 @@ impl ClipVertex {
                 mix(a.color[2], b.color[2]),
                 mix(a.color[3], b.color[3]),
             ],
+            normal: std::array::from_fn(|i| mix(a.normal[i], b.normal[i])),
+            world: std::array::from_fn(|i| mix(a.world[i], b.world[i])),
         }
     }
 }
@@ -79,6 +89,10 @@ fn clip_to_plane(polygon: &[ClipVertex], distance: impl Fn(&ClipVertex) -> f32) 
     out
 }
 
+/// How many scalars a fragment interpolates: `uv` 2, colour 4, normal 3,
+/// world position 3.
+const VARYINGS: usize = 12;
+
 /// A vertex after the perspective divide and viewport transform.
 #[derive(Clone, Copy)]
 struct ScreenVertex {
@@ -86,8 +100,9 @@ struct ScreenVertex {
     y: f32,
     z: f32,
     inv_w: f32,
-    /// `uv`, then colour, each already multiplied by `inv_w`.
-    attributes: [f32; 6],
+    /// `uv`, colour, normal, then world position, each already multiplied by
+    /// `inv_w`.
+    attributes: [f32; VARYINGS],
 }
 
 fn to_screen(vertex: &ClipVertex, width: f32, height: f32) -> ScreenVertex {
@@ -98,13 +113,20 @@ fn to_screen(vertex: &ClipVertex, width: f32, height: f32) -> ScreenVertex {
         z: vertex.clip[2] * inv_w,
         inv_w,
         attributes: [
-            vertex.uv[0] * inv_w,
-            vertex.uv[1] * inv_w,
-            vertex.color[0] * inv_w,
-            vertex.color[1] * inv_w,
-            vertex.color[2] * inv_w,
-            vertex.color[3] * inv_w,
-        ],
+            vertex.uv[0],
+            vertex.uv[1],
+            vertex.color[0],
+            vertex.color[1],
+            vertex.color[2],
+            vertex.color[3],
+            vertex.normal[0],
+            vertex.normal[1],
+            vertex.normal[2],
+            vertex.world[0],
+            vertex.world[1],
+            vertex.world[2],
+        ]
+        .map(|value| value * inv_w),
     }
 }
 
@@ -150,14 +172,25 @@ impl Target<'_> {
 /// which is the same expression `mesh_fragment` evaluates.
 fn fragment(
     object: &MeshObject,
+    lights: &[LightRecord],
     texture: Option<&rasterize::CpuImage<'_>>,
-    uv: [f32; 2],
-    vertex_color: [f32; 4],
+    varying: &[f32; VARYINGS],
 ) -> [f32; 4] {
+    let uv = [varying[0], varying[1]];
+    let vertex_color = [varying[2], varying[3], varying[4], varying[5]];
+    let lit = if object.shaded {
+        light_factor(
+            lights,
+            [varying[9], varying[10], varying[11]],
+            [varying[6], varying[7], varying[8]],
+        )
+    } else {
+        [1.0; 3]
+    };
     let tint = [
-        vertex_color[0] * object.color.r,
-        vertex_color[1] * object.color.g,
-        vertex_color[2] * object.color.b,
+        vertex_color[0] * object.color.r * lit[0],
+        vertex_color[1] * object.color.g * lit[1],
+        vertex_color[2] * object.color.b * lit[2],
         vertex_color[3] * object.color.a,
     ];
     let Some(texture) = texture else {
@@ -181,9 +214,79 @@ fn fragment(
     ]
 }
 
+/// What the lights deliver at a surface point, per channel.
+///
+/// `normal` is the interpolated scene-space normal and is normalised here, a
+/// zero one delivering no directional light. The model is documented in
+/// `ravel_core::scene::light`; the shader's `light_factor` is its twin.
+fn light_factor(lights: &[LightRecord], world: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
+    let length = normal.iter().map(|c| c * c).sum::<f32>().sqrt();
+    let n = if length > 1e-12 {
+        normal.map(|c| c / length)
+    } else {
+        [0.0; 3]
+    };
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let mut total = [0.0f32; 3];
+    for light in lights {
+        let color = [light.color[0], light.color[1], light.color[2]];
+        let strength = if light.vector[3] == KIND_AMBIENT {
+            1.0
+        } else if light.vector[3] == KIND_DIRECTIONAL {
+            dot(n, [light.vector[0], light.vector[1], light.vector[2]]).max(0.0)
+        } else {
+            let to_light = [
+                light.vector[0] - world[0],
+                light.vector[1] - world[1],
+                light.vector[2] - world[2],
+            ];
+            let distance = dot(to_light, to_light).sqrt();
+            if distance > 1e-6 {
+                let ratio = distance / light.color[3];
+                dot(n, to_light.map(|c| c / distance)).max(0.0) / (1.0 + ratio * ratio)
+            } else {
+                0.0
+            }
+        };
+        for channel in 0..3 {
+            total[channel] += color[channel] * strength;
+        }
+    }
+    total
+}
+
+/// The inverse transpose of `model`'s upper 3x3, applied to `normal`: for
+/// columns `a`, `b`, `c` it is `[b × c, c × a, a × b] / det`, and only the sign
+/// of `det` is kept (a mirroring model flips it). Not normalised.
+fn normal_to_scene(model: &Mat4, normal: [f32; 3]) -> [f32; 3] {
+    let column = |index: usize| {
+        [
+            model.element(0, index),
+            model.element(1, index),
+            model.element(2, index),
+        ]
+    };
+    let cross = |a: [f32; 3], b: [f32; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let (a, b, c) = (column(0), column(1), column(2));
+    let (bc, ca, ab) = (cross(b, c), cross(c, a), cross(a, b));
+    let sign = if a[0] * bc[0] + a[1] * bc[1] + a[2] * bc[2] >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+    std::array::from_fn(|i| (bc[i] * normal[0] + ca[i] * normal[1] + ab[i] * normal[2]) * sign)
+}
+
 fn draw_triangle(
     target: &mut Target<'_>,
     object: &MeshObject,
+    lights: &[LightRecord],
     texture: Option<&rasterize::CpuImage<'_>>,
     corners: [ClipVertex; 3],
     write_depth: bool,
@@ -208,6 +311,7 @@ fn draw_triangle(
         fill_triangle(
             target,
             object,
+            lights,
             texture,
             [screen[0], screen[fan], screen[fan + 1]],
             write_depth,
@@ -218,6 +322,7 @@ fn draw_triangle(
 fn fill_triangle(
     target: &mut Target<'_>,
     object: &MeshObject,
+    lights: &[LightRecord],
     texture: Option<&rasterize::CpuImage<'_>>,
     mut v: [ScreenVertex; 3],
     write_depth: bool,
@@ -284,19 +389,14 @@ fn fill_triangle(
                 continue;
             }
             let inv_w = lambda[0] * v[0].inv_w + lambda[1] * v[1].inv_w + lambda[2] * v[2].inv_w;
-            let mut varying = [0.0f32; 6];
+            let mut varying = [0.0f32; VARYINGS];
             for (slot, value) in varying.iter_mut().enumerate() {
                 *value = (lambda[0] * v[0].attributes[slot]
                     + lambda[1] * v[1].attributes[slot]
                     + lambda[2] * v[2].attributes[slot])
                     / inv_w;
             }
-            let color = fragment(
-                object,
-                texture,
-                [varying[0], varying[1]],
-                [varying[2], varying[3], varying[4], varying[5]],
-            );
+            let color = fragment(object, lights, texture, &varying);
             target.blend(index, color);
             if write_depth {
                 target.depth[index] = z;
@@ -308,6 +408,7 @@ fn fill_triangle(
 fn draw_mesh(
     target: &mut Target<'_>,
     object: &MeshObject,
+    lights: &[LightRecord],
     textures: &Textures<'_>,
     write_depth: bool,
 ) {
@@ -326,12 +427,22 @@ fn draw_mesh(
             clip: transform(&object.mvp, vertex.position),
             uv: vertex.uv,
             color: data.colors.get(index).copied().unwrap_or([1.0; 4]),
+            normal: normal_to_scene(&object.model, vertex.normal),
+            world: object.model.transform_vec4([
+                vertex.position[0],
+                vertex.position[1],
+                vertex.position[2],
+                1.0,
+            ])[..3]
+                .try_into()
+                .expect("three components"),
         })
         .collect();
     for triangle in data.indices.chunks_exact(3) {
         draw_triangle(
             target,
             object,
+            lights,
             texture,
             [
                 clip[triangle[0] as usize],
@@ -377,7 +488,13 @@ pub(super) fn render(prepared: &Prepared) -> anyhow::Result<FrameBuffer> {
         depth: &mut depth,
     };
     for &index in &prepared.opaque {
-        draw_mesh(&mut target, &prepared.meshes[index], &textures, true);
+        draw_mesh(
+            &mut target,
+            &prepared.meshes[index],
+            &prepared.lights,
+            &textures,
+            true,
+        );
     }
 
     // Path objects draw through the 2D rasterizer into a scratch frame, then
@@ -389,7 +506,13 @@ pub(super) fn render(prepared: &Prepared) -> anyhow::Result<FrameBuffer> {
     for entry in &prepared.blended {
         match *entry {
             Blended::Mesh(index) => {
-                draw_mesh(&mut target, &prepared.meshes[index], &textures, false);
+                draw_mesh(
+                    &mut target,
+                    &prepared.meshes[index],
+                    &prepared.lights,
+                    &textures,
+                    false,
+                );
             }
             Blended::Path(index) => {
                 let path = &prepared.paths[index];

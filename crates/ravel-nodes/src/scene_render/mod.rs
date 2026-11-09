@@ -38,9 +38,11 @@
 //!
 //! - **Primitives** (`mesh.box` / `sphere` / …) emit ordinary `Primitive::Mesh`
 //!   geometry with `N` and `uv`; nothing here changes.
-//! - **Lighting** adds light records to the frame and shades in `mesh_fragment`;
-//!   `N` already reaches the fragment stage and `ObjectRecord` has the model
-//!   matrix that carries it to scene space.
+//! - **Lighting** is in: [`prepare`] turns the scene's lights into scene-space
+//!   `LightRecord`s (white ambient when there are none), and `mesh_fragment` /
+//!   `cpu::light_factor` shade a mesh that has `N` with them (Lambert; model in
+//!   `ravel_core::scene::light`). Nothing else changes for the primitives that
+//!   follow: they write `N` and are lit.
 //! - **Extrusion** emits meshes too; the back cap's winding is its author's,
 //!   which is why nothing is culled.
 //! - **Model import** emits meshes plus a basis change at the import boundary.
@@ -52,7 +54,11 @@
 //!
 //! - Translucent objects are sorted whole, so two that interleave in depth are
 //!   wrong (REQ-3D-007's scope line).
-//! - Nothing is back-face culled.
+//! - Nothing is back-face culled, and lighting is one-sided in the sense that
+//!   it trusts `N`: the back of a plane lit from the front is dark, as its
+//!   normal says.
+//! - Lighting has no shadows, no specular and no material; geometry without `N`
+//!   (every Path, a mesh that never wrote one) is not lit at all.
 //! - A Path object strokes at one width measured at its centroid.
 //! - Cap, join and dash attributes are not honoured on Path objects.
 //! - Path objects are clipped against the near plane before projection: only
@@ -74,6 +80,8 @@ use std::sync::Mutex;
 
 mod cpu;
 mod gpu;
+#[cfg(test)]
+mod lighting_tests;
 mod prepare;
 #[cfg(test)]
 mod tests;

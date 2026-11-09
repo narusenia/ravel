@@ -50,7 +50,7 @@ several plans here wait on its later units rather than on each other.
 | `properties-parameter-editors-plan.md` | Curve and colour-ramp parameter types and inline editors, `math.curve`, `color.ramp` | — (`style-attributes-plan.md` unit 6 for `field.ramp`) | REQ-UI-002, REQ-UI-012, REQ-CORE-012 |
 | `cache-plan.md` | Cache identity, byte budget, the output-stage frame cache, the green cache bar, layer-scoped invalidation and idle read-ahead — **the cross-cutting cache charter**; what is left is the disk tier (`CACHE-11`, measurement-gated) and the f16 pixel loops (`CACHE-Y`) | `gpu-compositing-plan.md` (unit 5 only) | REQ-CORE-006, REQ-CORE-002/011 |
 | `typography-plan.md` | Text layout, glyph geometry, path text, per-character modulation | `done/per-instance-modulation-plan.md` | REQ-MOGRAPH-004 |
-| `stateful-eval-plan.md` | `StatefulProcessor` and the simulation cache | — | REQ-CORE-011 |
+| `stateful-eval-plan.md` | `StatefulProcessor` and the simulation cache — **units 1–4 merged in #639; unit 5 (inputs from outside the scope) remains** | — | REQ-CORE-011 |
 | `particle-plan.md` | Particle simulation as point geometry | `stateful-eval-plan.md`, `done/per-instance-modulation-plan.md` | REQ-MOGRAPH-002 |
 | `effects-library-plan.md` | Colour, blur, distortion, generation, stylise, and time nodes | — | REQ-MOGRAPH-005 |
 | `gpu-resident-geometry-plan.md` | `GpuGeometry`, GPU-side instance expansion, WGSL fields — **phase 0 measured; verdict: proceed; unit 1 (`GpuGeometry`, `BufferPool`, shared VRAM allowance) merged in #638** | — | REQ-CORE-009, REQ-GPU-001/003 |

@@ -30,7 +30,8 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| SIM-1 | `StatefulProcessor` と sim キャッシュの骨格 | `stateful-eval-plan.md` |
+| SIM-5 | スコープの外から来る入力（時刻ごとの束縛と外部前提） | `stateful-eval-plan.md` |
+| PART-1 | `particle.simulate` の骨格 | `particle-plan.md` |
 | BLUR-4 | `comp.motion_blur` と殻フィールド（BLUR-3 完了で着手可能） | `motion-blur-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
 | VEC-4 | look-at・フロー場のゴールデン検証と文書（単位 1〜3・5〜8 が揃った） | `vector-field-plan.md` |
@@ -1236,20 +1237,21 @@ CPU / GPU 両方）。グリフが穴を持つ最初の図形だったので、`
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| SIM-1 | 🟡 | `StatefulProcessor` と sim キャッシュの骨格 | SCOPE-1 |
-| SIM-2 | ⬜ | 無効化 | SIM-1 |
-| SIM-3 | ⬜ | 暫定表示とバックグラウンド充填 | SIM-2 |
-| SIM-4 | ⬜ | 文書更新 | SIM-3 |
+| SIM-1 | ✅ #639 | `StatefulProcessor` と sim キャッシュの骨格 | SCOPE-1 |
+| SIM-2 | ✅ #639 | 無効化 | SIM-1 |
+| SIM-3 | ✅ #639 | 暫定表示とバックグラウンド充填 | SIM-2 |
+| SIM-4 | ✅ #639 | 文書更新 | SIM-3 |
+| SIM-5 | 🟡 | スコープの外から来る入力（時刻ごとの束縛と外部前提） | SIM-4 |
 
 ### パーティクル（REQ-MOGRAPH-002）
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| PART-1 | ⬜ | `particle.simulate` の骨格 | SIM-3 |
+| PART-1 | 🟡 | `particle.simulate` の骨格 | SIM-3 |
 | PART-2 | ⬜ | エミッタジオメトリからの発生 | PART-1 |
 | PART-3 | ⬜ | フィールドフォース | PART-1, MOD-3 |
 | PART-4 | ⬜ | スクラブ耐性と他ノードへの流用 | PART-2, PART-3 |
-| PART-5 | ⬜ | 文書更新 | PART-4 |
+| PART-5 | ⬜ | 文書更新 | PART-4, SIM-5 |
 | PART-6 | ⬜ | GPU シミュレーション（**実施と決定**。前提 2 件を満たしてから） | PART-5, GPU-1, GPU-5, **VRAM キャッシュ方式の決着** |
 
 **PART-6 は「実施」と決定した**（2026-07-29）。ただし測定

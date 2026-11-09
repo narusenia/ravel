@@ -44,6 +44,12 @@ pub const DEFAULT_RADIUS: f32 = 1000.0;
 /// divides by zero.
 pub const MIN_RADIUS: f32 = 1e-3;
 
+/// The strongest a light gets. The render target is half float (max 65504),
+/// so a lit colour must stay well inside it; a keyframe or expression beyond
+/// this is clamped the same way the parameter is.
+pub const MAX_INTENSITY: f32 = 1000.0;
+const _: () = assert!(MAX_INTENSITY < 65504.0, "a lit colour must fit half float");
+
 /// What a light does.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LightKind {
@@ -64,7 +70,8 @@ pub struct Light {
     pub kind: LightKind,
     /// Linear RGB, each channel nominally in `[0, 1]`.
     pub color: [f32; 3],
-    /// Multiplier on `color`; above 1 over-exposes, below 0 is clamped to 0.
+    /// Multiplier on `color`; above 1 over-exposes, clamped to
+    /// `[0, MAX_INTENSITY]`.
     pub intensity: f32,
 }
 
@@ -79,7 +86,26 @@ impl Light {
 
     /// `color * intensity`, the light's strength per channel.
     pub fn radiance(&self) -> [f32; 3] {
-        let k = self.intensity.max(0.0);
+        let k = self.intensity.clamp(0.0, MAX_INTENSITY);
         self.color.map(|c| c * k)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn white(intensity: f32) -> Light {
+        Light {
+            intensity,
+            ..Light::DEFAULT_AMBIENT
+        }
+    }
+
+    #[test]
+    fn radiance_clamps_intensity_to_what_the_render_target_holds() {
+        assert_eq!(white(-2.0).radiance(), [0.0; 3]);
+        assert_eq!(white(2.5).radiance(), [2.5; 3]);
+        assert_eq!(white(1e6).radiance(), [MAX_INTENSITY; 3]);
     }
 }

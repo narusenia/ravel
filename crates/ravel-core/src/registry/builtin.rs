@@ -2074,7 +2074,7 @@ fn scene_light() -> NodeTemplate {
             light::DEFAULT_POSITION[2],
         ))
         .with_param(float_parameter("radius", light::DEFAULT_RADIUS))
-        .with_param_range("intensity", 0.0..=1e6, 0.0..=4.0)
+        .with_param_range("intensity", 0.0..=light::MAX_INTENSITY, 0.0..=4.0)
         .with_param_range("direction", -1e9..=1e9, -1.0..=1.0)
         .with_param_range("position", -1e9..=1e9, -5000.0..=5000.0)
         .with_param_range("radius", light::MIN_RADIUS..=1e9, 10.0..=5000.0)

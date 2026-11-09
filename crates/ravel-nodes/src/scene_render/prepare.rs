@@ -1338,4 +1338,62 @@ mod clip_tests {
         let last = positions.get3(positions.len() - 1).unwrap();
         assert_eq!((last.0, last.2), (40.0, 100.0), "ends on the end point");
     }
+
+    /// The point at the cut interpolates every numeric point column at the
+    /// crossing, not just `P`: halfway between depth 2 and depth -2 is
+    /// halfway between the two points' colours, alphas and uvs.
+    #[test]
+    fn a_cut_point_interpolates_its_attributes() {
+        let mut geometry = Geometry::from_points3(vec![Vec3(0.0, 0.0, 2.0), Vec3(4.0, 8.0, -2.0)]);
+        let points = geometry.points_mut();
+        points
+            .insert(
+                names::CD,
+                AttributeArray::Color(vec![
+                    Color::new(1.0, 0.0, 0.0, 1.0),
+                    Color::new(0.0, 0.0, 1.0, 1.0),
+                ]),
+            )
+            .unwrap();
+        points
+            .insert(names::ALPHA, AttributeArray::F32(vec![1.0, 0.0]))
+            .unwrap();
+        points
+            .insert(
+                names::UV,
+                AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(1.0, 0.5)]),
+            )
+            .unwrap();
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        let (out, roles) = near_clipped_paths(&geometry, &Mat4::IDENTITY)
+            .unwrap()
+            .expect("the front half is kept");
+        assert_eq!(roles, vec![Role::Whole]);
+        let cut = 1;
+        let at = out
+            .positions(Domain::Point)
+            .unwrap()
+            .unwrap()
+            .get3(cut)
+            .unwrap();
+        assert_eq!((at.0, at.1, at.2), (2.0, 4.0, 0.0), "P at the crossing");
+        let column = |name: &str| (**out.points().get(name).unwrap()).clone();
+        let AttributeArray::Color(cd) = column(names::CD) else {
+            panic!("Cd is a colour")
+        };
+        assert_eq!((cd[cut].r, cd[cut].g, cd[cut].b), (0.5, 0.0, 0.5));
+        let AttributeArray::F32(alpha) = column(names::ALPHA) else {
+            panic!("alpha is a float")
+        };
+        assert_eq!(alpha[cut], 0.5);
+        let AttributeArray::Vec2(uv) = column(names::UV) else {
+            panic!("uv is a Vec2")
+        };
+        assert_eq!((uv[cut].0, uv[cut].1), (0.5, 0.25));
+        // The kept end is untouched.
+        assert_eq!(alpha[0], 1.0);
+    }
 }

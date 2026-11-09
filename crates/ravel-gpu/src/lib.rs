@@ -10,6 +10,9 @@
 //!   batched per frame (see [`dispatch`]).
 //! * [`RasterPipeline`] / [`QuadDraw`] — the instanced render pass the
 //!   rasterizer draws with, batched into the same encoder.
+//! * [`ScenePass`] — the triangle-mesh render pass `scene.render` draws a 3D
+//!   scene with: depth attachment, static mesh buffers apart from per-object
+//!   records, batched into the same encoder.
 //! * [`TexturePool`] — texture reuse with LRU eviction under a VRAM budget.
 //! * [`BufferPool`] — the same for storage, vertex and index buffers.
 //! * [`GpuGeometry`] — the GPU-resident counterpart of the CPU geometry
@@ -46,6 +49,7 @@ pub mod frame;
 pub mod geometry;
 pub mod interop;
 pub mod raster;
+pub mod scene_pass;
 pub mod shader;
 pub(crate) mod staging;
 pub mod texture_desc;
@@ -72,6 +76,10 @@ pub use error::{GpuError, GpuResult};
 pub use frame::GpuFrameBuffer;
 pub use geometry::{GpuColumn, GpuGeometry, column_stride, column_wgsl_type};
 pub use raster::{BlendMode, ColorTarget, RasterPipeline};
+pub use scene_pass::{
+    DepthBuffer, DrawClass, MeshBuffers, MeshVertex, QuadBatch, SceneCall, ScenePass,
+    ScenePipelines,
+};
 pub use shader::{CompiledShader, ShaderManager, validate_wgsl};
 pub use texture_desc::{TextureFormat, TextureUsage};
 pub use texture_pool::{LruBudget, PooledTexture, TextureKey, TexturePool};

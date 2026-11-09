@@ -1688,3 +1688,25 @@ fn a_concave_path_cut_by_the_near_plane_strokes_no_bridge_between_its_pieces() {
     assert_u_floor_has_no_bridge(&cpu_frame(&scene, 200, 200), "cpu");
     assert_u_floor_has_no_bridge(&Rig::new().frame(&scene, 200, 200), "gpu");
 }
+
+#[test]
+fn a_scaled_object_flattens_its_curves_to_the_same_pixel_tolerance() {
+    // Radius 0.4 object units scaled 100x about the origin, then moved to the
+    // canvas centre: a circle of 40 pixels. Flattened at the object's own
+    // 0.25 units the four quarter arcs would be chords 25 pixels off.
+    let mut transform = Transform3D::from_translation([50.0, 50.0, 0.0]);
+    transform.scale = [100.0, 100.0, 100.0];
+    let scene = Scene::from_camera(pixel_camera(100, 100)).with_object(SceneObject::geometry(
+        Arc::new(bezier_circle(0.0, 0.0, 0.0, 0.4)),
+        transform,
+    ));
+    assert_round(&cpu_frame(&scene, 100, 100), 50.0, 50.0, 40.0, 1.5, "cpu");
+    assert_round(
+        &Rig::new().frame(&scene, 100, 100),
+        50.0,
+        50.0,
+        40.0,
+        1.5,
+        "gpu",
+    );
+}

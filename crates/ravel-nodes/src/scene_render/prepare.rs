@@ -758,9 +758,10 @@ fn materialize(
 /// non-zero.
 ///
 /// The flattener's tolerance is in its own units (pixels). It runs on the
-/// control polygon scaled by the pixels per scene unit at the **nearest**
-/// point of the path, so the error it leaves is under a quarter pixel there
-/// and smaller further away. Flattening in scene space before clipping is the
+/// control polygon scaled by the pixels per object unit (the object's own
+/// scale times the pixels per world unit) at the **nearest** control point or
+/// handle, so the error it leaves is under a quarter pixel there and smaller
+/// further away. Flattening in scene space before clipping is the
 /// simple correct order: a curve crossing the near plane is clipped as the
 /// polyline it is, and the flattener never sees a perspective divide.
 /// `z` follows the cubic whose `z` handles are the end points' `z`, so a curve
@@ -790,10 +791,46 @@ fn flatten_curves(
         return Ok(None);
     }
     let point = |i: usize| positions.get3(i).unwrap_or(Vec3(0.0, 0.0, 0.0));
+    // Pixels per **object** unit: the object's own scale times the pixels per
+    // world unit. A curve lies inside the convex hull of its control points,
+    // handles included, and depth is affine, so the nearest the curve can be
+    // is the nearest of those points.
+    let linear = |axis: [f32; 3]| {
+        let (o, a) = (point_mul(world, [0.0; 3]), point_mul(world, axis));
+        ((a[0] - o[0]).powi(2) + (a[1] - o[1]).powi(2) + (a[2] - o[2]).powi(2)).sqrt()
+    };
+    let object_scale = linear([1.0, 0.0, 0.0]).max(linear([0.0, 1.0, 0.0]));
+    let handles = |column: &Option<Vec<Vec2>>, i: usize| {
+        column
+            .as_ref()
+            .and_then(|c| c.get(i).copied())
+            .unwrap_or(Vec2(0.0, 0.0))
+    };
     let scale = (0..count)
-        .map(|i| {
-            let p = point_mul(world, [point(i).0, point(i).1, point(i).2]);
-            projector.pixels_per_unit(p)
+        .flat_map(|i| {
+            let p = point(i);
+            [
+                (p.0, p.1, p.2),
+                (
+                    p.0 + handles(&out_tans, i).0,
+                    p.1 + handles(&out_tans, i).1,
+                    p.2,
+                ),
+                (
+                    p.0 + handles(&in_tans, i).0,
+                    p.1 + handles(&in_tans, i).1,
+                    p.2,
+                ),
+            ]
+        })
+        .filter_map(|(x, y, z)| {
+            let world_point = point_mul(world, [x, y, z]);
+            // A point behind the camera has no scale (its divide inverts).
+            let in_view = projector.project(
+                &Mat4::IDENTITY,
+                [world_point[0], world_point[1], world_point[2]],
+            )[3] > 0.0;
+            in_view.then(|| projector.pixels_per_unit(world_point) * object_scale)
         })
         .fold(1.0_f32, f32::max);
 

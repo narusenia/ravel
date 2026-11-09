@@ -159,6 +159,24 @@ Outliner は親子を表示するが「表示のみ、D&D 不可」（`ui-spec.m
 - `docs/implementation/plan.md`: 該当箇所。
 - `parent` の設定 UI（単位 5）を `docs/ui-impl-status.md` の Properties 表へ。
 
+### 単位 6: 殻プロパティの式入力（`SHELL-6`）
+
+- **入力欄は `ravel-widgets` の式エディタを再利用する**（`ExpressionEditor` と
+  `expression_editor_state`、語彙は `Scope::parameter_context()`）。殻の入力が
+  先に別の欄で作られると、構文の色分け・補完・エラー下線が二重になる。ホストの
+  義務は 2 つ: 状態を作るたびに `theme_tokens::track_expression_editor` を呼ぶ
+  （パレット切替で色が古くならない）、`Change` のたびに `set_expression_error`
+  で下線を付け直す（kit が編集のたびに消す）。Properties の
+  `build_expression_inputs` が実例
+- 付け外しと draft の機構は `EXPR-4` のものを殻のコミット経路へ載せ替える
+  （本文は [`backlog.md`](backlog.md) の SHELL-6 の説明）
+
+**完了条件**
+
+- 殻の式の編集は 1 undo ステップ（打鍵ごとに積まない）
+- パレット切替で式エディタの色が変わる
+- 下線が `Change` のたびと、undo / redo / 外部編集による同期のあとに付け直される
+
 ## 検証
 
 - ゴールデンは CPU 経路。

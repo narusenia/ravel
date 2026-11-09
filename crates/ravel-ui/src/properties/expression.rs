@@ -43,7 +43,7 @@
 
 use ravel_core::animation::channel::{AnimationChannel, ChannelSource, ParameterExpression};
 use ravel_core::eval::EvalContext;
-use ravel_core::expression::Span;
+use ravel_core::expression::{Scope, Span, Vocabulary, vocabulary};
 use ravel_core::graph::ParameterValue;
 
 /// How many animation channels a parameter carries, or `None` when it carries
@@ -122,6 +122,56 @@ pub fn compile_diagnostic(source: &str) -> Option<(String, Span)> {
     ParameterExpression::new(source)
         .error()
         .map(|error| (error.to_string(), error.span))
+}
+
+/// Which vocabulary an expression box is checked and completed against.
+///
+/// A parameter expression sees `frame`, `fps` and the resolutions; a field
+/// expression adds `elem.count` and the geometry attributes (`@P`). The two
+/// compile differently, so a box has to know which one it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExpressionScope {
+    /// An animation channel's expression ([`Scope::parameter_context`]).
+    Parameter,
+    /// The source of a `field.expression` node ([`Scope::field_context`]).
+    Field,
+}
+
+impl ExpressionScope {
+    /// The scope the compiler checks the source against.
+    pub fn scope(self) -> Scope {
+        match self {
+            Self::Parameter => Scope::parameter_context(),
+            Self::Field => Scope::field_context(),
+        }
+    }
+
+    /// What completion offers in this scope.
+    pub fn vocabulary(self) -> Vocabulary {
+        vocabulary(&self.scope())
+    }
+}
+
+/// The expression scope of a plain string parameter, if it holds an expression.
+///
+/// A string parameter carries no marker that it is source code (the stored form
+/// is a `String`, and adding a marker would touch the registry), so the few
+/// that are are named here. Everything else stays a text box.
+pub fn string_parameter_scope(type_key: &str, key: &str) -> Option<ExpressionScope> {
+    match (type_key, key) {
+        ("field.expression", "expression") => Some(ExpressionScope::Field),
+        _ => None,
+    }
+}
+
+/// [`compile_diagnostic`] for a given scope.
+pub fn compile_diagnostic_in(source: &str, scope: ExpressionScope) -> Option<(String, Span)> {
+    match scope {
+        ExpressionScope::Parameter => compile_diagnostic(source),
+        ExpressionScope::Field => ravel_core::expression::compile(source, &scope.scope())
+            .err()
+            .map(|error| (error.to_string(), error.span)),
+    }
 }
 
 /// Whether any component of the parameter is driven by an expression.
@@ -320,6 +370,38 @@ mod tests {
     use ravel_core::animation::interpolation::Interpolation;
     use ravel_core::id::{NodeId, OutputPortIndex};
     use ravel_core::types::FrameRate;
+
+    #[test]
+    fn the_field_scope_offers_attributes_and_the_parameter_scope_does_not() {
+        let field = ExpressionScope::Field.vocabulary();
+        let parameter = ExpressionScope::Parameter.vocabulary();
+        assert!(field.attributes.iter().any(|a| a.name == "P"));
+        assert!(parameter.attributes.is_empty());
+        assert!(field.variables.iter().any(|v| v == "elem.count"));
+        assert!(!parameter.variables.iter().any(|v| v == "elem.count"));
+        assert!(parameter.variables.iter().any(|v| v == "frame"));
+    }
+
+    #[test]
+    fn only_the_expression_field_parameter_is_a_field_expression() {
+        assert_eq!(
+            string_parameter_scope("field.expression", "expression"),
+            Some(ExpressionScope::Field)
+        );
+        assert_eq!(string_parameter_scope("field.expression", "default"), None);
+        assert_eq!(
+            string_parameter_scope("field.attribute", "expression"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_field_source_is_checked_against_the_field_vocabulary() {
+        assert!(compile_diagnostic_in("@P.x * 2", ExpressionScope::Field).is_none());
+        let (_, span) = compile_diagnostic_in("@P.x *", ExpressionScope::Field).expect("broken");
+        assert!(span.end as usize <= "@P.x *".len());
+        assert!(compile_diagnostic_in("@P.x", ExpressionScope::Parameter).is_some());
+    }
 
     fn ctx() -> EvalContext {
         EvalContext::new(0, FrameRate::new(30, 1), (1920, 1080))

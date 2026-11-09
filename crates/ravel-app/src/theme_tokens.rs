@@ -21,8 +21,9 @@
 
 use std::collections::HashMap;
 
-use gpui::{App, Global};
+use gpui::{App, Global, WeakEntity};
 use gpui_component::{ThemeConfig, ThemeMode, ThemeSet};
+use ravel_widgets::EditorState;
 use ravel_widgets::tokens::{self, RavelTheme, ThemeFile, hex_color_string};
 
 /// Derive gpui-component's theme from a Ravel one.
@@ -230,6 +231,40 @@ pub fn apply_ravel_theme(name: &str, mode: tokens::ThemeMode, cx: &mut App) {
             .resolve()
         });
     ravel_widgets::set_active_tokens(resolved, cx);
+    refresh_expression_editors(cx);
+}
+
+/// The expression editors alive in the app, so a palette switch can reach them.
+///
+/// An expression editor snapshots the token colours when its text changes, and a
+/// palette switch changes no text. The widget cannot observe the theme itself
+/// (`observe-global` is linted out of `ravel-widgets`), so whoever installs the
+/// tokens refreshes them: this is the one place that does, which keeps the
+/// callers — every panel that hosts an editor — from each needing an observer.
+#[derive(Default)]
+struct ExpressionEditors(Vec<WeakEntity<EditorState>>);
+
+impl Global for ExpressionEditors {}
+
+/// Register an expression editor state for palette refreshes. Dropped states
+/// are pruned here too, so rebuilds without a palette switch do not grow the list.
+pub fn track_expression_editor(state: &gpui::Entity<EditorState>, cx: &mut App) {
+    let editors = &mut cx.default_global::<ExpressionEditors>().0;
+    editors.retain(|editor| editor.upgrade().is_some());
+    editors.push(state.downgrade());
+}
+
+/// Re-read the colours of every live expression editor; returns how many.
+fn refresh_expression_editors(cx: &mut App) -> usize {
+    let live: Vec<_> = {
+        let editors = cx.default_global::<ExpressionEditors>();
+        editors.0.retain(|editor| editor.upgrade().is_some());
+        editors.0.iter().filter_map(WeakEntity::upgrade).collect()
+    };
+    for editor in &live {
+        ravel_widgets::refresh_expression_colours(editor, cx);
+    }
+    live.len()
 }
 
 #[cfg(test)]
@@ -282,5 +317,36 @@ mod ravel_theme_tests {
                 tokens::Colors::dark(),
             );
         });
+    }
+
+    #[gpui::test]
+    fn a_palette_switch_refreshes_each_live_expression_editor(cx: &mut gpui::TestAppContext) {
+        use ravel_core::expression::{Scope, vocabulary};
+        cx.update(gpui_component::init);
+        let cx = cx.add_empty_window();
+        let (kept, dropped) = cx.update(|window, cx| {
+            let make = |window: &mut gpui::Window, cx: &mut App| {
+                let state = ravel_widgets::expression_editor_state(
+                    "1",
+                    vocabulary(&Scope::parameter_context()),
+                    window,
+                    cx,
+                );
+                track_expression_editor(&state, cx);
+                state
+            };
+            (make(window, cx), make(window, cx))
+        });
+        cx.update(|_, cx| assert_eq!(refresh_expression_editors(cx), 2));
+        drop(dropped);
+        cx.update(|_, cx| {
+            apply_ravel_theme("gone", tokens::ThemeMode::Dark, cx);
+            assert_eq!(
+                refresh_expression_editors(cx),
+                1,
+                "the dropped one is pruned"
+            );
+        });
+        drop(kept);
     }
 }

@@ -1922,6 +1922,7 @@ struct ExpressionBinding {
 /// (`field.expression`), with the compile error of the text it holds.
 struct FieldExpressionBinding {
     state: Entity<EditorState>,
+    scope: ExpressionScope,
     /// The message shown under the box; tracks the text as it is typed.
     error: Option<String>,
     #[allow(dead_code)]
@@ -3915,7 +3916,7 @@ impl PropertiesGpuiPanel {
 
     /// The same sync for the expression boxes of string parameters.
     fn sync_field_expression_widgets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mut updates: Vec<(Entity<EditorState>, String)> = Vec::new();
+        let mut updates: Vec<(String, Entity<EditorState>, ExpressionScope, String)> = Vec::new();
         for section in &self.sections {
             for field in &section.fields {
                 let PropertyField::String { key, value } = field else {
@@ -3927,12 +3928,30 @@ impl PropertiesGpuiPanel {
                 };
                 let state = binding.state.read(cx);
                 if !state.focus_handle(cx).is_focused(window) && state.value().as_ref() != value {
-                    updates.push((binding.state.clone(), value.clone()));
+                    updates.push((
+                        key.clone(),
+                        binding.state.clone(),
+                        binding.scope,
+                        value.clone(),
+                    ));
                 }
             }
         }
-        for (state, value) in updates {
+        for (key, state, scope, value) in updates {
+            // `set_value` clears the underline and emits no `Change`, so the
+            // message and underline of the new text are set here.
+            let diagnostic = expression::compile_diagnostic_in(&value, scope);
             state.update(cx, |state, cx| state.set_value(value, window, cx));
+            set_expression_error(
+                &state,
+                diagnostic
+                    .as_ref()
+                    .map(|(message, span)| (*span, message.as_str())),
+                cx,
+            );
+            if let Some((_, binding)) = self.field_expressions.iter_mut().find(|(k, _)| *k == key) {
+                binding.error = diagnostic.map(|(message, _)| message);
+            }
         }
     }
 
@@ -4793,6 +4812,7 @@ impl PropertiesGpuiPanel {
             key.to_string(),
             FieldExpressionBinding {
                 state,
+                scope,
                 error: diagnostic.map(|(message, _)| message),
                 sub,
             },
@@ -4914,7 +4934,7 @@ impl PropertiesGpuiPanel {
     /// like the other widget syncs. A component with a draft is skipped: the
     /// author is mid-edit and owns the text until they confirm or discard it.
     fn sync_expression_widgets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let mut updates: Vec<(Entity<EditorState>, String)> = Vec::new();
+        let mut updates: Vec<(String, usize, Entity<EditorState>, String)> = Vec::new();
         for (key, component, binding) in &self.expression_inputs {
             if self.expression_draft(key, *component).is_some() {
                 continue;
@@ -4923,11 +4943,18 @@ impl PropertiesGpuiPanel {
                 continue;
             };
             if binding.state.read(cx).value().as_ref() != source {
-                updates.push((binding.state.clone(), source.to_string()));
+                updates.push((
+                    key.clone(),
+                    *component,
+                    binding.state.clone(),
+                    source.to_string(),
+                ));
             }
         }
-        for (state, value) in updates {
+        for (key, component, state, value) in updates {
             state.update(cx, |state, cx| state.set_value(value, window, cx));
+            // `set_value` clears the underline and emits no `Change`.
+            self.show_expression_error(&key, component, &state, cx);
         }
     }
 
@@ -10842,6 +10869,64 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         assert_eq!(underlines(&state, cx), 0, "fixing it clears the underline");
+    }
+
+    /// `set_value` drops the underline and emits no `Change`, so a box synced from
+    /// the document (undo, redo, external edit) must get it back for the new text.
+    #[gpui::test]
+    fn an_external_change_keeps_the_underline_matching_the_new_text(cx: &mut TestAppContext) {
+        let (window, _editor, _project, _path, _node_id) =
+            setup_target_for_node(cx, field_expression_node("@P.x"));
+        let state = expression_box(&window, "expression", cx);
+        window
+            .update(cx, |panel, window, cx| {
+                for section in &mut panel.sections {
+                    for field in &mut section.fields {
+                        if let PropertyField::String { key, value } = field
+                            && key == "expression"
+                        {
+                            *value = "@P.x *".into();
+                        }
+                    }
+                }
+                panel.sync_field_expression_widgets(window, cx);
+            })
+            .unwrap();
+        assert_eq!(underlines(&state, cx), 1, "the synced broken source");
+        window
+            .read_with(cx, |panel, _| {
+                assert!(panel.field_expressions[0].1.error.is_some());
+            })
+            .unwrap();
+
+        // The parameter expression box, synced from a broken document source.
+        let (window, _editor, _project, _path, _node_id) = setup_target_for_node(
+            cx,
+            node_with_amount(ChannelSource::Expression(ParameterExpression::new(
+                "frame *",
+            ))),
+        );
+        let state = expression_box(&window, "amount", cx);
+        window
+            .update(cx, |panel, window, cx| {
+                if let Some((_, row)) = panel.expressions.iter_mut().find(|(k, _)| k == "amount") {
+                    row.components[0] = Some(ExpressionComponent {
+                        source: "frame + *".into(),
+                        error: Some("bad".into()),
+                        error_span: Some(Span { start: 8, end: 9 }),
+                    });
+                }
+                panel.sync_expression_widgets(window, cx);
+            })
+            .unwrap();
+        let range = state.read_with(cx, |state, _| {
+            state.diagnostics().and_then(|set| {
+                set.range(0..state.text().len())
+                    .next()
+                    .map(|d| d.range.clone())
+            })
+        });
+        assert_eq!(range, Some(8..9), "the underline follows the synced text");
     }
 
     fn field_expression_node(source: &str) -> Node {

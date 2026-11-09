@@ -1144,7 +1144,10 @@ pub fn port_at_local_pos(
     lx: f32,
     ly: f32,
 ) -> Option<PortHit> {
-    let mut hit = None;
+    // Nearest port within the radius: at low zoom neighbouring hit circles
+    // overlap, and taking the last match would make some ports unreachable.
+    let mut hit: Option<PortHit> = None;
+    let mut best = PORT_HIT_RADIUS;
     for node in z_ordered(graph) {
         let screen = viewport.flow_to_screen(node.metadata.position.0, node.metadata.position.1);
         let size = node_size_or_default(node_sizes, node, viewport.zoom, flow);
@@ -1152,7 +1155,8 @@ pub fn port_at_local_pos(
         for (i, _input) in node.inputs.iter().enumerate() {
             let (cx, cy) = port_screen_center(node, screen, size, viewport.zoom, flow, false, i);
             let dist = ((lx - cx).powi(2) + (ly - cy).powi(2)).sqrt();
-            if dist <= PORT_HIT_RADIUS {
+            if dist <= best {
+                best = dist;
                 hit = Some(PortHit {
                     node_id: node.id,
                     is_output: false,
@@ -1165,7 +1169,8 @@ pub fn port_at_local_pos(
         for (i, _output) in node.outputs.iter().enumerate() {
             let (cx, cy) = port_screen_center(node, screen, size, viewport.zoom, flow, true, i);
             let dist = ((lx - cx).powi(2) + (ly - cy).powi(2)).sqrt();
-            if dist <= PORT_HIT_RADIUS {
+            if dist <= best {
+                best = dist;
                 hit = Some(PortHit {
                     node_id: node.id,
                     is_output: true,
@@ -2192,14 +2197,19 @@ mod tests {
     /// (`port_screen_center`) and painting and picking both read it.
     #[test]
     fn port_centres_round_trip_through_the_hit_test_in_both_flows() {
-        for flow in [FlowDirection::Horizontal, V] {
+        // Low zooms included: neighbouring hit circles overlap there, and the
+        // nearest port must still win.
+        for (flow, zoom) in [FlowDirection::Horizontal, V]
+            .into_iter()
+            .flat_map(|flow| [1.5, 0.3, Viewport::MIN_ZOOM].map(|zoom| (flow, zoom)))
+        {
             for (inputs, outputs) in [(1, 1), (2, 1), (3, 2), (8, 1), (12, 3)] {
                 let node = ported(1, inputs, outputs).with_position(40.0, 30.0);
                 let graph = Graph::new().add_node(node).unwrap();
                 let vp = Viewport {
                     x: 7.0,
                     y: 5.0,
-                    zoom: 1.5,
+                    zoom,
                 };
                 let sizes = sizes_of(&graph, vp.zoom, flow);
                 let node = graph.node(NodeId::new(1)).unwrap();

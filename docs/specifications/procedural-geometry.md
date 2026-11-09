@@ -124,6 +124,7 @@ CPU 経路は texel を読むので、GPU 常駐フレームで来た画像は�
 | `orient` | Instance | Vec4 | 姿勢（クォータニオン）。**3D のみ**（REQ-3D-003） | —（3D は未配線） |
 | `scale3` | Instance | Vec3 | スケール。**3D のみ** | —（同上） |
 | `N` | Point/Primitive | Vec3 | 法線。**3D のみ**（ライティングが読む） | —（同上） |
+| `uv` | Point | Vec2 | テクスチャ座標。**3D のみ**。`(0, 0)` が画像の左上で `v` は下向きに増える（FrameBuffer の行と同じ向き）。`scene.render` は画像を**この列で**サンプルし、暗黙の矩形 UV を持たない | —（列が無ければ `(0, 0)`） |
 | `Cd` | Point/Instance | Color | 色（＝塗り色。`style.fill` が書く）。**Point ドメインの `Cd` は、パスの頂点に書くと線の頂点色になる**（塗りには効かない。下記） | Instance: 白（色味）。Primitive: `rasterize` の `color`。Point: パスの頂点なら所属プリミティブの線色、それ以外は `color` |
 | `alpha` | Point/Instance | F32 | 不透明度 | 1 |
 | `pscale` | Point | F32 | ポイント描画径 | 2（`DEFAULT_PSCALE`） |
@@ -299,7 +300,7 @@ Path 前提のノードが `Mesh` を受けたときの挙動は種別ごとに�
 | `geometry.sort` | Primitive / Instance ドメインは種別非依存。**Point ドメインの並べ替えは Mesh で明示エラー**（`RequiresPathPrimitives`） |
 | 属性系（`attribute.set` / `.promote` / `.transfer`、`field.apply`） | 種別非依存で素通しする。列だけを触りトポロジを見ない |
 | 弧長・パス前提（`attribute.path_sample` / `scatter.path_array`、`geometry.resample` / `measure` の path 系、`attribute.curveu`） | **明示エラー**。Mesh に弧長は定義されない。黙って読み飛ばさない |
-| ラスタライズ（`rasterize`） | **明示エラー**。三角形は `scene.render` が描く（3D-4） |
+| ラスタライズ（`rasterize`） | **明示エラー**。三角形は `scene.render` が描く |
 
 **明示エラーは `GeometryError::RequiresPathPrimitives`**（`{操作名}
 requires path primitives: …`）。`RequiresPlanarP` と同じ粒度で、「この操作は
@@ -388,6 +389,16 @@ Path を要求する」ことがメッセージだけで分かる形にする。
 - **`Scene → FrameBuffer` は `scene.render` のみが行う**（REQ-3D-001）。
   Mesh を含むジオメトリは `rasterize` ではなく Scene 経由で描く。
   `Geometry → Scene` は `scene.add` が 3D 変換と組にして行う。
+  描画は不透明 Mesh の深度パスと、半透明 Mesh・画像インスタンス・Path を
+  オブジェクト単位の view 空間重心 `z` で back-to-front に並べる第 2 パスの
+  2 段で、第 2 パスは深度を**読むが書かない**。**交差する半透明同士は
+  保証しない**（オブジェクト単位のソートの帰結）。面は両面描画（カリング
+  しない）。Path オブジェクトは `P` をカメラで画素へ投影してから `rasterize`
+  と同じ解析的な経路で描く — 曲線（`in_tan` / `out_tan`）は投影の前にシーン空間で `rasterize` と同じ平坦化器で折れ線にする（許容誤差は最も近い点の画素 / 単位で 0.25 画素以下。`z` は両端の `z` を制御点とする 3 次）。線幅・スプライト半径は
+  オブジェクトの重心位置での画素 / 単位で一律に拡縮し、cap / join / dash は
+  効かない。投影前に近クリップ面で切り、カメラの手前側だけを描く（閉じたパスは
+  見える部分ごとの閉じた多角形で塗り、線は近クリップ面に沿う辺を除いた折れ線で引く。曲線は平坦化が先なので折れ線として切れる）。画像インスタンスは `uv` 付きの単位正方形に貼った Mesh として
+  描かれ、サンプラは Mesh の `uv` 列だけを読む。
 - 既存 Layer ソース `Shape` はコンパイル時（composition/compile.rs）に
   `ShapeGeometry → Rasterize` チェーンへ展開する。
 - `Table`（REQ-DATA-001）は行×型付き列。`Table → Geometry` はバインディング

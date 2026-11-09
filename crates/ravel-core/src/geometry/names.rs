@@ -35,6 +35,12 @@ pub const ORIENT: &str = "orient";
 pub const SCALE3: &str = "scale3";
 /// Normal (Vec3, Point/Primitive), 3D only. Lighting reads it.
 pub const N: &str = "N";
+/// Texture coordinate (Vec2, Point), 3D only. `(0, 0)` is the top-left texel of
+/// the sampled image and `v` grows downwards, the same orientation a frame
+/// buffer's rows have. `scene.render` samples an image through this column and
+/// never through an implicit rectangle, so replacing it changes what a mesh
+/// shows.
+pub const UV: &str = "uv";
 /// Color (Color, Point/Instance).
 pub const CD: &str = "Cd";
 /// Opacity (F32, Point/Instance).
@@ -143,7 +149,7 @@ pub const PIECE: &str = "piece";
 /// Every reserved name above, in declaration order. `geometry::absent`'s
 /// coverage test walks this list, so a name added here has to be given an
 /// absent value (or listed as having none) before the tests pass.
-pub const ALL: [&str; 34] = [
+pub const ALL: [&str; 35] = [
     P,
     ANCHOR,
     INDEX,
@@ -155,6 +161,7 @@ pub const ALL: [&str; 34] = [
     ORIENT,
     SCALE3,
     N,
+    UV,
     CD,
     ALPHA,
     PSCALE,
@@ -203,6 +210,7 @@ mod tests {
                 "orient",
                 "scale3",
                 "N",
+                "uv",
                 "Cd",
                 "alpha",
                 "pscale",

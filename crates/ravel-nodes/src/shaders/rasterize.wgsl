@@ -3,6 +3,10 @@
 
 struct RasterParams {
     resolution: vec2<f32>,
+    // x: selector read only by the test probe in `sample.rs`.
+    // y: clip-space depth of every fragment of the draw — 0 for the 2D
+    //    rasterizer (no depth attachment), the object's depth for
+    //    `scene.render`.
     _pad: vec2<f32>,
 }
 
@@ -63,7 +67,7 @@ fn raster_vertex(
         1.0 - pixel.y * 2.0 / params.resolution.y,
     );
     var output: VertexOutput;
-    output.position = vec4<f32>(ndc, 0.0, 1.0);
+    output.position = vec4<f32>(ndc, params._pad.y, 1.0);
     output.item_index = instance_index;
     return output;
 }

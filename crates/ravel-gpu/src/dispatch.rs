@@ -529,6 +529,43 @@ impl DispatchState {
         self.dispatches += 1;
     }
 
+    /// Record a [`ScenePass`](crate::ScenePass) into the shared encoder,
+    /// flushing first if the batch is full.
+    ///
+    /// The colour attachment joins the used and written sets for the same
+    /// reason a [`QuadDraw`]'s does, and so does every texture a call
+    /// samples: the caller may release them straight after recording.
+    pub(crate) fn record_scene(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pass: &crate::scene_pass::ScenePass<'_>,
+    ) {
+        if self.pending_dispatches >= MAX_PENDING_DISPATCHES {
+            let _ = self.flush(queue);
+        }
+        let encoder = self.encoder.get_or_insert_with(|| {
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("ravel dispatch batch"),
+            })
+        });
+        crate::scene_pass::record(device, encoder, pass);
+        for call in pass.calls {
+            if let crate::scene_pass::SceneCall::Mesh { buffers, .. } = call {
+                for id in buffers.buffer_ids() {
+                    self.mark_buffer_use(id, false);
+                }
+            }
+        }
+        for texture in crate::scene_pass::touched(pass) {
+            self.used.insert(texture_ptr(&texture.texture));
+        }
+        self.used.insert(texture_ptr(&pass.color.texture));
+        self.written.insert(texture_ptr(&pass.color.texture));
+        self.pending_dispatches += 1;
+        self.dispatches += 1;
+    }
+
     /// Submit the pending batch, if any. Afterwards every pooled texture is
     /// safe to reuse again.
     pub(crate) fn flush(&mut self, queue: &wgpu::Queue) -> Option<wgpu::SubmissionIndex> {

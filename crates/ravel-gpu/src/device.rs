@@ -507,6 +507,16 @@ impl GpuContext {
             .record_draw(self.device(), self.queue(), draw);
     }
 
+    /// Record a scene render pass ([`crate::ScenePass`]) into the frame's
+    /// shared command encoder, batched exactly like [`Self::draw_quads`].
+    pub fn draw_scene(&self, pass: &crate::scene_pass::ScenePass<'_>) {
+        self.inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .record_scene(self.device(), self.queue(), pass);
+    }
+
     /// Submit any batched dispatches not yet submitted. A no-op when the
     /// batch is empty.
     pub fn flush(&self) {

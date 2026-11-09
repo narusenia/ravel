@@ -1235,6 +1235,14 @@ view = "View"
 lens = "Lens"
 clip = "Clipping"
 
+[node."scene.render"]
+label = "Scene Render"
+description = "Draws a scene through its first camera into an image."
+[node."scene.render".params]
+fill = "Fill the shapes of Path objects."
+stroke_width = "Stroke width of Path objects in scene units; the camera scales it at each object's center (0 for no stroke)."
+color = "Tint for meshes and Path objects without their own Cd. Element Cd/alpha attributes and a connected color input take priority over it."
+
 [node."blur"]
 label = "Blur"
 description = "Blurs an image with a Gaussian kernel."

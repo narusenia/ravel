@@ -365,6 +365,13 @@ impl TexturePool {
         }
     }
 
+    /// The idle allowance this pool shares with its sibling pools, when it is
+    /// subordinate to one: build a [`BufferPool`](crate::BufferPool) from it
+    /// (`BufferPool::with_vram_allowance`) so both stay inside one headroom.
+    pub fn vram_allowance(&self) -> Option<VramAllowance> {
+        self.share.as_ref().map(IdleShare::allowance)
+    }
+
     /// Idle (pooled) VRAM in bytes.
     #[inline]
     pub fn idle_bytes(&self) -> u64 {

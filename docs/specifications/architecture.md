@@ -468,6 +468,7 @@ coalesce された `Params` が求めたプロセッサ再構築が失われる�
 | 出力段フレームキャッシュへの insert（ワーカー） | insert epoch（`InsertTicket`。要求の取り出し時に取る） | `SharedFrameCache::clear` / `invalidate_comp` が epoch を進める（空でも）。暫定（`EvalUpdate::provisional`）の絵は別規則で、**そもそも insert しない**（そのフレームの絵ではない）。確定した絵だけが入る |
 | Timeline のキャッシュ帯（`publish_cache_band`） | 帯の鍵（frame cache version、コンプ、`viewer_eval_context`） | 何もしない。入力が変われば鍵が変わる |
 | 共有デコードキャッシュのヒット（`ravel-media` `FrameKey`）とリーダー | 素材の版（`MediaAssetEntry::content_revision`、セッション限り） | 素材の監視（`media/watch.rs`）が変更を検知したら `rederive` で版を進める。パスをキーにした音声デコードキャッシュとサムネイルも同時に捨てる |
+| `scene.render` の静的メッシュバッファのヒット（`StaticMeshCache`） | メッシュの鍵（`MeshKey`: `P` / `N` / `uv` / `Cd` / `alpha` 各列の `Arc` アドレス、インデックス blob のアドレスと長さ、頂点・インデックス範囲） | 何もしない。列を編集すると copy-on-write で別アドレスになり鍵が変わる。エントリがジオメトリを保持するのでアドレスは再利用されない。16 フレーム使われなかったエントリは捨てる |
 | ライブ編集の削除の承認（`live_edit::handle`） | 確認を出した時点のプロジェクトの世代（`ProjectState::generation`）と文書 | 何もしない。新規・読み込みで世代が進み、編集で文書が変わる。不一致なら `document-changed` を返す |
 | sim トラックの状態の再利用（`Evaluator::sim_state_at`、`eval/sim.rs`） | 上流サブグラフの構造・パラメータ・fps・コンプ基準のハッシュ（`SimTrack` の `Premise::hash`） | 何もしない。引くたびに現在値と比べ、不一致ならトラックを全破棄して充填し直す。処理系の差し替え・素材の中身は上流ハッシュに映らないので `invalidate_node` / `invalidate_all` が落とし、ノード・レイヤーの削除はスコープ剪定（`sim_prune_scope`）が解放する |
 

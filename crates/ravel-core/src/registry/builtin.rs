@@ -194,6 +194,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(scene_add());
     reg.register(scene_merge());
     reg.register(scene_camera());
+    reg.register(scene_render());
     reg.register(blur());
     reg.register(transform());
     reg.register(color_correct());
@@ -2045,6 +2046,47 @@ fn scene_camera() -> NodeTemplate {
         .with_param_group("clip", ["near", "far"])
 }
 
+/// `scene.render`: a scene seen through its first camera, as an image.
+///
+/// `fill`, `stroke_width` and `color` are `rasterize`'s, with the same meaning
+/// and the same priority (element `Cd` / `alpha` over the `color` pin over the
+/// parameter): they style the **Path** objects of the scene and tint meshes that
+/// carry no `Cd` of their own. The camera is the first one merged into the
+/// scene; with none, the default camera looks at the origin.
+fn scene_render() -> NodeTemplate {
+    NodeTemplate::new("scene.render", "Scene Render", NodeCategory::Scene)
+        .with_input(scene_input("scene"))
+        .with_input(InputPort {
+            name: "color".into(),
+            accepted_types: vec![DataTypeId::COLOR],
+            is_param: true,
+            is_variadic: false,
+        })
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::FRAME_BUFFER,
+        })
+        .with_param(Parameter {
+            key: "fill".into(),
+            value: ParameterValue::Bool(true),
+        })
+        .with_param(Parameter {
+            key: "stroke_width".into(),
+            value: ParameterValue::Float(0.0),
+        })
+        .with_param(Parameter {
+            key: "color".into(),
+            value: ParameterValue::Channel4([
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+                AnimationChannel::constant(1.0),
+            ]),
+        })
+        .with_color_param("color")
+        .with_param_range("stroke_width", 0.0..=1000.0, 0.0..=20.0)
+}
+
 fn blur() -> NodeTemplate {
     NodeTemplate::new("blur", "Blur", NodeCategory::Image)
         .with_input(InputPort {
@@ -3536,7 +3578,7 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 133);
+        assert_eq!(reg.all_templates().count(), 134);
     }
 
     #[test]
@@ -3544,7 +3586,7 @@ mod tests {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
         assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 40);
-        assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 3);
+        assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 4);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
         assert_eq!(reg.list_by_category(NodeCategory::Color).len(), 3);
@@ -4134,6 +4176,7 @@ mod tests {
             ("constant.vec4", "value", false),
             ("constant.color", "color", true),
             ("rasterize", "color", true),
+            ("scene.render", "color", true),
             ("comp.solid", "color", true),
             ("comp.fill", "color", true),
             ("comp.tint", "map_black", true),

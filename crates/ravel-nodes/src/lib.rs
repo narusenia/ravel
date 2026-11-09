@@ -34,6 +34,7 @@ pub mod net;
 pub mod rasterize;
 pub mod scatter;
 pub mod scene;
+pub mod scene_render;
 pub mod shape;
 pub mod style;
 pub mod subnet;
@@ -279,6 +280,12 @@ pub fn processor_for_node(
         "scene.add" => Some(Arc::new(scene::SceneAddProcessor::from_node(node))),
         "scene.merge" => Some(Arc::new(scene::SceneMergeProcessor::from_node(node))),
         "scene.camera" => Some(Arc::new(scene::SceneCameraProcessor::from_node(node))),
+        "scene.render" => Some(Arc::new(scene_render::SceneRenderProcessor::new(
+            ctx.clone(),
+            shaders,
+            pool.clone(),
+            node,
+        ))),
         "field.noise" => Some(Arc::new(field::NoiseFieldProcessor::from_node(node))),
         "field.direction_to" => Some(Arc::new(field::DirectionToFieldProcessor)),
         "field.curl_noise" => Some(Arc::new(field::CurlNoiseFieldProcessor)),
@@ -1514,6 +1521,31 @@ mod tests {
                 &[Some(geo)],
                 &ravel_core::eval::ResolvedParams::default(),
                 &mut scope,
+            )
+            .unwrap();
+        assert!(out.downcast_ref::<ravel_gpu::GpuFrameBuffer>().is_some());
+    }
+
+    /// `scene.render` is wired: the factory hands back the GPU renderer, which
+    /// keeps its output resident like every other GPU node. A template with no
+    /// arm in `processor_for_node` would place and never evaluate.
+    #[test]
+    fn processor_factory_wires_scene_render_to_the_gpu_renderer() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = shared_texture_pool(&gpu);
+        let frames = MediaFrameCache::standalone();
+        let mut shaders = ShaderManager::new(gpu.clone());
+        let node = Node::new(NodeId::new(1), "scene.render");
+        let processor = processor_for_node(&node, &gpu, &mut shaders, &pool, &frames)
+            .expect("scene.render has a processor");
+        let scene: Arc<dyn ravel_core::types::NodeData> = Arc::new(ravel_core::scene::Scene::new());
+        let out = processor
+            .process(
+                &node,
+                &ctx(),
+                &[Some(scene)],
+                &ravel_core::eval::ResolvedParams::default(),
+                &mut Evaluator::new(),
             )
             .unwrap();
         assert!(out.downcast_ref::<ravel_gpu::GpuFrameBuffer>().is_some());

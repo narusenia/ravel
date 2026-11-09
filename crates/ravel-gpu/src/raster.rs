@@ -72,7 +72,7 @@ impl ColorTarget {
     ///
     /// The single conversion site between this description and wgpu's
     /// vocabulary.
-    fn to_wgpu(self) -> wgpu::ColorTargetState {
+    pub(crate) fn to_wgpu(self) -> wgpu::ColorTargetState {
         wgpu::ColorTargetState {
             format: self.format.to_wgpu(),
             blend: Some(self.blend.to_wgpu()),
@@ -100,6 +100,54 @@ impl RasterPipeline {
         fragment_entry: &str,
         bind_group_layout: &[BindingDesc],
         target: ColorTarget,
+    ) -> Self {
+        Self::build(
+            ctx,
+            shader,
+            vertex_entry,
+            fragment_entry,
+            bind_group_layout,
+            target,
+            false,
+        )
+    }
+
+    /// [`Self::new`] for a pass that also carries a depth attachment
+    /// (`scene.render`): fragments are tested against it with `LessEqual` and
+    /// **never write it**, so the pipeline draws what is behind nothing the
+    /// opaque pass already covered and leaves the depth the next draw sees
+    /// untouched.
+    ///
+    /// Only [`ScenePass`](crate::ScenePass) draws with this one; the pass
+    /// [`GpuContext::draw_quads`] records has no depth attachment and a
+    /// pipeline built here would not be compatible with it.
+    pub fn new_depth_tested(
+        ctx: &GpuContext,
+        shader: &CompiledShader,
+        vertex_entry: &str,
+        fragment_entry: &str,
+        bind_group_layout: &[BindingDesc],
+        target: ColorTarget,
+    ) -> Self {
+        Self::build(
+            ctx,
+            shader,
+            vertex_entry,
+            fragment_entry,
+            bind_group_layout,
+            target,
+            true,
+        )
+    }
+
+    fn build(
+        ctx: &GpuContext,
+        shader: &CompiledShader,
+        vertex_entry: &str,
+        fragment_entry: &str,
+        bind_group_layout: &[BindingDesc],
+        target: ColorTarget,
+        depth_tested: bool,
     ) -> Self {
         let device = ctx.device();
         let label = shader.name.clone();
@@ -130,7 +178,7 @@ impl RasterPipeline {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 ..Default::default()
             },
-            depth_stencil: None,
+            depth_stencil: depth_tested.then(crate::scene_pass::blended_depth_state),
             multisample: wgpu::MultisampleState::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &shader.module,
@@ -156,6 +204,13 @@ impl RasterPipeline {
     #[inline]
     pub(crate) fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
         &self.layout
+    }
+
+    /// The backend pipeline, for [`ScenePass`](crate::ScenePass) to bind inside
+    /// its own render pass.
+    #[inline]
+    pub(crate) fn pipeline(&self) -> &wgpu::RenderPipeline {
+        &self.pipeline
     }
 
     /// Record a clear followed by one six-vertex quad per instance, in `runs`

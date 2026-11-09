@@ -322,7 +322,7 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
 - Path オブジェクトは既存の解析的経路を Scene 内で使う
 - 画像を持つ instance source をテクスチャ付き矩形として描く（`InstanceSource`
   は `done/image-instancing-plan.md` が入れる。Scene 側に画像オブジェクトは無い）
-- CPU リファレンス経路（三角形の塗りはスキャンライン）
+- CPU リファレンス経路（三角形の塗りはエッジ関数。スキャンラインではない）
 
 **完了条件**
 
@@ -347,6 +347,57 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
   確保カウンタを置くか、ハンドル同一性（2 フレーム目が同じバッファを
   使い回したこと）を観測する形にする。動的バッファ側は毎フレーム更新されて
   よいので、カウンタは静的バッファに限定する
+
+**実装メモ（単位 4）**
+
+- 構成は `scene_render/{prepare,cpu,gpu}.rs`。`prepare` が「何を・どのパスで・
+  どの順に」を決め、CPU リファレンスと GPU はその一覧を実行するだけなので、
+  両者が食い違いうるのは画素の計算だけ（許容誤差は
+  `gpu_matches_cpu_for_every_kind_of_piece` の doc に実測値つき）
+- GPU は `ravel_gpu::ScenePass`（新規 `scene_pass.rs`）。1 本の render pass に
+  カラー（`rasterize` と同じ premultiplied `Rgba16Float`）と `Depth32Float`、
+  続けて `rasterize` の `unpremultiply`。Path は `rasterize.wgsl` を深度テスト
+  付き（書かない）パイプラインで使い回し、`RasterParams._pad.y` がオブジェクト
+  単位の深度
+- **静的 / 動的の分離**: 静的 = `MeshBuffers`（頂点 32 B・インデックス・頂点色）、
+  動的 = 160 B の `ObjectRecord`（`mvp` / `model` / 色 / フラグ）。変換は
+  シェーダで適用し頂点に焼かない。再利用の鍵は `MeshKey`（各列の `Arc`
+  アドレス + インデックス blob + 範囲）。変換・色・カメラは鍵に入らない。
+  確保は `StaticMeshCache::allocate` の 1 箇所で、頂点・インデックス・頂点色の
+  3 本を GPU-1 の `BufferPool` から借りる（`MeshBuffers` が drop されると
+  池へ戻る）。16 フレーム使われない鍵は捨てる。プールは `GpuSceneRenderer`
+  が持ち、`TexturePool` が `VramAllowance` を持つ（アプリ）ときは同じ
+  allowance から作る（`TexturePool::vram_allowance`）。パス記録時に 3 本を
+  `mark_buffer_use` するので、未送信バッチが読むバッファは `acquire` が飛ばす
+- **代表深度**: オブジェクトの頂点平均を view 空間へ移した `z`（大きいほど
+  遠い）、同値は bbox の最遠角、それも同値なら挿入順。Path は点の平均
+- 画像インスタンスは**共有の単位正方形 Mesh**（`uv` 列つき、頂点 `±0.5`）に
+  貼り、モデル行列で画像の画素サイズ・配置を与える。サンプラは `uv × 画素数`
+  を双線形で読む（`rasterize` の画像経路と同じ premultiplied 加重・端クランプ）
+- **新しい予約属性 `uv`**（Point, Vec2）。画像矩形に暗黙の UV は無い
+- **未対応と制約**（`scene_render/mod.rs` と仕様書に明記）: カリングなし、
+  Path は線幅が重心位置で一律・cap/join/dash 無効、
+  3D 配置のインスタンスは未対応、メッシュへのテクスチャ入力ポートは無い
+  （`MeshObject::texture` は画像インスタンスだけが埋める）
+- ゴールデン画像は追加していない。完了条件の「単一 Mesh」は、手計算した
+  画素範囲・カバレッジ・遠近の縁（`a_perspective_quad_lands_where_the_lens_puts_it`
+  ほか）で固定した
+- CPU リファレンスの塗りは**エッジ関数**（画素中心サンプル + top-left ルール）。
+  当初案のスキャンラインにしなかった理由: GPU のラスタライザと同じ「画素中心が
+  三角形に入るか」の規則を式のまま持てるので、共有辺の二重塗り・隙間が起きず、
+  GPU との一致テストが画素単位で書ける。透視補正した varying と `z/w` の補間も
+  画素ごとの重心座標から直接出せる。
+- Path オブジェクトは投影の前に近クリップ面で切る（`prepare.rs` の `clip_path`。CPU
+  経路も GPU 準備も同じ関数を通る）。手前側だけが残り、開いたパスは複数の折れ線に
+  分かれうる。閉じたパスは、切れると見える部分ごとに**閉じた**クリップ済み多角形になり
+  （面はそれだけを塗る）、線は近クリップ面に沿う辺を除いた開いた折れ線で引く
+  （凹形状が 2 つに割れても橋渡しの辺を線で引かない。`Role::FillOnly` /
+  `StrokeOnly`）。曲線（`in_tan` / `out_tan`）は
+  クリップより前に、シーン空間で既存の `flatten_path_with_param` により折れ線へ
+  平坦化する（`flatten_curves`）。2D 平坦化器の許容誤差は画素単位なので、制御点を
+  「パス上で最も近い点の画素 / 単位」倍して渡す。投影後に平坦化しない理由:
+  近クリップをまたぐ曲線を折れ線として切れる・透視除算を平坦化器に見せずに済む。
+  `z` は両端の `z` を制御点とする 3 次で補間する。
 
 ### 単位 5: 基本プリミティブ（REQ-3D-005）
 

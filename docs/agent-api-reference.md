@@ -2606,8 +2606,8 @@ the pool on drop) and `ensure_cpu_geometry` mirror `ensure_gpu` /
 is submitted `BufferPool::acquire` skips that buffer, `upload_buffer` flushes
 before overwriting it and a readback flushes before copying a written one
 (the buffer counterpart of the texture pending-use rules). Nothing binds a
-pooled buffer to `dispatch_compute` yet, and no production site builds a
-`BufferPool`; the first consumer adds both, building it with
+pooled buffer to `dispatch_compute` yet. The first production `BufferPool` is
+`scene.render`'s static mesh cache (see `ScenePass` below); a pool is built with
 `BufferPool::with_vram_allowance` over the **same** `VramAllowance` as its
 `TexturePool` (`TexturePool::with_vram_allowance`) so idle textures and idle
 buffers together stay inside the budget's headroom.
@@ -2667,6 +2667,30 @@ geometry differs frame to frame) and one bind group per run is created and
 counted in `bind_groups_created`. Rasterize draws analytic-AA path/point quads into a
 premultiplied RGBA16Float attachment, then converts to straight-alpha
 RGBA32Float without a CPU transfer.
+
+`ravel_gpu::ScenePass` (`GpuContext::draw_scene`) is the triangle pipeline
+`scene.render` draws with, in `scene_pass.rs`: one render pass, one colour
+attachment (the rasterizer's premultiplied `Rgba16Float`), one `DepthBuffer`
+(`Depth32Float`, cleared to 1 each pass, so a held one is reusable), calls in
+slice order. A `SceneCall::Mesh { buffers, object, texture, class }` draws a
+`MeshBuffers` as instance `object` of the pass's per-object record array;
+`DrawClass::Opaque` tests and writes depth and `Blended` only tests it.
+`SceneCall::Quads` draws a run of a `QuadBatch` (the rasterizer's three storage
+buffers, a pipeline from `RasterPipeline::new_depth_tested`, a per-call uniform
+that carries the object's depth). **`MeshBuffers` are the only long-lived
+buffers and the pass never rebuilds one** — whether one is stale is the
+caller's judgement (`StaticMeshCache` in `scene_render/gpu.rs`; one private
+`allocate` is the whole allocation seam). `MeshBuffers::new(ctx, &Arc<Mutex<BufferPool>>, ..)`
+leases its vertex / index / colour buffers from the pool (`VERTEX | COPY_DST`,
+`INDEX | COPY_DST`, `STORAGE | COPY_DST`) and returns them on drop;
+`record_scene` marks them in flight. `MeshBuffers::id()` is unique per
+allocation and `lease_ids()` are the three `PooledBuffer::id`s, so reuse is a
+comparison of numbers. `TexturePool::vram_allowance()` hands out the shared
+`VramAllowance` (`None` for a fixed-budget pool). Shader contract: group 0
+object records, group 1 vertex colours, group 2 the sampled texture, vertex
+buffer 0 = `MeshVertex { position, normal, uv }`, entry points `mesh_vertex` /
+`mesh_fragment`. Textures and the colour attachment join the batch's
+pending-use sets like any other pass.
 Current keys. A row marked **§** declares the transform section
 (`NodeTemplate::with_transform_section`): its geometry output is put through
 `geometry::apply_transform` with the node's own
@@ -2726,6 +2750,7 @@ processor runs, and **§P** means the section's `translate` also carries
 | `scene.add` | CPU | places one value in a `Scene` with a `Transform3D`. `object` accepts GEOMETRY / SCENE — a scene on that port is the **nesting** case, which is how a transform hierarchy is built; `scene` is the scene to add into and may be unconnected, so a chain accumulates. A frame buffer is **not** placeable: an image reaches a scene as a geometry carrying it, and the processor fails with an error pointing at `geometry.from_image`. `translate` / `rotation` / `scale` / `pivot` are Channel3, same keys as `geometry.transform`; `rotation` is Euler degrees, extrinsic ZYX. Never touches `P` — projection is `scene.render`'s |
 | `scene.merge` | CPU | union of two scenes, objects and cameras alike; a missing side passes the other through |
 | `scene.camera` | CPU | source node emitting a `Scene` with exactly one `Camera` and no objects, so `scene.merge` combines cameras and objects with one node. `position` / `target` are Channel3, `projection` is a `perspective`/`orthographic` enum, `fov` / `ortho_height` / `near` / `far` are Floats (an unknown `projection` falls back to perspective rather than failing). The aspect ratio is **not** baked in here — it is read from `comp_resolution` when a projection matrix is asked for |
+| `scene.render` | CPU reference + GPU | `Scene` → FrameBuffer through the **first** camera merged into the scene (none → `Camera::default()`); output is straight alpha and, on the GPU constructor, resident. `fill` / `stroke_width` / `color` are `rasterize`'s (element `Cd` / `alpha` > `color` pin > parameter) and style Path objects and tint meshes without their own `Cd`. Two passes, one `ravel_gpu::ScenePass`: **(1)** opaque `Primitive::Mesh` (alpha 1 everywhere) with depth test + write; **(2)** translucent meshes, image instances (textured unit quads, the rectangle's `uv` is an ordinary column) and Path objects (paths + point sprites projected to pixels, drawn by `rasterize`'s own flatten / fill code at one depth per object), sorted back to front by **view-space `z` of the object's centroid** (farthest bbox corner, then insertion order, break ties), depth test on and **write off**. Translucent objects are therefore ordered whole and crossing ones are wrong (REQ-3D-007's line, pinned by `two_crossing_translucent_quads_are_drawn_whole_in_centroid_order`). Nothing is back-face culled. The sampler reads the mesh's `uv` Point column (`names::UV`); a texture reaches a mesh only as an image instance today. The mesh's static buffers (`ravel_gpu::MeshBuffers`: vertices / normals / uvs / indices / vertex colours) are keyed by the identity of the geometry's columns and survive a changed transform, tint or camera; per-object matrices and tint are a 160-byte `ObjectRecord` per frame (`SceneRenderProcessor::static_buffer_allocations` counts uploads). Path objects ignore cap / join / dash and stroke at one width measured at their centroid; Curves (`in_tan` / `out_tan`) are flattened in scene space first (`prepare::flatten_curves`, through `flatten::flatten_path_with_param`, tolerance 0.25 px at the nearest control point or handle, under the object's own scale), then clipped against the near plane (`prepare::clip_path`; CPU and GPU share both): only the part in front of the camera is drawn and a closed path crossing the plane is filled as one closed polygon per visible piece and stroked as open polylines without the edges along the plane (`Role::FillOnly` / `StrokeOnly`). `scene_render/{prepare,cpu,gpu}.rs`: `prepare` decides everything, the two renderers execute its list |
 | `attribute.set` / `.promote` / `.transfer` | CPU | copy-on-write Geometry attribute operations, dimension-agnostic (`.transfer` measures distance in three components, so the two sides may differ in dimension). `attribute.set`'s `value` arity follows its `type` (`f32`→Channel … `vec4`/`color`→Channel4); `i32`/`bool`/`string` read `int_value`/`bool_value`/`string_value` |
 | `text.on_path` | CPU | re-places a text layout's character instances along the `path` input: a character's arc length is the **running sum of its `advance` column** (the writing-axis step in either writing mode, so a vertical run spreads along the path instead of stacking), its `P` is the sampled position and its `rot` the tangent's angle. `offset` slides the run, `spacing` is tracking measured along the path (added after every character, the last included), `align` puts the run's `start` / `center` / `end` against the path's, and `flip` adds half a turn. **Only `P` and `rot` are rewritten**, so `instance_sources` / `source_index` and the per-character columns survive for a field to read. An unconnected `path` passes the text through unchanged; a run longer than the path clamps its overflow onto the last point; `text.layout`'s own `align` / `anchor` and its line separation drop out, a multi-line layout becoming one continuous run. Instances without an `advance` column are an explicit error, and a `Vec3` instance `P` is refused the way `path_sample` refuses a 3D path |
 | `attribute.path_sample` | CPU | absolute arc length → one-point Geometry with P/tangent/normal; a `Vec3` `P` or a `Primitive::Mesh` is an explicit error (`GeometryError::RequiresPlanarP` / `RequiresPathPrimitives`) |

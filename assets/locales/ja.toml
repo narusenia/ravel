@@ -1223,6 +1223,14 @@ view = "視点"
 lens = "レンズ"
 clip = "クリップ"
 
+[node."scene.render"]
+label = "シーンレンダー"
+description = "シーンを最初のカメラ越しに画像へ描画する。"
+[node."scene.render".params]
+fill = "パスオブジェクトの図形を塗りつぶす。"
+stroke_width = "パスオブジェクトのストローク幅（シーン単位。カメラによる拡縮は各オブジェクトの中心で決まる。0 でストロークなし）。"
+color = "自前の Cd を持たないメッシュとパスオブジェクトの色。要素の Cd/alpha アトリビュートと接続された color 入力が優先される。"
+
 [node."blur"]
 label = "ブラー"
 description = "ガウシアンカーネルで画像をぼかす。"

@@ -415,6 +415,11 @@ impl NodeProcessor for RasterizeProcessor {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct RasterParams {
     resolution: [f32; 2],
+    /// `x` is read only by the test probe in `sample.rs`, which selects what
+    /// it reads out. `y` is the clip-space depth every fragment of the draw
+    /// gets: always `0.0` for the 2D rasterizer, which has no depth
+    /// attachment, and set per Path object by `scene.render` so the object
+    /// depth-tests against the opaque meshes.
     _pad: [f32; 2],
 }
 
@@ -2106,6 +2111,308 @@ fn blend_pixel(dst: &mut [f32], color: Color, coverage: f32) {
         }
     }
     dst[3] = out_a;
+}
+
+// ===========================================================================
+// What `scene.render` draws its Path objects through
+// ===========================================================================
+//
+// A Path object of a scene is projected into output pixel space first
+// (`scene_render::prepare`), which leaves exactly the planar geometry this
+// module already draws. These entry points hand that geometry to the same
+// flatten / CPU-fill code the `rasterize` node uses, so a path looks the same
+// in a scene as on a plain canvas apart from the projection.
+//
+// Cap, join and dash are not honoured there: the scene always strokes with
+// round caps and joins and no dash, because the GPU shader cannot draw the
+// others and a scene has no CPU fallback to switch to per object.
+
+/// The paint of one projected Path object: what the `scene.render` parameters
+/// say, narrowed per element by the geometry's own attributes exactly as for
+/// `rasterize`.
+#[derive(Clone, Copy)]
+pub(crate) struct PathPaint {
+    pub fill: bool,
+    pub stroke_width: f32,
+    pub color: Color,
+}
+
+impl PathPaint {
+    fn style(&self) -> Style<'static> {
+        Style {
+            fill: self.fill,
+            stroke_width: self.stroke_width,
+            color: self.color,
+            stroke_color: None,
+            shape: StrokeShape {
+                cap: Cap::Round,
+                join: Join::Round,
+                dashes: &[],
+                dash_offset: 0.0,
+            },
+        }
+    }
+}
+
+/// Draw the paths and point sprites of `geo`, whose `P` is already in output
+/// pixels, over straight-alpha `pixels` (`width * height * 4` values).
+///
+/// `coverage` is the shared scratch mask (`width * height` zeros) the CPU
+/// path needs; it is zero again on return.
+pub(crate) fn raster_projected(
+    geo: &Geometry,
+    paint: PathPaint,
+    (width, height): (u32, u32),
+    pixels: &mut [f32],
+    coverage: &mut [u8],
+) {
+    raster_geometry(
+        geo,
+        Placement::identity(),
+        0,
+        &mut Canvas {
+            pixels,
+            coverage,
+            width,
+            height,
+        },
+        paint.style(),
+        &ImageMap::new(),
+    );
+}
+
+/// The draw records of every Path object of one scene render, in the layout
+/// the rasterizer's shader reads.
+#[derive(Default)]
+pub(crate) struct PathBatch {
+    buffers: VertexBuffers,
+    items: Vec<DrawItem>,
+}
+
+impl PathBatch {
+    /// Flatten `geo` (pixel-space `P`) and return the item range it occupies.
+    pub(crate) fn push(&mut self, geo: &Geometry, paint: PathPaint) -> Range<u32> {
+        let start = self.items.len() as u32;
+        // No image sources reach here (a Path object has none), but the walk
+        // is shared with `rasterize` and wants somewhere to record them.
+        let mut images = Vec::new();
+        flatten_geometry(
+            geo,
+            Placement::identity(),
+            0,
+            paint.style(),
+            &mut self.buffers,
+            &mut self.items,
+            &mut images,
+        );
+        start..self.items.len() as u32
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// The three storage buffers' bytes — vertices, items, vertex colours —
+    /// each padded to a valid non-empty binding.
+    pub(crate) fn storage_bytes(&self) -> [Vec<u8>; 3] {
+        fn bytes_or<T: bytemuck::Pod>(values: &[T], placeholder: T) -> Vec<u8> {
+            if values.is_empty() {
+                bytemuck::bytes_of(&placeholder).to_vec()
+            } else {
+                bytemuck::cast_slice(values).to_vec()
+            }
+        }
+        [
+            bytes_or(&self.buffers.points, [0.0f32; 2]),
+            bytes_or(
+                &self.items,
+                DrawItem {
+                    bounds: [0.0; 4],
+                    color: [0.0; 4],
+                    stroke_color: [0.0; 4],
+                    data0: [0.0; 4],
+                    data1: [0.0; 4],
+                },
+            ),
+            bytes_or(&self.buffers.colors, [0.0f32; 4]),
+        ]
+    }
+}
+
+/// The uniform block of one Path object's draw: the output resolution and the
+/// clip-space depth its fragments take.
+pub(crate) fn path_params_bytes(resolution: (u32, u32), depth: f32) -> Vec<u8> {
+    bytemuck::bytes_of(&RasterParams {
+        resolution: [resolution.0 as f32, resolution.1 as f32],
+        _pad: [0.0, depth],
+    })
+    .to_vec()
+}
+
+/// The rasterizer's pipeline for a pass with a depth attachment: same shader
+/// and layout as the 2D one, depth tested and never written.
+pub(crate) fn depth_tested_pipeline(
+    ctx: &GpuContext,
+    shaders: &mut ShaderManager,
+) -> RasterPipeline {
+    let shader = shaders
+        .compile_source("rasterize", SHADER_SRC)
+        .expect("rasterize.wgsl compilation failed");
+    RasterPipeline::new_depth_tested(
+        ctx,
+        &shader,
+        "raster_vertex",
+        "raster_fragment",
+        &raster_layout(),
+        scene_color_target(),
+    )
+}
+
+/// The colour attachment of a scene pass: the format and blend the
+/// rasterizer's own draw pass uses, so the `unpremultiply` pass that follows
+/// is the one already written.
+pub(crate) fn scene_color_target() -> ColorTarget {
+    ColorTarget::new(TextureFormat::Rgba16Float, BlendMode::PremultipliedOver)
+}
+
+/// The texture key of that attachment.
+pub(crate) fn scene_color_key(width: u32, height: u32) -> TextureKey {
+    TextureKey::new(
+        width,
+        height,
+        TextureFormat::Rgba16Float,
+        TextureUsage::RENDER_ATTACHMENT | TextureUsage::TEXTURE_BINDING,
+    )
+}
+
+/// The compute pass converting a premultiplied scene attachment back to the
+/// straight-alpha `Rgba32Float` frame every other node speaks.
+pub(crate) fn unpremultiply_pipeline(shaders: &mut ShaderManager) -> Arc<ComputePipeline> {
+    let layout = [
+        gpu_util::input_texture_layout_entry(0),
+        gpu_util::output_storage_layout_entry(1),
+    ];
+    shaders
+        .compute_pipeline(
+            "rasterize",
+            SHADER_SRC,
+            "unpremultiply",
+            &layout,
+            gpu_util::WORKGROUP_SIZE,
+        )
+        .expect("rasterize.wgsl compilation failed")
+}
+
+/// One image instance a geometry stamps, with the placement and tint of every
+/// enclosing instance composed in.
+pub(crate) struct ImageInstance<'a> {
+    pub image: &'a InstanceImage,
+    pub transform: InstanceTransform,
+    pub tint: Color,
+}
+
+/// Every image instance `geo` stamps, at any nesting depth, in draw order.
+///
+/// The walk mirrors [`flatten_geometry`]'s instance loop (same depth bound,
+/// same `source_index` clamp, same tint rule) without drawing: a scene turns
+/// each one into a textured mesh rather than a screen-space quad.
+pub(crate) fn collect_image_instances<'a>(
+    geo: &'a Geometry,
+    depth: u32,
+    outer: (InstanceTransform, Color),
+    out: &mut Vec<ImageInstance<'a>>,
+) {
+    if depth >= MAX_INSTANCE_DEPTH {
+        return;
+    }
+    let sources = geo.sources();
+    if sources.is_empty() {
+        return;
+    }
+    let instances = geo.instances();
+    let Some(offsets) = instances
+        .get(names::P)
+        .and_then(|c| c.as_vec2(names::P).ok())
+    else {
+        return;
+    };
+    let columns = InstanceColumns::lenient(instances);
+    let source_indices = instances
+        .get(names::SOURCE_INDEX)
+        .and_then(|c| c.as_i32(names::SOURCE_INDEX).ok());
+    for (index, offset) in offsets.iter().enumerate() {
+        let local = Placement {
+            transform: columns.placement(index, *offset),
+            tint: tinted(
+                element_color(instances, index, DEFAULT_COLOR),
+                element_alpha(instances, index),
+                DEFAULT_COLOR,
+            ),
+        };
+        let combined = compose(
+            Placement {
+                transform: outer.0,
+                tint: outer.1,
+            },
+            local,
+        );
+        match select_instance_source(sources, source_indices, index) {
+            InstanceSource::Geometry(source) => {
+                collect_image_instances(source, depth + 1, (combined.transform, combined.tint), out)
+            }
+            InstanceSource::Image(image) => out.push(ImageInstance {
+                image,
+                transform: combined.transform,
+                tint: combined.tint,
+            }),
+        }
+    }
+}
+
+/// The neutral outer placement of [`collect_image_instances`].
+pub(crate) fn identity_placement() -> (InstanceTransform, Color) {
+    (InstanceTransform::IDENTITY, DEFAULT_COLOR)
+}
+
+/// The texels of a frame value on the CPU, for the scene's CPU reference path
+/// to sample. A GPU-resident frame is read back; a CPU one is borrowed.
+pub(crate) fn resolve_frame(frame: &dyn NodeData) -> anyhow::Result<CpuImage<'_>> {
+    let frame = ensure_cpu(frame)?;
+    let context = || "an image is not four-channel";
+    Ok(CpuImage(match frame {
+        Cow::Borrowed(frame) => ImagePixels {
+            width: frame.width,
+            height: frame.height,
+            samples: frame.as_rgba_f32().with_context(context)?,
+        },
+        Cow::Owned(frame) => ImagePixels {
+            width: frame.width,
+            height: frame.height,
+            samples: Cow::Owned(frame.as_rgba_f32().with_context(context)?.into_owned()),
+        },
+    }))
+}
+
+/// An image instance source's texels, read once.
+pub(crate) struct CpuImage<'a>(ImagePixels<'a>);
+
+impl CpuImage<'_> {
+    /// Straight-alpha bilinear sample at a source-pixel coordinate, `(0.5,
+    /// 0.5)` the first texel's centre; `None` when fully transparent. The
+    /// same sampler the 2D image path uses, so the two cannot drift.
+    pub(crate) fn sample(&self, u: f32, v: f32) -> Option<Color> {
+        sample_bilinear(&self.0, u, v)
+    }
+
+    pub(crate) fn size(&self) -> (u32, u32) {
+        (self.0.width, self.0.height)
+    }
+}
+
+/// The base colour of a `scene.render` node: the same resolution as
+/// [`base_color`] for `rasterize` (pin over parameter over white).
+pub(crate) fn node_base_color(params: &ResolvedParams) -> Color {
+    base_color(params)
 }
 
 #[cfg(test)]

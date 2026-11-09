@@ -210,13 +210,26 @@ impl BufferPool {
     /// same class when possible.
     ///
     /// Contents are unspecified: a reused buffer holds its previous owner's
-    /// bytes. Nothing in this unit binds a pooled buffer to a batched
-    /// dispatch, so — unlike a texture — no pending-use check is needed yet;
-    /// the first consumer that does must add the same skip
-    /// [`TexturePool::acquire`](crate::TexturePool::acquire) has.
+    /// bytes. An idle buffer the unsubmitted dispatch batch still reads or
+    /// writes ([`GpuContext::mark_buffer_in_flight`]) is **skipped**, for the
+    /// reason [`TexturePool::acquire`](crate::TexturePool::acquire) skips such
+    /// a texture: its queued work has to see the contents it was recorded
+    /// against. Skipped buffers circulate again after the next flush.
     pub fn acquire(&mut self, bytes: u64, usage: BufferUsage) -> PooledBuffer {
         let key = BufferKey::for_bytes(bytes, usage);
-        if let Some(id) = self.by_key.get_mut(&key).and_then(Vec::pop) {
+        let chosen = self.by_key.get(&key).and_then(|ids| {
+            ids.iter()
+                .rposition(|id| {
+                    self.idle
+                        .get(id)
+                        .is_some_and(|buf| !self.ctx.is_buffer_pending_use(buf.id()))
+                })
+                .map(|pos| ids[pos])
+        });
+        if let Some(id) = chosen {
+            if let Some(ids) = self.by_key.get_mut(&key) {
+                ids.retain(|&x| x != id);
+            }
             self.lru.remove(id);
             if let Some(buffer) = self.idle.remove(&id) {
                 log::trace!("buffer pool: reused {} bytes", key.capacity);
@@ -313,6 +326,73 @@ mod tests {
         assert_ne!(other_class.id(), first_id);
         assert_ne!(other_usage.id(), first_id);
         assert_eq!(pool.total_created(), 3);
+    }
+
+    #[test]
+    fn a_buffer_in_flight_is_not_handed_out_until_the_batch_is_submitted() {
+        let Some(ctx) = GpuContext::new_blocking().ok() else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        let mut pool = BufferPool::new(ctx.clone(), 64 * 1024 * 1024);
+        let buffer = pool.acquire(1000, BufferUsage::COLUMN);
+        let id = buffer.id();
+        ctx.mark_buffer_in_flight(&buffer, false);
+        pool.release(buffer);
+
+        let other = pool.acquire(1000, BufferUsage::COLUMN);
+        assert_ne!(
+            other.id(),
+            id,
+            "a buffer the pending batch reads was reused"
+        );
+        assert_eq!(pool.total_created(), 2);
+        assert_eq!(
+            pool.idle_count(),
+            1,
+            "the in-flight one stays idle, not lost"
+        );
+
+        // The submission clears the record; now it circulates again.
+        ctx.flush();
+        let again = pool.acquire(1000, BufferUsage::COLUMN);
+        assert_eq!(again.id(), id);
+        assert_eq!(pool.total_created(), 2);
+        pool.release(other);
+        pool.release(again);
+    }
+
+    #[test]
+    fn overwriting_or_reading_back_an_in_flight_buffer_flushes_the_batch_first() {
+        let Some(ctx) = GpuContext::new_blocking().ok() else {
+            eprintln!("skipping: no GPU adapter available");
+            return;
+        };
+        let mut pool = BufferPool::new(ctx.clone(), 64 * 1024 * 1024);
+        let buffer = pool.acquire(16, BufferUsage::COLUMN);
+
+        ctx.mark_buffer_in_flight(&buffer, false);
+        assert!(ctx.is_buffer_pending_use(buffer.id()));
+        crate::transfer::upload_buffer(&ctx, &buffer, &[1; 16]);
+        assert!(
+            !ctx.is_buffer_pending_use(buffer.id()),
+            "upload must flush a reader first"
+        );
+
+        // A read-only batch use does not force a flush on readback...
+        ctx.mark_buffer_in_flight(&buffer, false);
+        crate::transfer::read_buffer(&ctx, &buffer, 16).unwrap();
+        assert!(ctx.is_buffer_pending_use(buffer.id()));
+        // ...a write does.
+        ctx.mark_buffer_in_flight(&buffer, true);
+        assert_eq!(
+            crate::transfer::read_buffer(&ctx, &buffer, 16).unwrap(),
+            vec![1; 16]
+        );
+        assert!(
+            !ctx.is_buffer_pending_use(buffer.id()),
+            "readback must flush a writer first"
+        );
     }
 
     #[test]

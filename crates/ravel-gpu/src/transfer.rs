@@ -328,6 +328,8 @@ pub fn upload_buffer(ctx: &GpuContext, buffer: &PooledBuffer, data: &[u8]) {
         data.len().is_multiple_of(4),
         "buffer uploads are whole 32-bit words"
     );
+    // Same hazard as `upload_texture`: the write lands before the batch runs.
+    ctx.flush_for_buffer_upload(buffer.id());
     ctx.transfer_counters().record_upload(data.len() as u64);
     if !data.is_empty() {
         ctx.queue().write_buffer(buffer.raw(), 0, data);
@@ -349,6 +351,7 @@ pub fn begin_read_buffer(
         "readback source must be declared COPY_SRC"
     );
     debug_assert!(len <= buffer.capacity() && len.is_multiple_of(4));
+    ctx.flush_for_buffer_readback(buffer.id());
     ctx.transfer_counters().record_readback(len);
     let capacity = usize::try_from(len)
         .map_err(|_| GpuError::Readback(format!("readback size {len} does not fit in usize")))?;

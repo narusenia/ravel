@@ -564,6 +564,44 @@ impl GpuContext {
             .is_pending_use(texture)
     }
 
+    /// Record that the unsubmitted batch reads (`written == false`) or writes
+    /// `buffer`. **The hook a pass that binds a pooled buffer must call**: it
+    /// is what makes [`BufferPool::acquire`](crate::BufferPool::acquire) skip
+    /// the buffer, [`upload_buffer`](crate::upload_buffer) flush before
+    /// overwriting it, and a readback flush before copying out of it, until the
+    /// batch is submitted. The record is cleared by [`Self::flush`].
+    pub fn mark_buffer_in_flight(&self, buffer: &crate::PooledBuffer, written: bool) {
+        self.inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .mark_buffer_use(buffer.id(), written);
+    }
+
+    pub(crate) fn flush_for_buffer_upload(&self, id: u64) {
+        self.inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .flush_for_buffer_upload(self.queue(), id);
+    }
+
+    pub(crate) fn flush_for_buffer_readback(&self, id: u64) {
+        self.inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .flush_for_buffer_readback(self.queue(), id);
+    }
+
+    pub(crate) fn is_buffer_pending_use(&self, id: u64) -> bool {
+        self.inner
+            .dispatch
+            .lock()
+            .expect("dispatch state poisoned")
+            .is_buffer_pending_use(id)
+    }
+
     /// Drop cached bind groups referencing the pooled textures `textures`
     /// (by [`PooledTexture`](crate::PooledTexture) id). Called by the pool
     /// when it evicts them: an entry left behind would pin — through its

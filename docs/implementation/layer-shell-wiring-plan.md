@@ -169,7 +169,13 @@ Outliner は親子を表示するが「表示のみ、D&D 不可」（`ui-spec.m
   で下線を付け直す（kit が編集のたびに消す）。Properties の
   `build_expression_inputs` が実例
 - 付け外しと draft の機構は `EXPR-4` のものを殻のコミット経路へ載せ替える
-  （本文は上の `backlog.md` の SHELL-6 の説明）
+  （本文は [`backlog.md`](backlog.md) の SHELL-6 の説明）
+
+**完了条件**
+
+- 殻の式の編集は 1 undo ステップ（打鍵ごとに積まない）
+- パレット切替で式エディタの色が変わる
+- 下線が `Change` のたびと、undo / redo / 外部編集による同期のあとに付け直される
 
 ## 検証
 

@@ -376,6 +376,22 @@ struct Projector {
 }
 
 impl Projector {
+    /// Pixels per scene unit along the camera's right axis at world point `p`.
+    fn pixels_per_unit(&self, p: [f32; 4]) -> f32 {
+        let p = [p[0], p[1], p[2]];
+        let beside = [
+            p[0] + self.right[0],
+            p[1] + self.right[1],
+            p[2] + self.right[2],
+        ];
+        let a = self.project(&Mat4::IDENTITY, p);
+        let b = self.project(&Mat4::IDENTITY, beside);
+        // Capped: at the camera itself the scale diverges.
+        ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2))
+            .sqrt()
+            .min(4096.0)
+    }
+
     /// Scene-space point → `(pixel x, pixel y, clip depth, clip w)`.
     fn project(&self, world: &Mat4, p: [f32; 3]) -> [f32; 4] {
         let clip = point_mul(&self.view_proj.mul(world), p);
@@ -615,42 +631,179 @@ fn near_clipped_paths(flat: &Geometry, clip_depth: &Mat4) -> anyhow::Result<Opti
         return Ok(None);
     }
 
-    let mut out = Geometry::new();
-    for (name, column) in flat.points().iter() {
-        if name.as_str() == names::P {
-            continue;
-        }
-        let kept = gather(name, column, &rows);
-        out.points_mut().insert(name.clone(), kept)?;
-    }
-    let p: Vec<Vec3> = rows
+    let p = rows
         .iter()
         .map(|row| match *row {
             Row::Original(i) => positions.get3(i).unwrap_or(Vec3(0.0, 0.0, 0.0)),
-            Row::Between(i, j, t) => {
-                let (a, b) = (
-                    positions.get3(i).unwrap_or(Vec3(0.0, 0.0, 0.0)),
-                    positions.get3(j).unwrap_or(Vec3(0.0, 0.0, 0.0)),
-                );
-                Vec3(mix(a.0, b.0, t), mix(a.1, b.1, t), mix(a.2, b.2, t))
-            }
+            Row::Between(i, j, t) => lerp3(
+                positions.get3(i).unwrap_or(Vec3(0.0, 0.0, 0.0)),
+                positions.get3(j).unwrap_or(Vec3(0.0, 0.0, 0.0)),
+                t,
+            ),
         })
         .collect();
+    materialize(flat, &rows, p, primitives, &parents, false).map(Some)
+}
+
+fn lerp3(a: Vec3, b: Vec3, t: f32) -> Vec3 {
+    Vec3(mix(a.0, b.0, t), mix(a.1, b.1, t), mix(a.2, b.2, t))
+}
+
+/// A geometry made of `rows` of `flat`'s point columns, positioned at `p`,
+/// with `primitives` whose attributes come from `parents` (rows of `flat`'s
+/// primitives).
+fn materialize(
+    flat: &Geometry,
+    rows: &[Row],
+    p: Vec<Vec3>,
+    primitives: Vec<Primitive>,
+    parents: &[usize],
+    drop_tangents: bool,
+) -> anyhow::Result<Geometry> {
+    let mut out = Geometry::new();
+    for (name, column) in flat.points().iter() {
+        let tangent = name.as_str() == names::IN_TAN || name.as_str() == names::OUT_TAN;
+        if name.as_str() == names::P || (tangent && drop_tangents) {
+            continue;
+        }
+        let kept = gather(name, column, rows);
+        out.points_mut().insert(name.clone(), kept)?;
+    }
     out.points_mut().insert(names::P, AttributeArray::Vec3(p))?;
     for primitive in primitives {
         out.push_primitive(primitive);
     }
     if !parents.is_empty() {
         for (name, column) in flat.primitive_attrs().iter() {
-            let rows: Vec<Row> = parents.iter().map(|&p| Row::Original(p)).collect();
+            let parent_rows: Vec<Row> = parents.iter().map(|&p| Row::Original(p)).collect();
             if column.len() >= flat.primitives().len() {
                 out.primitive_attrs_mut()
-                    .insert(name.clone(), gather(name, column, &rows))?;
+                    .insert(name.clone(), gather(name, column, &parent_rows))?;
             }
         }
     }
     *out.detail_mut() = flat.detail().clone();
-    Ok(Some(out))
+    Ok(out)
+}
+
+/// `flat`'s curved paths (`in_tan` / `out_tan` offsets, in the object's `xy`
+/// plane) as polylines, through the one flattener `rasterize` uses
+/// ([`crate::flatten::flatten_path_with_param`]). `None` when no tangent is
+/// non-zero.
+///
+/// The flattener's tolerance is in its own units (pixels). It runs on the
+/// control polygon scaled by the pixels per scene unit at the **nearest**
+/// point of the path, so the error it leaves is under a quarter pixel there
+/// and smaller further away. Flattening in scene space before clipping is the
+/// simple correct order: a curve crossing the near plane is clipped as the
+/// polyline it is, and the flattener never sees a perspective divide.
+/// `z` follows the cubic whose `z` handles are the end points' `z`, so a curve
+/// between points at different depths is exact in `z` too.
+fn flatten_curves(
+    flat: &Geometry,
+    world: &Mat4,
+    projector: &Projector,
+) -> anyhow::Result<Option<Geometry>> {
+    let Some(positions) = flat.positions(Domain::Point) else {
+        return Ok(None);
+    };
+    let positions: Positions<'_> = positions.context("scene.render: the point positions")?;
+    let count = positions.len();
+    let tangents = |name: &str| {
+        flat.points()
+            .get(name)
+            .and_then(|c| c.as_vec2(name).ok())
+            .map(|c| c.to_vec())
+    };
+    let (in_tans, out_tans) = (tangents(names::IN_TAN), tangents(names::OUT_TAN));
+    let any_curve = [&in_tans, &out_tans]
+        .into_iter()
+        .flatten()
+        .any(|column| column.iter().any(|t| t.0 != 0.0 || t.1 != 0.0));
+    if !any_curve {
+        return Ok(None);
+    }
+    let point = |i: usize| positions.get3(i).unwrap_or(Vec3(0.0, 0.0, 0.0));
+    let scale = (0..count)
+        .map(|i| {
+            let p = point_mul(world, [point(i).0, point(i).1, point(i).2]);
+            projector.pixels_per_unit(p)
+        })
+        .fold(1.0_f32, f32::max);
+
+    let mut rows = Vec::new();
+    let mut p = Vec::new();
+    let mut primitives = Vec::new();
+    let mut parents = Vec::new();
+    let mut covered = vec![false; count];
+    for (parent, prim) in flat.primitives().iter().enumerate() {
+        for slot in covered
+            .iter_mut()
+            .take(prim.verts().end)
+            .skip(prim.verts().start)
+        {
+            *slot = true;
+        }
+        let Primitive::Path { verts, closed } = prim else {
+            continue;
+        };
+        if verts.end > count || verts.len() < 2 {
+            continue;
+        }
+        let n = verts.len();
+        let scaled = |i: usize| {
+            Vec2(
+                point(verts.start + i).0 * scale,
+                point(verts.start + i).1 * scale,
+            )
+        };
+        let controls: Vec<Vec2> = (0..n).map(scaled).collect();
+        let slice = |column: &Option<Vec<Vec2>>| {
+            column.as_ref().map(|c| {
+                verts
+                    .clone()
+                    .map(|i| {
+                        c.get(i)
+                            .map_or(Vec2(0.0, 0.0), |t| Vec2(t.0 * scale, t.1 * scale))
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let (ins, outs) = (slice(&in_tans), slice(&out_tans));
+        let start = rows.len();
+        for (xy, u) in crate::flatten::flatten_path_with_param(
+            &controls,
+            ins.as_deref(),
+            outs.as_deref(),
+            *closed,
+        ) {
+            let i = (u.floor() as usize).min(n - 1);
+            let t = u - i as f32;
+            let (a, b) = (point(verts.start + i), point(verts.start + (i + 1) % n));
+            if t == 0.0 {
+                rows.push(Row::Original(verts.start + i));
+                p.push(a);
+            } else {
+                rows.push(Row::Between(verts.start + i, verts.start + (i + 1) % n, t));
+                // z handles equal the end points' z: z(t) = z0 + (z1 - z0)(3t^2 - 2t^3).
+                p.push(Vec3(
+                    xy.0 / scale,
+                    xy.1 / scale,
+                    mix(a.2, b.2, t * t * (3.0 - 2.0 * t)),
+                ));
+            }
+        }
+        primitives.push(Primitive::Path {
+            verts: start..rows.len(),
+            closed: *closed,
+        });
+        parents.push(parent);
+    }
+    for (index, _) in covered.iter().enumerate().filter(|(_, c)| !**c) {
+        rows.push(Row::Original(index));
+        p.push(point(index));
+    }
+    materialize(flat, &rows, p, primitives, &parents, true).map(Some)
 }
 
 /// Project the path content of `flat` (its `P` in object space) to pixels.
@@ -659,17 +812,20 @@ fn near_clipped_paths(flat: &Geometry, clip_depth: &Mat4) -> anyhow::Result<Opti
 /// to the near plane ([`near_clipped_paths`]) has a centroid outside the clip
 /// volume (past `far`) — such an object has no depth to be drawn at.
 ///
-/// **Shortcuts, both stated in `docs/specifications/procedural-geometry.md`:**
-/// the control polygon and the tangent handles are projected point by point,
-/// so a curve under strong perspective is the projection of its control
-/// polygon rather than of the curve; and stroke width, sprite radius and
-/// `pscale` are scaled by the pixels-per-unit measured **at the centroid**, so
-/// an object that spans a large depth range strokes at one width.
+/// Curves are flattened first ([`flatten_curves`]), then clipped, then
+/// projected, so a curve is drawn as the curve.
+///
+/// **Shortcut, stated in `docs/specifications/procedural-geometry.md`:**
+/// stroke width, sprite radius and `pscale` are scaled by the pixels-per-unit
+/// measured **at the centroid**, so an object that spans a large depth range
+/// strokes at one width.
 fn project_paths(
     flat: &Geometry,
     world: &Mat4,
     projector: &Projector,
 ) -> anyhow::Result<Option<PathObject>> {
+    let flattened = flatten_curves(flat, world, projector)?;
+    let flat = flattened.as_ref().unwrap_or(flat);
     let Some(flat) = near_clipped_paths(flat, &projector.view_proj.mul(world))? else {
         return Ok(None);
     };
@@ -694,18 +850,7 @@ fn project_paths(
         return Ok(None);
     }
     // Pixels per scene unit along the camera's right axis, at the centroid.
-    let world_centroid = point_mul(world, centroid);
-    let beside = [
-        world_centroid[0] + projector.right[0],
-        world_centroid[1] + projector.right[1],
-        world_centroid[2] + projector.right[2],
-    ];
-    let a = projector.project(
-        &Mat4::IDENTITY,
-        [world_centroid[0], world_centroid[1], world_centroid[2]],
-    );
-    let b = projector.project(&Mat4::IDENTITY, beside);
-    let scale = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+    let scale = projector.pixels_per_unit(point_mul(world, centroid));
 
     let mut projected = Vec::with_capacity(count);
     for index in 0..count {
@@ -714,24 +859,6 @@ fn project_paths(
         projected.push(Vec2(out[0], out[1]));
     }
     let mut geometry = flat.clone();
-    // Tangents are offsets: project the handle's end and subtract the point.
-    for name in [names::IN_TAN, names::OUT_TAN] {
-        let Some(column) = flat.points().get(name).and_then(|c| c.as_vec2(name).ok()) else {
-            continue;
-        };
-        let handles = column
-            .iter()
-            .enumerate()
-            .map(|(index, tan)| {
-                let p = positions.get3(index).unwrap_or(Vec3(0.0, 0.0, 0.0));
-                let end = projector.project(world, [p.0 + tan.0, p.1 + tan.1, p.2]);
-                Vec2(end[0] - projected[index].0, end[1] - projected[index].1)
-            })
-            .collect();
-        geometry
-            .points_mut()
-            .insert(name, AttributeArray::Vec2(handles))?;
-    }
     if let Some(radii) = flat
         .points()
         .get(names::PSCALE)
@@ -975,5 +1102,54 @@ mod clip_tests {
         assert_eq!(polygon.len(), 4);
         assert!(is_between(&polygon[2], 1, 2, 0.5));
         assert!(is_between(&polygon[3], 3, 0, 0.5));
+    }
+
+    /// An open curve from `(-40, 0, 0)` to `(40, 0, 100)` with both handles
+    /// pulling `-20` in `y`. Its `x` and `z` handles are the ends' own, so both
+    /// follow the same cubic `3 t^2 - 2 t^3` and `z = 100 (x + 40) / 80` holds
+    /// at every point, though neither is linear in the curve parameter (a
+    /// `z` that ran linearly in `t` is 15.6 off at `t = 0.25`).
+    #[test]
+    fn a_flattened_curve_bends_in_z_with_its_handles() {
+        let mut geometry =
+            Geometry::from_points3(vec![Vec3(-40.0, 0.0, 0.0), Vec3(40.0, 0.0, 100.0)]);
+        let tans = |a, b| AttributeArray::Vec2(vec![Vec2(0.0, a), Vec2(0.0, b)]);
+        geometry
+            .points_mut()
+            .insert(names::OUT_TAN, tans(-20.0, 0.0))
+            .unwrap();
+        geometry
+            .points_mut()
+            .insert(names::IN_TAN, tans(0.0, -20.0))
+            .unwrap();
+        geometry.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        let camera = Camera::looking_at([0.0, 0.0, -100.0], [0.0, 0.0, 0.0]);
+        let view = camera.view_matrix();
+        let projector = Projector {
+            right: [view.element(0, 0), view.element(0, 1), view.element(0, 2)],
+            view_proj: camera.projection_matrix(1.0).mul(&view),
+            view,
+            resolution: (200, 200),
+        };
+        let out = flatten_curves(&geometry, &Mat4::IDENTITY, &projector)
+            .unwrap()
+            .expect("a curve is flattened");
+        let positions = out.positions(Domain::Point).unwrap().unwrap();
+        assert!(positions.len() > 8, "a curve is many segments");
+        for i in 0..positions.len() {
+            let p = positions.get3(i).unwrap();
+            let z = 100.0 * (p.0 + 40.0) / 80.0;
+            assert!(
+                (p.2 - z).abs() < 0.05,
+                "point {i}: z {} at x {} (want {z})",
+                p.2,
+                p.0
+            );
+        }
+        let last = positions.get3(positions.len() - 1).unwrap();
+        assert_eq!((last.0, last.2), (40.0, 100.0), "ends on the end point");
     }
 }

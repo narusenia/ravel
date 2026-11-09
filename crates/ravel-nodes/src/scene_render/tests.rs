@@ -1407,3 +1407,154 @@ fn a_loose_point_behind_the_camera_is_not_drawn() {
         covered(&out)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Curved paths
+// ---------------------------------------------------------------------------
+
+/// A closed path of four bezier segments approximating the circle of `radius`
+/// about `(cx, cy, z)`: points at 0, 90, 180 and 270 degrees, tangents of
+/// `0.5523 * radius` along the circle's own direction (the standard cubic
+/// circle), so the curve is within 0.03% of round and its control polygon is
+/// a square far outside it.
+fn bezier_circle(cx: f32, cy: f32, z: f32, radius: f32) -> Geometry {
+    let k = 0.552_284_8 * radius;
+    let mut points = Vec::new();
+    let (mut out_tans, mut in_tans) = (Vec::new(), Vec::new());
+    for quarter in 0..4 {
+        let angle = quarter as f32 * std::f32::consts::FRAC_PI_2;
+        let (sin, cos) = angle.sin_cos();
+        points.push(Vec3(cx + radius * cos, cy + radius * sin, z));
+        out_tans.push(Vec2(-k * sin, k * cos));
+        in_tans.push(Vec2(k * sin, -k * cos));
+    }
+    let mut geometry = Geometry::from_points3(points);
+    geometry
+        .points_mut()
+        .insert(names::OUT_TAN, AttributeArray::Vec2(out_tans))
+        .unwrap();
+    geometry
+        .points_mut()
+        .insert(names::IN_TAN, AttributeArray::Vec2(in_tans))
+        .unwrap();
+    geometry.push_primitive(Primitive::Path {
+        verts: 0..4,
+        closed: true,
+    });
+    geometry
+        .primitive_attrs_mut()
+        .insert(names::CD, AttributeArray::Color(vec![RED]))
+        .unwrap();
+    geometry
+}
+
+/// Pixels `inside` the circle of pixel radius `radius` about `(cx, cy)` must
+/// be covered and pixels `outside` it must not, at every 15 degrees. The
+/// control polygon of the circle (its four points joined, or the square of its
+/// handles) fails both: at 45 degrees it is 28 pixels out where the circle is
+/// 40.
+fn assert_round(frame: &FrameBuffer, cx: f32, cy: f32, radius: f32, margin: f32, label: &str) {
+    for step in 0..24 {
+        let angle = step as f32 * 15.0_f32.to_radians();
+        let at = |r: f32| {
+            let (x, y) = (cx + r * angle.cos(), cy + r * angle.sin());
+            px(frame, x.floor() as u32, y.floor() as u32)[3]
+        };
+        assert!(
+            at(radius - margin) > 0.9,
+            "{label}: inside at {} degrees",
+            step * 15
+        );
+        assert!(
+            at(radius + margin) < 0.1,
+            "{label}: outside at {} degrees",
+            step * 15
+        );
+    }
+}
+
+#[test]
+fn a_bezier_circle_in_3d_renders_round() {
+    let scene = scene_of(
+        pixel_camera(100, 100),
+        vec![bezier_circle(50.0, 50.0, 0.0, 40.0)],
+    );
+    assert_round(&cpu_frame(&scene, 100, 100), 50.0, 50.0, 40.0, 1.5, "cpu");
+    assert_round(
+        &Rig::new().frame(&scene, 100, 100),
+        50.0,
+        50.0,
+        40.0,
+        1.5,
+        "gpu",
+    );
+}
+
+#[test]
+fn a_bezier_circle_under_perspective_renders_round_at_the_projected_radius() {
+    // The facing circle at distance 100 on a 200 x 200 canvas: 30 units are
+    // 30 * 2.1445 = 64.3 pixels.
+    let scene = scene_of(
+        near_plane_camera(),
+        vec![bezier_circle(0.0, 0.0, 0.0, 30.0)],
+    );
+    assert_round(&cpu_frame(&scene, 200, 200), 100.0, 100.0, 64.3, 1.5, "cpu");
+    assert_round(
+        &Rig::new().frame(&scene, 200, 200),
+        100.0,
+        100.0,
+        64.3,
+        1.5,
+        "gpu",
+    );
+}
+
+/// The straight line of `line_through_the_near_plane` bent into a curve (both
+/// handles pull toward `+y`). Unclipped, its behind-camera end mirrors across
+/// the screen centre into the left half, so the left of the picture must stay
+/// empty; the end at distance 200 is at pixel `x = 121.4`.
+fn curve_through_the_near_plane() -> Geometry {
+    let mut geometry = line_through_the_near_plane();
+    geometry
+        .points_mut()
+        .insert(
+            names::OUT_TAN,
+            AttributeArray::Vec2(vec![Vec2(0.0, 30.0), Vec2(0.0, 0.0)]),
+        )
+        .unwrap();
+    geometry
+        .points_mut()
+        .insert(
+            names::IN_TAN,
+            AttributeArray::Vec2(vec![Vec2(0.0, 0.0), Vec2(0.0, 30.0)]),
+        )
+        .unwrap();
+    geometry
+}
+
+fn assert_curve_only_in_front(frame: &FrameBuffer, label: &str) {
+    for y in 0..200 {
+        for x in 0..118 {
+            assert_eq!(
+                px(frame, x, y)[3],
+                0.0,
+                "{label}: ({x}, {y}) is behind the camera"
+            );
+        }
+    }
+    let drawn = (118..200)
+        .flat_map(|x| (0..200).map(move |y| (x, y)))
+        .filter(|&(x, y)| px(frame, x, y)[3] > 0.1)
+        .count();
+    assert!(
+        drawn > 20,
+        "{label}: the front of the curve is drawn ({drawn})"
+    );
+}
+
+#[test]
+fn a_curve_crossing_the_near_plane_is_clipped_as_a_curve() {
+    let scene = scene_of(near_plane_camera(), vec![curve_through_the_near_plane()]);
+    assert_curve_only_in_front(&cpu_frame(&scene, 200, 200), "cpu");
+    assert_curve_only_in_front(&Rig::new().frame(&scene, 200, 200), "gpu");
+}

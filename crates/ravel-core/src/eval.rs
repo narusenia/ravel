@@ -2342,6 +2342,7 @@ impl Evaluator {
                 }
                 for prefix in changed {
                     self.invalidate_scope(&prefix);
+                    self.sim_prune_layer(&prefix, &document);
                 }
                 // Shell-only edits (timing, transform, opacity, blend,
                 // parenting) don't change networks but do change what the
@@ -2443,7 +2444,9 @@ impl Evaluator {
                             .get(comp_id)
                             .is_none_or(|c| c.get_layer(layer.id).is_none());
                         if removed {
-                            self.invalidate_scope(&[PathSegment::Layer(*comp_id, layer.id)]);
+                            let prefix = [PathSegment::Layer(*comp_id, layer.id)];
+                            self.invalidate_scope(&prefix);
+                            self.sim_prune_layer(&prefix, &document);
                         }
                     }
                 }
@@ -2653,6 +2656,7 @@ impl Evaluator {
             return;
         }
         self.store.retain(|k| !under.contains(&k.path));
+        self.drop_sim_under(&under);
         self.prune_scope_state(&under);
     }
 
@@ -2674,6 +2678,7 @@ impl Evaluator {
         let paths: Vec<&[PathSegment]> = owned.iter().map(|id| self.paths.path(*id)).collect();
         let under = self.paths.ids_under_any(&paths);
         self.store.retain(|k| !under.contains(&k.path));
+        self.drop_sim_under(&under);
         self.prune_scope_state(&under);
     }
 
@@ -2714,6 +2719,9 @@ impl Evaluator {
             .collect();
         let under = self.paths.ids_under_any(&dead);
         self.store.retain(|k| !under.contains(&k.path));
+        // Before `release` below hands the ids out again: a track left under
+        // a released id would be found by whatever path gets it next.
+        self.drop_sim_under(&under);
         self.prune_scope_state(&under);
         // A nested scope of another owner can sit under a retired one.
         for scopes in self.time_shift_scopes.values_mut() {

@@ -39,14 +39,17 @@
 //! `TimeShift(node, frame)`.
 
 use super::{
-    EvalContext, EvalError, EvalScope, Evaluator, NodeData, NodeKey, NodeProcessor, PathSegment,
-    ResolveBudget, ResolveOptions, ResolvedParams, parameter_overlays,
+    EvalContext, EvalError, EvalScope, Evaluator, NodeData, NodeKey, NodeProcessor, PathId,
+    PathSegment, ResolveBudget, ResolveOptions, ResolvedParams, parameter_overlays,
 };
 use crate::cache_budget::{CacheKind, Evicted, Reservation, ReservationId, SharedCacheBudget};
+use crate::composition::Document;
 use crate::graph::{Graph, Node};
 use crate::id::NodeId;
+use crate::types::FrameRate;
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -184,12 +187,38 @@ impl<P: StatefulProcessor> NodeProcessor for StatefulAdapter<P> {
 // The cache
 // ===========================================================================
 
+/// What a track's states were made from: the digest the track is accepted
+/// by, and the cheap evidence that the digest still describes the graph in
+/// hand.
+///
+/// Hashing the upstream subgraph costs a walk over it and a `Debug` of every
+/// parameter, and a pull happens once per played frame. `graph` lets a pull
+/// whose graph is the very object the digest was made from skip that
+/// ([`Graph::ptr_eq`] is `O(1)`, and `true` proves identical content); a
+/// `false` only costs the recomputation.
+#[derive(Clone)]
+pub(super) struct Premise {
+    graph: Graph,
+    fps: FrameRate,
+    comp_resolution: (u32, u32),
+    hash: u64,
+}
+
+impl Premise {
+    /// Whether `hash` was made from `graph` and the frame axes of `ctx`.
+    fn describes(&self, graph: &Graph, ctx: &EvalContext) -> bool {
+        self.graph.ptr_eq(graph)
+            && self.fps == ctx.fps
+            && self.comp_resolution == ctx.comp_resolution
+    }
+}
+
 /// One node's states over a contiguous run of frames, `start_frame` first.
 struct SimTrack {
     start_frame: u64,
     states: Vec<SimState>,
     /// What the states were made from (see [`Evaluator::sim_premise_hash`]).
-    input_hash: u64,
+    premise: Premise,
     bytes: u64,
     /// The budget claim for `bytes`, replaced as the track grows. Dropping
     /// the track releases it.
@@ -241,25 +270,42 @@ impl SimCache {
         Some((track.end_frame() - 1, state))
     }
 
-    /// Drop the track unless it was made from `input_hash`. Returns whether
-    /// it was dropped.
-    pub(super) fn discard_if_stale(&mut self, key: &NodeKey, input_hash: u64) -> bool {
-        match self.tracks.get(key) {
-            Some(track) if track.input_hash != input_hash => {
+    /// The digest of `key`'s track when it was made from this very graph and
+    /// these frame axes, so the caller can skip recomputing it.
+    pub(super) fn known_hash(
+        &self,
+        key: &NodeKey,
+        graph: &Graph,
+        ctx: &EvalContext,
+    ) -> Option<u64> {
+        let premise = &self.tracks.get(key)?.premise;
+        premise.describes(graph, ctx).then_some(premise.hash)
+    }
+
+    /// The acceptance check: drop the track unless it was made from
+    /// `premise.hash`, and otherwise remember the graph it was just proven
+    /// against. Returns whether it was dropped.
+    pub(super) fn discard_if_stale(&mut self, key: &NodeKey, premise: &Premise) -> bool {
+        match self.tracks.get_mut(key) {
+            Some(track) if track.premise.hash != premise.hash => {
                 self.remove(key);
                 true
             }
-            _ => false,
+            Some(track) => {
+                track.premise = premise.clone();
+                false
+            }
+            None => false,
         }
     }
 
-    /// Append `state` (made from `input_hash`) to `key`'s track and re-claim
+    /// Append `state` (made from `premise`) to `key`'s track and re-claim
     /// the track's bytes. Returns the eviction entries that are not
     /// simulation tracks, for the caller to hand to the node-result cache.
     pub(super) fn push(
         &mut self,
         key: NodeKey,
-        input_hash: u64,
+        premise: &Premise,
         state: SimState,
         bytes: u64,
         budget: Option<&SharedCacheBudget>,
@@ -267,7 +313,7 @@ impl SimCache {
         let track = self.tracks.entry(key).or_insert_with(|| SimTrack {
             start_frame: SIM_START_FRAME,
             states: Vec::new(),
-            input_hash,
+            premise: premise.clone(),
             bytes: 0,
             reservation: None,
         });
@@ -358,8 +404,89 @@ impl Evaluator {
     /// The hash of everything the states of `node` are made from, other than
     /// the frame. Two equal values mean a track made under one may answer a
     /// pull made under the other.
-    fn sim_premise_hash(&self, _graph: &Graph, _node: &Node, _ctx: &EvalContext) -> u64 {
-        0
+    ///
+    /// Covers the **upstream subgraph** of `node` — itself, every node
+    /// reachable through its wires and through `NodeOutput` parameter
+    /// bindings — by structure (wiring, node type, bypass flag, port layout)
+    /// and by every parameter value, keyframes and expressions included, plus
+    /// the frame rate and composition basis the frames are counted in. What
+    /// it leaves out is what does not change a state: a node's position,
+    /// label, colour and stacking order, and every node that is not upstream.
+    ///
+    /// It does not see inside a processor (a media file replaced on disk, a
+    /// registered processor swapped): those reach the track through
+    /// [`Evaluator::invalidate_node`] and [`Evaluator::invalidate_all`].
+    fn sim_premise_hash(&mut self, graph: &Graph, node: &Node, ctx: &EvalContext) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        ctx.fps.hash(&mut hasher);
+        ctx.comp_resolution.hash(&mut hasher);
+
+        let index = self.current_graph_index(graph);
+        let mut upstream: BTreeSet<NodeId> = BTreeSet::new();
+        let mut pending = vec![node.id];
+        while let Some(id) = pending.pop() {
+            if !upstream.insert(id) {
+                continue;
+            }
+            pending.extend(index.in_edges(id).iter().map(|(_, source, _)| *source));
+            if let Some(reached) = graph.node(id) {
+                pending.extend(reached.parameter_sources().into_iter().map(|(n, _)| n));
+            }
+        }
+        for id in upstream {
+            id.hash(&mut hasher);
+            let Some(reached) = graph.node(id) else {
+                // A dangling reference still changes the digest.
+                continue;
+            };
+            hash_node(reached, &mut hasher);
+            let mut wires: Vec<_> = index.in_edges(id).iter().collect();
+            wires.sort_by_key(|(port, source, source_port)| (port.0, source.raw(), source_port.0));
+            for (port, source, source_port) in wires {
+                (port.0, source.raw(), source_port.0).hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+
+    /// Release the tracks the document edit left without an owner.
+    ///
+    /// `prefix` is a layer scope whose network changed; `network` is the new
+    /// network, or `None` when the layer is gone. A track whose node is still
+    /// in the network (a subnet's inside included) is **kept** — whether its
+    /// states are still right is the premise hash's call at the next pull,
+    /// and an edit to an unrelated node in the same network must not cost the
+    /// simulation its frames. A track whose node was deleted is never pulled
+    /// again, so only this releases the bytes it holds in the protected share.
+    pub(super) fn sim_prune_scope(&mut self, prefix: &[PathSegment], network: Option<&Graph>) {
+        let under = self.paths.ids_under(prefix);
+        let mut alive = HashSet::new();
+        if let Some(network) = network {
+            collect_node_ids(network, &mut alive);
+        }
+        self.sim
+            .retain(|key| !under.contains(&key.path) || alive.contains(&key.node));
+    }
+
+    /// Drop the tracks keyed under the scope paths `under`, for the scopes
+    /// the evaluator retires (shift and iteration scopes). Not for a network
+    /// edit — see [`Self::sim_prune_scope`] — but required before a path id is
+    /// released, because [`PathInterner::release`] lets the id name another
+    /// path.
+    pub(super) fn drop_sim_under(&mut self, under: &HashSet<PathId>) {
+        self.sim.retain(|key| !under.contains(&key.path));
+    }
+
+    /// [`Self::sim_prune_scope`] for the layer `prefix` names in `document`.
+    pub(super) fn sim_prune_layer(&mut self, prefix: &[PathSegment], document: &Document) {
+        let network = match prefix {
+            [PathSegment::Layer(comp, layer)] => document
+                .get_composition(*comp)
+                .and_then(|comp| comp.get_layer(*layer))
+                .map(|layer| &layer.network),
+            _ => None,
+        };
+        self.sim_prune_scope(prefix, network);
     }
 
     /// Whether a fill should stop here: a newer request is waiting, or a
@@ -395,15 +522,24 @@ impl Evaluator {
             path: self.path_id,
             node: node.id,
         };
-        let hash = self.sim_premise_hash(&graph, node, ctx);
-        self.sim.discard_if_stale(&key, hash);
+        let hash = match self.sim.known_hash(&key, &graph, ctx) {
+            Some(hash) => hash,
+            None => self.sim_premise_hash(&graph, node, ctx),
+        };
+        let premise = Premise {
+            graph: graph.clone(),
+            fps: ctx.fps,
+            comp_resolution: ctx.comp_resolution,
+            hash,
+        };
+        self.sim.discard_if_stale(&key, &premise);
         let budget = self.store.budget().cloned();
         if let Some(state) = self.sim.state_at(&key, ctx.frame, budget.as_ref()) {
             return Ok(state);
         }
 
         self.sim_active = true;
-        let filled = self.fill_sim_track(&graph, node, ctx, stepper, key, hash);
+        let filled = self.fill_sim_track(&graph, node, ctx, stepper, key, &premise);
         self.sim_active = false;
         filled
     }
@@ -419,7 +555,7 @@ impl Evaluator {
         ctx: &EvalContext,
         stepper: &dyn SimStepper,
         key: NodeKey,
-        hash: u64,
+        premise: &Premise,
     ) -> Result<SimState, EvalError> {
         let budget = self.store.budget().cloned();
         let (mut frame, mut prev) = match self.sim.last(&key) {
@@ -444,7 +580,7 @@ impl Evaluator {
             let bytes = stepper.byte_size(&state);
             let rest = self
                 .sim
-                .push(key, hash, state.clone(), bytes, budget.as_ref());
+                .push(key, premise, state.clone(), bytes, budget.as_ref());
             self.store.drop_evicted(&rest);
             if frame >= ctx.frame {
                 return Ok(state);
@@ -492,6 +628,57 @@ impl Evaluator {
     }
 }
 
+/// Everything about `node` that decides what it computes — and nothing about
+/// where the editor drew it.
+fn hash_node(node: &Node, hasher: &mut impl Hasher) {
+    node.type_key.hash(hasher);
+    node.metadata.bypassed.hash(hasher);
+    for port in &node.inputs {
+        (&port.name, port.is_param, port.is_variadic).hash(hasher);
+    }
+    node.outputs.len().hash(hasher);
+    // `Parameter` is not `Hash` (it holds floats); its `Debug` form prints a
+    // float by its shortest round-trip digits, so equal text is equal value.
+    format!("{:?}", node.parameters).hash(hasher);
+    if let Some(subnet) = &node.subnet {
+        hash_graph(subnet, hasher);
+    }
+}
+
+/// A whole graph's content, in id order so it does not depend on the maps'
+/// iteration order.
+fn hash_graph(graph: &Graph, hasher: &mut impl Hasher) {
+    let mut nodes: Vec<_> = graph.nodes().collect();
+    nodes.sort_by_key(|node| node.id);
+    for node in nodes {
+        node.id.hash(hasher);
+        hash_node(node, hasher);
+    }
+    let mut edges: Vec<_> = graph
+        .edges()
+        .map(|e| {
+            (
+                e.source.raw(),
+                e.source_port.0,
+                e.target.raw(),
+                e.target_port.0,
+            )
+        })
+        .collect();
+    edges.sort_unstable();
+    edges.hash(hasher);
+}
+
+/// Every node id in `graph`, subnets included.
+fn collect_node_ids(graph: &Graph, out: &mut HashSet<NodeId>) {
+    for node in graph.nodes() {
+        out.insert(node.id);
+        if let Some(subnet) = &node.subnet {
+            collect_node_ids(subnet, out);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,8 +699,8 @@ mod tests {
         data.downcast_ref::<Scalar>().expect("a scalar").0
     }
 
-    /// A scalar that is the frame number, so a simulation reading it shows
-    /// *which frames its inputs were pulled at*.
+    /// A scalar that is the frame number times its `k` parameter, so a
+    /// simulation reading it shows *which frames its inputs were pulled at*.
     struct FrameSource;
 
     impl NodeProcessor for FrameSource {
@@ -522,10 +709,10 @@ mod tests {
             _node: &Node,
             ctx: &EvalContext,
             _inputs: &[Option<Arc<dyn NodeData>>],
-            _params: &ResolvedParams,
+            params: &ResolvedParams,
             _scope: &mut dyn EvalScope,
         ) -> anyhow::Result<Arc<dyn NodeData>> {
-            Ok(Arc::new(Scalar(ctx.frame as f32)))
+            Ok(Arc::new(Scalar(ctx.frame as f32 * params.f32_or("k", 1.0))))
         }
 
         fn is_time_dependent(&self) -> bool {
@@ -605,7 +792,9 @@ mod tests {
     }
 
     fn source_node(id: u64) -> Node {
-        Node::new(NodeId::new(id), "test.frame").with_output("out", DataTypeId::SCALAR)
+        Node::new(NodeId::new(id), "test.frame")
+            .with_output("out", DataTypeId::SCALAR)
+            .with_param("k", ParameterValue::Float(1.0))
     }
 
     fn wire(graph: Graph, edge: u64, from: u64, to: u64) -> Graph {
@@ -874,5 +1063,263 @@ mod tests {
 
         assert_eq!(counter.initials.load(Ordering::Relaxed), 2);
         assert_eq!(counter.steps.load(Ordering::Relaxed), 6);
+    }
+
+    // ---- invalidation -----------------------------------------------------
+
+    use crate::graph::Parameter;
+
+    fn set(graph: Graph, node: u64, key: &str, value: ParameterValue) -> Graph {
+        graph
+            .set_params(
+                NodeId::new(node),
+                &[Parameter {
+                    key: key.into(),
+                    value,
+                }],
+            )
+            .unwrap()
+    }
+
+    /// `source(1) -> sim(2)`, plus a node (9) that feeds nothing.
+    fn fed_graph() -> Graph {
+        wire(
+            Graph::new()
+                .add_node(source_node(1))
+                .unwrap()
+                .add_node(sim_node(2))
+                .unwrap()
+                .add_node(source_node(9))
+                .unwrap(),
+            1,
+            1,
+            2,
+        )
+    }
+
+    fn fed_evaluator(counter: &Counter) -> Evaluator {
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(1), Arc::new(FrameSource));
+        ev.register(NodeId::new(9), Arc::new(FrameSource));
+        ev.register(NodeId::new(2), stateful_processor(counter.clone()));
+        ev
+    }
+
+    #[test]
+    fn an_upstream_parameter_change_discards_the_track_and_refills_it() {
+        let counter = Counter::default();
+        let graph = fed_graph();
+        let mut ev = fed_evaluator(&counter);
+        let node = NodeId::new(2);
+
+        // state(10) = sum of (1 + t * k) for t in 1..=10.
+        let before = ev.evaluate(&graph, node, &ctx_at(10)).unwrap();
+        assert_eq!(value_of(&before), 10.0 + 55.0);
+
+        let edited = set(graph, 1, "k", ParameterValue::Float(2.0));
+        ev.mark_dirty(&edited, NodeId::new(1));
+        let after = ev.evaluate(&edited, node, &ctx_at(10)).unwrap();
+
+        assert_eq!(value_of(&after), 10.0 + 110.0, "the old states were reused");
+        assert_eq!(counter.initials.load(Ordering::Relaxed), 2);
+        assert_eq!(counter.steps.load(Ordering::Relaxed), 20);
+        assert_eq!(ev.sim_cached_frames(&[], node), Some(0..11));
+    }
+
+    #[test]
+    fn a_change_to_the_simulating_node_discards_its_track_and_stays_deterministic() {
+        let (graph, node) = lone();
+        let mut ev = Evaluator::new();
+        ev.register(node, stateful_processor(Seeded));
+        ev.evaluate(&graph, node, &ctx_at(20)).unwrap();
+
+        let edited = set(graph, 2, "seed", ParameterValue::Int(9));
+        ev.mark_dirty(&edited, node);
+        let refilled = ev.evaluate(&edited, node, &ctx_at(20)).unwrap();
+
+        let mut fresh = Evaluator::new();
+        fresh.register(node, stateful_processor(Seeded));
+        let expected = fresh.evaluate(&edited, node, &ctx_at(20)).unwrap();
+        assert_eq!(
+            value_of(&refilled),
+            value_of(&expected),
+            "a refilled track must equal one built from nothing"
+        );
+        let stale = {
+            let mut old = Evaluator::new();
+            old.register(node, stateful_processor(Seeded));
+            let original = Graph::new().add_node(sim_node(2)).unwrap();
+            value_of(&old.evaluate(&original, node, &ctx_at(20)).unwrap())
+        };
+        assert_ne!(
+            value_of(&refilled),
+            stale,
+            "the seed change must reach the result or this proves nothing"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_change_does_not_discard_the_track() {
+        let counter = Counter::default();
+        let graph = fed_graph();
+        let mut ev = fed_evaluator(&counter);
+        let node = NodeId::new(2);
+        ev.evaluate(&graph, node, &ctx_at(10)).unwrap();
+        assert_eq!(counter.steps.load(Ordering::Relaxed), 10);
+
+        // A node nothing upstream of the simulation reads, edited and
+        // dirtied; and an upstream node moved on the canvas.
+        let mut edited = set(graph, 9, "k", ParameterValue::Float(5.0));
+        ev.mark_dirty(&edited, NodeId::new(9));
+        let mut moved = (**edited.node(NodeId::new(1)).unwrap()).clone();
+        moved.metadata.position = (300.0, 40.0);
+        moved.metadata.label = Some("renamed".into());
+        edited = edited.replace_node(Arc::new(moved));
+        ev.mark_dirty(&edited, NodeId::new(1));
+
+        let after = ev.evaluate(&edited, node, &ctx_at(12)).unwrap();
+
+        assert_eq!(value_of(&after), 12.0 + 78.0);
+        assert_eq!(
+            counter.initials.load(Ordering::Relaxed),
+            1,
+            "an unrelated edit restarted the simulation"
+        );
+        assert_eq!(
+            counter.steps.load(Ordering::Relaxed),
+            12,
+            "only the two new frames may step"
+        );
+    }
+
+    // ---- layer networks ----------------------------------------------------
+
+    use crate::composition::{Composition, Layer};
+    use crate::id::{CompId, LayerId};
+
+    fn comp_id() -> CompId {
+        CompId::new(1)
+    }
+
+    fn layer_id() -> LayerId {
+        LayerId::new(1)
+    }
+
+    fn layer_scope() -> [PathSegment; 1] {
+        [PathSegment::Layer(comp_id(), layer_id())]
+    }
+
+    fn document(network: Graph, start_frame: i64) -> Arc<Document> {
+        Arc::new(
+            Document::default().with_composition(
+                Composition::new(comp_id(), "C", (16, 16), FPS, 300)
+                    .add_layer(Layer::new(layer_id(), "L", network).with_time(start_frame, 0, 300)),
+            ),
+        )
+    }
+
+    fn pull_in_layer(ev: &mut Evaluator, network: &Graph, frame: u64) -> f32 {
+        let out = ev
+            .evaluate_sub(
+                layer_scope()[0],
+                network,
+                NodeId::new(2),
+                &ctx_at(frame),
+                Vec::new(),
+            )
+            .unwrap();
+        value_of(&out)
+    }
+
+    fn layer_evaluator(counter: &Counter, network: &Graph) -> Evaluator {
+        let mut ev = fed_evaluator(counter);
+        ev.set_document(document(network.clone(), 0));
+        ev
+    }
+
+    #[test]
+    fn a_shell_edit_does_not_discard_a_track_inside_the_layer_network() {
+        let counter = Counter::default();
+        let network = fed_graph();
+        let mut ev = layer_evaluator(&counter, &network);
+        assert_eq!(pull_in_layer(&mut ev, &network, 8), 8.0 + 36.0);
+        assert_eq!(
+            ev.sim_cached_frames(&layer_scope(), NodeId::new(2)),
+            Some(0..9)
+        );
+
+        // The shell moves in time; the network is the same object.
+        ev.set_document(document(network.clone(), 10));
+
+        assert_eq!(
+            ev.sim_cached_frames(&layer_scope(), NodeId::new(2)),
+            Some(0..9),
+            "a shell edit dropped the track"
+        );
+        assert_eq!(pull_in_layer(&mut ev, &network, 8), 8.0 + 36.0);
+        assert_eq!(counter.steps.load(Ordering::Relaxed), 8);
+    }
+
+    #[test]
+    fn an_edit_elsewhere_in_the_layer_network_keeps_the_track() {
+        let counter = Counter::default();
+        let network = fed_graph();
+        let mut ev = layer_evaluator(&counter, &network);
+        pull_in_layer(&mut ev, &network, 8);
+
+        let edited = network.add_node(source_node(50)).unwrap();
+        ev.set_document(document(edited.clone(), 0));
+        let value = pull_in_layer(&mut ev, &edited, 10);
+
+        assert_eq!(value, 10.0 + 55.0);
+        assert_eq!(counter.initials.load(Ordering::Relaxed), 1);
+        assert_eq!(counter.steps.load(Ordering::Relaxed), 10);
+    }
+
+    #[test]
+    fn deleting_the_node_or_the_layer_releases_its_track() {
+        let counter = Counter::default();
+        let network = fed_graph();
+        let mut ev = layer_evaluator(&counter, &network);
+        pull_in_layer(&mut ev, &network, 4);
+        assert_eq!(ev.sim_track_count(), 1);
+
+        // The node is gone from the edited network: nothing will pull it.
+        let without = Graph::new().add_node(source_node(1)).unwrap();
+        ev.set_document(document(without, 0));
+        assert_eq!(ev.sim_track_count(), 0, "a deleted node kept its track");
+
+        // And the same for a whole layer.
+        let mut ev = layer_evaluator(&counter, &network);
+        pull_in_layer(&mut ev, &network, 4);
+        assert_eq!(ev.sim_track_count(), 1);
+        ev.set_document(Arc::new(
+            Document::default().with_composition(Composition::new(
+                comp_id(),
+                "C",
+                (16, 16),
+                FPS,
+                300,
+            )),
+        ));
+        assert_eq!(ev.sim_track_count(), 0, "a deleted layer kept its track");
+    }
+
+    #[test]
+    fn a_changed_frame_rate_discards_the_track() {
+        let counter = Counter::default();
+        let (graph, node) = lone();
+        let mut ev = counter_evaluator(&counter, 2);
+        ev.evaluate(&graph, node, &ctx_at(5)).unwrap();
+
+        let other = EvalContext::new(5, FrameRate { num: 24, den: 1 }, (64, 64));
+        ev.mark_dirty(&graph, node);
+        ev.evaluate(&graph, node, &other).unwrap();
+
+        assert_eq!(
+            counter.initials.load(Ordering::Relaxed),
+            2,
+            "states counted at 30 fps answered a 24 fps pull"
+        );
     }
 }

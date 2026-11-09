@@ -217,6 +217,22 @@ kit フォークの改造は要らない。検証は kit（rev `7eafdc2`）の�
 - 実機: 打鍵 → 候補 → Tab 確定 → フォーカスがエディタのまま
 - モーション予算に収まる（ポップアップは出現アニメーションを持たない。`ux.md`）
 
+#### EXED-4 実装メモ
+
+- **キー割り当ては新設しない**: EXED-1 の「`tab` を後から束縛」は取らなかった。
+  kit の `IndentInline`（Tab）・`Enter { shift }`（Shift+Enter）・`Paste` を、
+  欄の要素で **capture 相で受ける**（`capture_action`）。ポップアップが閉じて
+  いれば何もせず素通しするので、他の `Input` へ副作用が出ない（束縛が全
+  `Input` に効く問題が構造上起きない）。Up / Down / Enter / Escape は kit の
+  `set_overlay_action_handler`。したがって `assets/keybindings` にも `CommandId`
+  にも足すものが無い（Ravel 側のキー割り当てが増えない）
+- 選択行は kit のメニューが持たないので、各候補の `preselect` に載せ、Up / Down
+  のたびに `present_completion_items` で出し直す
+- 完全に入力済みの名前で、それより長い候補が無いときは何も出さない（Enter が
+  式の確定のまま残る）
+- Shift+Enter は何も挿入しない。貼り付けは改行を空白 1 つへ畳む（`single_line`）
+- マウスでの候補選択は無い（キーのみ）。実機確認は gallery の式エディタ節
+
 ### EXED-5 エラー位置の下線
 
 依存: EXED-3

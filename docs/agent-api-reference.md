@@ -3271,10 +3271,24 @@ NumberInput::new(&Entity<InputState>).compact() / .density(..) / .invalid(..)
 
 // expression_editor.rs — `gpui_base::EditorState` (one row, no line numbers,
 // Enter submits) in the same frame, coloured by `highlight_tokens`.
-expression_editor_state(value, &mut Window, &mut App) -> Entity<EditorState>
-    // read with `.read(cx).value()`; subscribe to `InputEvent::{Change, PressEnter}`
+expression_editor_state(value, Vocabulary, &mut Window, &mut App) -> Entity<EditorState>
+    // read with `.read(cx).value()`; subscribe to `InputEvent::{Change, PressEnter}`.
+    // The `Vocabulary` is what completion offers (`vocabulary(&Scope::parameter_context())`
+    // or `field_context()`); the caller decides, the widget only uses it.
 ExpressionEditor::new(&Entity<EditorState>).compact() / .invalid(..)
     .accessibility_label(..) .tab_index(..)   // `Styled`
+    // Completion menu: drawn under the field (`deferred(anchored())`, tokens, no
+    // animation, no focus handle). Up/Down move, Tab/Enter accept as ONE undo
+    // step, Escape closes — and with the menu closed every one of them is the
+    // editor's own. No key is bound here: Tab, Shift+Enter and paste are the
+    // kit's `IndentInline` / `Enter{shift}` / `Paste` actions caught in the
+    // capture phase on the field; Shift+Enter inserts nothing, a paste with line
+    // breaks is flattened by `single_line`.
+expression_completion::complete(&Vocabulary, text, caret) -> Option<(Word, Vec<Candidate>)>
+expression_completion::word_at(text, caret) -> Option<Word>   // { range, attribute }
+    // Pure. After `@` only attributes; else functions, constants, variables.
+    // Case-insensitive prefix; an exact match leads; `None` when the word is
+    // already complete and nothing longer matches (so Enter still submits).
 token_color(TokenClass, &Colors) -> Hsla      // pure, exhaustive `match`
 style_runs(&[(Span, TokenClass)], &Range<usize>, &Colors) -> Vec<(Range<usize>, HighlightStyle)>
     // gapless cover of the range; what `InputHighlighter::styles` returns.

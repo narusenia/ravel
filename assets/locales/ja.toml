@@ -2084,3 +2084,11 @@ themes = "テーマを読み込み中…"
 settings = "設定を適用中…"
 keybindings = "キーバインドを読み込み中…"
 layout = "ワークスペースを復元中…"
+
+# The word a completion row shows beside a name that is not a function
+# (a function shows its argument count instead).
+[expression_editor.kind]
+function = "関数"
+constant = "定数"
+variable = "変数"
+attribute = "属性"

@@ -152,9 +152,10 @@ implemented features.
 3D is partly in place: `P` carries either `Vec2` or `Vec3`, `Primitive::Mesh`
 exists alongside `Primitive::Path`, `geometry::rotation` owns the Euler and
 quaternion math, and `Scene` with its cameras and the `scene.add` / `scene.merge`
-/ `scene.camera` nodes can assemble a scene graph. **Nothing renders it yet** —
-`scene.render` and the triangle renderer are unit 4 of `3d-scene-plan.md`, so a
-`Scene` is currently a value that can be built and inspected but not drawn.
+/ `scene.camera` / `scene.light` nodes can assemble a scene graph. `scene.render`
+draws it with the triangle renderer (opaque meshes depth-tested, translucent
+meshes and paths sorted; GPU with a CPU reference), and meshes that carry `N`
+are shaded by the scene's ambient, directional and point lights.
 
 ### UI panels and interaction
 

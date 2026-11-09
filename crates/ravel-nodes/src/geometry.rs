@@ -11,10 +11,12 @@
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::absent::absent_column;
+use ravel_core::geometry::rotation::Quat;
 use ravel_core::geometry::{
     AttributeArray, AttributeSet, ConnectInterpolation, ConnectMode, Domain, Geometry,
-    InstanceColumns, InstanceImage, InstanceSource, InstanceTransform, Measure, SortMode, blast,
-    bounds_center, connect, group_selection, measure, names, resample, sort,
+    InstanceColumns, InstanceColumns3, InstanceImage, InstancePlacement3, InstanceSource,
+    InstanceTransform, Measure, Primitive, SortMode, blast, bounds_center, connect,
+    group_selection, measure, names, resample, sort,
 };
 use ravel_core::graph::Node;
 use ravel_core::types::{NodeData, Vec2, Vec3};
@@ -48,10 +50,12 @@ fn geometry_input<'a>(
 /// on and are ignored. A `Vec3` column uses all three components, rotating by
 /// the Euler angles in the fixed ZYX order of the procedural geometry spec.
 ///
-/// Instance `rot` (F32) and `scale` (Vec2) are 2D-only standard attributes, so
-/// they keep composing with the Z rotation and the xy scale whatever the
-/// dimension of the instance `P`; per-instance 3D orientation arrives with the
-/// `orient` / `scale3` attributes.
+/// Instances with a `Vec2` `P` compose the Z rotation and xy scale into `rot` /
+/// `scale` / `shear`. Instances with a `Vec3` `P` compose the whole rotation into
+/// `orient` and the scale into `scale3` (exact for a uniform scale or an
+/// unturned instance; otherwise an error, see `compose_spatial_instances`).
+/// A point `N` column is turned by the inverse-transpose of the linear part and
+/// renormalised, and a mirror reverses the winding of the meshes it reaches.
 pub struct GeometryTransformProcessor;
 
 impl GeometryTransformProcessor {
@@ -183,9 +187,38 @@ pub fn apply_transform_in_group<'a>(
         )
     };
 
+    // The linear part (rotation and scale, no translation) as a 3D placement,
+    // which is what carries a surface normal: the inverse-transpose, not the
+    // rotation of the vector. A planar `P` has no x / y rotation and no z
+    // scale to act on, so its normals see only what its points see.
+    let euler_radians = Vec3(
+        euler[0].to_radians(),
+        euler[1].to_radians(),
+        euler[2].to_radians(),
+    );
+    let spatial_linear = InstancePlacement3 {
+        offset: Vec3(0.0, 0.0, 0.0),
+        rotation: Quat::from_euler_zyx(euler_radians),
+        scale: Vec3(sx, sy, sz),
+    };
+    let points_spatial = matches!(
+        geometry.positions(Domain::Point),
+        Some(Ok(ravel_core::geometry::Positions::D3(_)))
+    );
+    let point_linear = if points_spatial {
+        spatial_linear
+    } else {
+        InstancePlacement3 {
+            rotation: Quat::from_euler_zyx(Vec3(0.0, 0.0, rotation)),
+            scale: Vec3(sx, sy, 1.0),
+            ..spatial_linear
+        }
+    };
+
     let mut out = geometry.clone();
     if out.points().get(names::P).is_some() {
         transform_positions(out.points_mut(), &apply, &apply3, &in_point)?;
+        rotate_normals(&mut out, &point_linear, &in_point)?;
     }
     // Bezier tangents are **offsets from their point**, so they take the
     // linear part of the transform and none of the translation — the same
@@ -237,6 +270,13 @@ pub fn apply_transform_in_group<'a>(
         if out.instances().get(names::P).is_some() {
             transform_positions(out.instances_mut(), &apply, &apply3, &in_instance)?;
         }
+        let instances_spatial = matches!(
+            geometry.positions(Domain::Instance),
+            Some(Ok(ravel_core::geometry::Positions::D3(_)))
+        );
+        if instances_spatial {
+            compose_spatial_instances(&mut out, &spatial_linear, &in_instance)?;
+        } else
         // The node's transform is the outer placement of every instance:
         // its position went through `transform_positions` above, and the
         // linear part is composed exactly with the instance's own, so a
@@ -286,6 +326,137 @@ pub fn apply_transform_in_group<'a>(
         }
     }
     Ok(Cow::Owned(out))
+}
+
+/// Turns the point `N` column by the linear part of a transform, for the
+/// flagged points, and — when the linear part mirrors — reverses the winding of
+/// every mesh whose points are all flagged, so the corners keep agreeing with
+/// the outward normals.
+fn rotate_normals(
+    geometry: &mut Geometry,
+    linear: &InstancePlacement3,
+    selected: &impl Fn(usize) -> bool,
+) -> anyhow::Result<()> {
+    if matches!(
+        geometry
+            .points()
+            .get(names::N)
+            .map(|column| column.as_ref()),
+        Some(AttributeArray::Vec3(_))
+    ) {
+        let values = geometry
+            .points_mut()
+            .make_mut(names::N)?
+            .as_vec3_mut(names::N)?;
+        for (index, normal) in values.iter_mut().enumerate() {
+            if selected(index) {
+                *normal = linear.apply_normal(*normal);
+            }
+        }
+    }
+    if linear.mirrors() {
+        let flipped: Vec<usize> = geometry
+            .primitives()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, primitive)| match primitive {
+                Primitive::Mesh { verts, .. } if verts.clone().all(selected) => Some(index),
+                _ => None,
+            })
+            .collect();
+        for index in flipped {
+            geometry.flip_mesh_winding(index);
+        }
+    }
+    Ok(())
+}
+
+/// The node's transform as the outer placement of `Vec3` instances: it turns
+/// each instance by composing the rotation into `orient` (`R · orient`, which
+/// leaves `rot` — applied to the source before `orient` — alone) and scales it
+/// by multiplying `scale3` (`S ⊙ scale3`), the same decomposition
+/// [`InstanceColumns3`] reads.
+///
+/// That decomposition is exact when the outer scale is uniform, or when the
+/// instance is not turned (the scale then acts along the same axes). A
+/// non-uniform scale over a turned instance would need a shear, which a 3D
+/// placement has no column for, so it is an error rather than a quiet
+/// approximation.
+fn compose_spatial_instances(
+    geometry: &mut Geometry,
+    outer: &InstancePlacement3,
+    selected: &impl Fn(usize) -> bool,
+) -> anyhow::Result<()> {
+    let turns = outer.rotation != Quat::IDENTITY;
+    let scales = outer.scale != Vec3(1.0, 1.0, 1.0);
+    if !turns && !scales {
+        return Ok(());
+    }
+    let uniform = outer.scale.0 == outer.scale.1 && outer.scale.1 == outer.scale.2;
+    let instances = geometry.instances();
+    let columns = InstanceColumns3::of(instances)?;
+    let count = geometry.instance_count();
+    let own: Vec<InstancePlacement3> = (0..count)
+        .map(|index| columns.placement(index, Vec3(0.0, 0.0, 0.0)))
+        .collect();
+    if !uniform {
+        for (index, placement) in own.iter().enumerate() {
+            let q = placement.rotation;
+            let turned = q.0.abs() > 1e-6 || q.1.abs() > 1e-6 || q.2.abs() > 1e-6;
+            if selected(index) && turned {
+                anyhow::bail!(
+                    "geometry.transform: a non-uniform scale cannot be composed with a turned 3D instance (instance {index}); it would shear it"
+                );
+            }
+        }
+    }
+    let had_orient = instances.get(names::ORIENT).is_some();
+    let had_scale3 = instances.get(names::SCALE3).is_some();
+    let orient_of = |index: usize| -> Quat {
+        instances
+            .get(names::ORIENT)
+            .and_then(|column| column.as_vec4(names::ORIENT).ok())
+            .and_then(|values| values.get(index).copied())
+            .map_or(Quat::IDENTITY, |q| Quat::from_vec4(q).normalized())
+    };
+    let scale3_of = |index: usize| -> Vec3 {
+        instances
+            .get(names::SCALE3)
+            .and_then(|column| column.as_vec3(names::SCALE3).ok())
+            .and_then(|values| values.get(index).copied())
+            .unwrap_or(Vec3(1.0, 1.0, 1.0))
+    };
+    let orients: Vec<_> = (0..count)
+        .map(|index| {
+            if selected(index) {
+                (outer.rotation * orient_of(index)).to_vec4()
+            } else {
+                orient_of(index).to_vec4()
+            }
+        })
+        .collect();
+    let scale3s: Vec<_> = (0..count)
+        .map(|index| {
+            let own = scale3_of(index);
+            if selected(index) {
+                Vec3(
+                    outer.scale.0 * own.0,
+                    outer.scale.1 * own.1,
+                    outer.scale.2 * own.2,
+                )
+            } else {
+                own
+            }
+        })
+        .collect();
+    let instances = geometry.instances_mut();
+    if had_orient || turns {
+        instances.insert(names::ORIENT, AttributeArray::Vec4(orients))?;
+    }
+    if had_scale3 || scales {
+        instances.insert(names::SCALE3, AttributeArray::Vec3(scale3s))?;
+    }
+    Ok(())
 }
 
 /// Whether any positional domain of `geometry` carries three-dimensional `P`.
@@ -3312,5 +3483,239 @@ mod tests {
             );
         });
         assert!(logged.is_empty(), "{logged}");
+    }
+
+    // ----- normals and 3D instances ------------------------------------------
+
+    use ravel_core::geometry::{InstanceColumns3, expand_instances};
+    use ravel_core::types::Vec4;
+
+    fn near3(a: Vec3, b: Vec3) {
+        assert!(
+            (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4 && (a.2 - b.2).abs() < 1e-4,
+            "{a:?} != {b:?}"
+        );
+    }
+
+    /// A one-triangle mesh whose three points all carry normal `n`.
+    fn mesh_with_normal(n: Vec3) -> Geometry {
+        let mut geo = Geometry::from_points3(vec![
+            Vec3(1.0, 0.0, 0.0),
+            Vec3(0.0, 1.0, 0.0),
+            Vec3(0.0, 0.0, 1.0),
+        ]);
+        geo.points_mut()
+            .insert(names::N, AttributeArray::Vec3(vec![n; 3]))
+            .unwrap();
+        geo.push_mesh(0..3, &[0, 1, 2]);
+        geo
+    }
+
+    fn normals_of(geo: &Geometry) -> Vec<Vec3> {
+        geo.points()
+            .get(names::N)
+            .unwrap()
+            .as_vec3(names::N)
+            .unwrap()
+            .to_vec()
+    }
+
+    fn pivot_at_origin(
+        extra: &[(&'static str, ParameterValue)],
+    ) -> Vec<(&'static str, ParameterValue)> {
+        let mut params = vec![("use_centroid", ParameterValue::Bool(false))];
+        params.extend(extra.iter().cloned());
+        params
+    }
+
+    /// Hand-worked quarter turns: Z takes x to y, X takes y to z, Y takes z to
+    /// x; and the combined ZYX order `(90, 0, 90)` is Z first, then X, so
+    /// `(1, 0, 0) → (0, 1, 0) → (0, 0, 1)`.
+    #[test]
+    fn rotating_a_mesh_rotates_its_normals() {
+        let turned = |euler: [f32; 3], n: Vec3| {
+            let out = transformed(
+                &pivot_at_origin(&[(
+                    "rotation",
+                    ParameterValue::vec3(euler[0], euler[1], euler[2]),
+                )]),
+                mesh_with_normal(n),
+            );
+            normals_of(&out)[0]
+        };
+        near3(
+            turned([0.0, 0.0, 90.0], Vec3(1.0, 0.0, 0.0)),
+            Vec3(0.0, 1.0, 0.0),
+        );
+        near3(
+            turned([90.0, 0.0, 0.0], Vec3(0.0, 1.0, 0.0)),
+            Vec3(0.0, 0.0, 1.0),
+        );
+        near3(
+            turned([0.0, 90.0, 0.0], Vec3(0.0, 0.0, 1.0)),
+            Vec3(1.0, 0.0, 0.0),
+        );
+        near3(
+            turned([90.0, 0.0, 90.0], Vec3(1.0, 0.0, 0.0)),
+            Vec3(0.0, 0.0, 1.0),
+        );
+    }
+
+    /// A non-uniform scale takes the inverse transpose, not the scaled vector:
+    /// the 45° normal under `x · 2` is `(1/2, 1, 0)` normalised, which is
+    /// `(0.4472, 0.8944, 0)`; scaling the vector itself would give
+    /// `(0.894, 0.447, 0)`, the wrong way round.
+    #[test]
+    fn a_non_uniform_scale_gives_the_inverse_transpose_normal() {
+        let d = 0.5_f32.sqrt();
+        let out = transformed(
+            &pivot_at_origin(&[("scale", ParameterValue::vec3(2.0, 1.0, 1.0))]),
+            mesh_with_normal(Vec3(d, d, 0.0)),
+        );
+        for n in normals_of(&out) {
+            near3(n, Vec3(0.447_213_6, 0.894_427_2, 0.0));
+        }
+        // And it really is perpendicular to the scaled surface: the edge
+        // (1,0,0) → (0,1,0) becomes (2,0,0) → (0,1,0), direction (−2, 1, 0).
+        let n = normals_of(&out)[0];
+        assert!((n.0 * -2.0 + n.1 * 1.0).abs() < 1e-5);
+    }
+
+    /// A mirror keeps the normal pointing out of the solid and reverses the
+    /// winding so the corners still agree: `x → −x` sends `(1, 0, 0)` to
+    /// `(−1, 0, 0)` and `[0, 1, 2]` to `[0, 2, 1]`. Two mirrors are a
+    /// rotation and leave the winding alone.
+    #[test]
+    fn a_mirror_flips_the_winding_and_reflects_the_normal() {
+        let out = transformed(
+            &pivot_at_origin(&[("scale", ParameterValue::vec3(-1.0, 1.0, 1.0))]),
+            mesh_with_normal(Vec3(1.0, 0.0, 0.0)),
+        );
+        near3(normals_of(&out)[0], Vec3(-1.0, 0.0, 0.0));
+        assert_eq!(out.indices(), &[0, 2, 1]);
+
+        let twice = transformed(
+            &pivot_at_origin(&[("scale", ParameterValue::vec3(-1.0, -1.0, 1.0))]),
+            mesh_with_normal(Vec3(1.0, 0.0, 0.0)),
+        );
+        near3(normals_of(&twice)[0], Vec3(-1.0, 0.0, 0.0));
+        assert_eq!(twice.indices(), &[0, 1, 2]);
+    }
+
+    /// Geometry without normals gains none, and a planar `P` is untouched by
+    /// the normal handling (it has no `N`).
+    #[test]
+    fn geometry_without_normals_gets_no_normal_column() {
+        let out = transformed(
+            &pivot_at_origin(&[("scale", ParameterValue::vec3(2.0, 1.0, 1.0))]),
+            spatial_geometry(),
+        );
+        assert!(out.points().get(names::N).is_none());
+    }
+
+    fn instanced(orient: Option<Vec4>, scale3: Option<Vec3>) -> Geometry {
+        let mut host = Geometry::new();
+        let set = host.instances_mut();
+        set.insert(names::P, AttributeArray::Vec3(vec![Vec3(5.0, -2.0, 3.0)]))
+            .unwrap();
+        if let Some(q) = orient {
+            set.insert(names::ORIENT, AttributeArray::Vec4(vec![q]))
+                .unwrap();
+        }
+        if let Some(v) = scale3 {
+            set.insert(names::SCALE3, AttributeArray::Vec3(vec![v]))
+                .unwrap();
+        }
+        host.set_instance_source(Some(Arc::new(mesh_with_normal(Vec3(0.3, 0.5, 0.8)))));
+        host
+    }
+
+    fn quarter_about_y() -> Vec4 {
+        let h = std::f32::consts::FRAC_PI_4;
+        Vec4(0.0, h.sin(), 0.0, h.cos())
+    }
+
+    /// Transforming the instancing geometry and then expanding it gives the
+    /// same points and normals as expanding and then transforming — the
+    /// definition of composing the node's transform into the placement. Once
+    /// with a uniform scale over a turned instance, once with a non-uniform
+    /// one over an unturned instance.
+    #[test]
+    fn transforming_instances_commutes_with_expanding_them() {
+        let cases = [
+            (
+                instanced(Some(quarter_about_y()), Some(Vec3(2.0, 3.0, 4.0))),
+                vec![
+                    ("rotation", ParameterValue::vec3(30.0, 50.0, 70.0)),
+                    ("scale", ParameterValue::vec3(1.5, 1.5, 1.5)),
+                    ("translate", ParameterValue::vec3(1.0, 2.0, 3.0)),
+                ],
+            ),
+            (
+                instanced(None, Some(Vec3(2.0, 3.0, 4.0))),
+                vec![
+                    ("rotation", ParameterValue::vec3(30.0, 50.0, 70.0)),
+                    ("scale", ParameterValue::vec3(1.0, 2.0, 3.0)),
+                    ("translate", ParameterValue::vec3(-4.0, 0.5, 2.0)),
+                ],
+            ),
+            (
+                instanced(Some(quarter_about_y()), None),
+                vec![("scale", ParameterValue::vec3(-1.0, -1.0, -1.0))],
+            ),
+        ];
+        for (host, extra) in cases {
+            let params = pivot_at_origin(&extra);
+            let first = expand_instances(&transformed(&params, host.clone())).unwrap();
+            let second = transformed(&params, expand_instances(&host).unwrap());
+            for (a, b) in point_positions3(&first)
+                .iter()
+                .zip(point_positions3(&second))
+            {
+                near3(*a, b);
+            }
+            for (a, b) in normals_of(&first).iter().zip(normals_of(&second)) {
+                near3(*a, b);
+            }
+            assert_eq!(first.indices(), second.indices());
+        }
+    }
+
+    /// The written columns, by hand: a quarter turn about Z lands in `orient`
+    /// (`rot` is left alone), and a uniform 2 multiplies `scale3`.
+    #[test]
+    fn the_transform_composes_into_orient_and_scale3() {
+        let out = transformed(
+            &pivot_at_origin(&[
+                ("rotation", ParameterValue::vec3(0.0, 0.0, 90.0)),
+                ("scale", ParameterValue::vec3(2.0, 2.0, 2.0)),
+            ]),
+            instanced(None, Some(Vec3(1.0, 3.0, 1.0))),
+        );
+        assert!(out.instances().get(names::ROT).is_none());
+        let placement = InstanceColumns3::of(out.instances())
+            .unwrap()
+            .placement(0, Vec3(0.0, 0.0, 0.0));
+        // scale3 (1, 3, 1) · 2 = (2, 6, 2); then the quarter turn about Z.
+        near3(placement.scale, Vec3(2.0, 6.0, 2.0));
+        near3(
+            placement.apply_vector(Vec3(1.0, 0.0, 0.0)),
+            Vec3(0.0, 2.0, 0.0),
+        );
+    }
+
+    /// A non-uniform scale over a turned instance has no representation
+    /// without a shear column, so it is refused rather than approximated.
+    #[test]
+    fn a_non_uniform_scale_over_a_turned_instance_is_refused() {
+        let mut params = ResolvedParams::default();
+        params.set("use_centroid", ravel_core::eval::ResolvedValue::Bool(false));
+        params.set(
+            "scale",
+            ravel_core::eval::ResolvedValue::Vec3([2.0, 1.0, 1.0]),
+        );
+        let error = apply_transform(&instanced(Some(quarter_about_y()), None), &params)
+            .expect_err("a shear cannot be written");
+        assert!(format!("{error:#}").contains("shear"), "{error:#}");
     }
 }

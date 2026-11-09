@@ -246,12 +246,12 @@ struct ExpressionEditors(Vec<WeakEntity<EditorState>>);
 
 impl Global for ExpressionEditors {}
 
-/// Register an expression editor state for palette refreshes. A state that is
-/// dropped falls out of the list on the next refresh.
+/// Register an expression editor state for palette refreshes. Dropped states
+/// are pruned here too, so rebuilds without a palette switch do not grow the list.
 pub fn track_expression_editor(state: &gpui::Entity<EditorState>, cx: &mut App) {
-    cx.default_global::<ExpressionEditors>()
-        .0
-        .push(state.downgrade());
+    let editors = &mut cx.default_global::<ExpressionEditors>().0;
+    editors.retain(|editor| editor.upgrade().is_some());
+    editors.push(state.downgrade());
 }
 
 /// Re-read the colours of every live expression editor; returns how many.

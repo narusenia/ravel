@@ -3595,7 +3595,10 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   small icon-only box (`vertical_box_size`, 72x24, widens to
   `ports * 2 * PORT_HIT_RADIUS`) plus the label column to its right
   (`paint_vertical_label` draws name and, under the values flag, muted
-  values). Ports live on the box only, so `port_screen_center` takes no size;
+  values). The column width is measured: `NodeEditorPanel::measure_label_columns`
+  fills `label_widths` (`painting::LabelWidths`, zoom 1.0, text-keyed cache) when
+  the graph changes, and `compute_node_size_labeled` takes
+  `LabelWidths::column(show_values)`; paint elides at extent minus box. Ports live on the box only, so `port_screen_center` takes no size;
   `node_size_or_default` is the extent fallback every node hit test and anchor
   shares. `step_points` / `flow_bezier` route edges
   for both axes. The panel mirrors the flow from the settings global (an

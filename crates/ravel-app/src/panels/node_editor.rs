@@ -53,7 +53,7 @@ use crate::node_editor::hover_popover::{
     HOVER_DWELL, HoverPopover, hover_info, hover_popover_element,
 };
 use crate::node_editor::layout::{LayoutAxis, auto_layout};
-use crate::node_editor::painting::{self, EvalReadout, PortHit, compute_node_size};
+use crate::node_editor::painting::{self, EvalReadout, PortHit};
 use crate::node_editor::palette::{PaletteEvent, SearchPalette, retain_connectable};
 use crate::node_editor::viewport::Viewport;
 use crate::project_state::ProjectState;
@@ -590,6 +590,13 @@ pub struct NodeEditorPanel {
     node_categories: HashMap<NodeId, NodeCategory>,
     /// Localized display label per node, rebuilt with [`Self::node_sizes`].
     node_labels: HashMap<NodeId, String>,
+    /// Measured width of each node's top-down label column (zoom 1.0), rebuilt
+    /// with [`Self::node_labels`]. Measuring needs the text system, which the
+    /// size function does not have, so it happens here and the sizes read it.
+    label_widths: HashMap<NodeId, painting::LabelWidths>,
+    /// Text → width at zoom 1.0, keyed by (monospace, text): a rebuild after a
+    /// graph change re-measures only the strings that are new.
+    text_widths: HashMap<(bool, String), f32>,
     edge_style: EdgeStyle,
     /// Which way the graph flows, mirrored from the settings global (see the
     /// observer in [`Self::new`]) so the sizes, hit tests and painting of one
@@ -849,6 +856,8 @@ impl NodeEditorPanel {
             show_param_values: super::show_node_param_values(cx),
             node_categories: HashMap::new(),
             node_labels: HashMap::new(),
+            label_widths: HashMap::new(),
+            text_widths: HashMap::new(),
             edge_style: crate::app_settings::resolved(cx).node_editor_edge_style,
             flow_direction: super::node_flow_direction(cx),
             hovered_port: None,
@@ -1094,6 +1103,7 @@ impl NodeEditorPanel {
         self.node_sizes.clear();
         self.node_categories.clear();
         self.node_labels.clear();
+        self.label_widths.clear();
         self.displayed_timings.clear();
         // Reopening the same network yields the same node ids: without this,
         // an open popover would resurrect over the reopened node with no
@@ -2538,13 +2548,63 @@ impl NodeEditorPanel {
         super::set_node_flow_direction(flow, cx);
     }
 
+    /// Re-measure from the cached label widths: zoom, the values flag and the
+    /// flow direction all land here, and none of them changes the text.
     fn refresh_node_sizes(&mut self) {
         self.node_sizes = Self::compute_all_sizes(
             &self.graph,
             self.viewport.zoom,
             self.show_param_values,
             self.flow_direction,
+            &self.label_widths,
         );
+    }
+
+    /// Measure every node's label column at zoom 1.0 — the name and the widest
+    /// value line — through the text system, caching per text. Runs wherever
+    /// the text can change (a graph change: rename, parameter edit, undo); zoom
+    /// and the values flag reuse the result. Value text is the frame-0 sample,
+    /// so playback never changes it and nothing here runs per frame.
+    fn measure_label_columns(&mut self, cx: &App) {
+        const MAX_CACHED_TEXTS: usize = 8192;
+        if self.text_widths.len() > MAX_CACHED_TEXTS {
+            self.text_widths.clear();
+        }
+        // A private line layout cache: the window's is only reachable while painting.
+        let system = WindowTextSystem::new(cx.text_system().clone());
+        let (ui, mono) = (crate::fonts::ui_font(cx), crate::fonts::mono_font(cx));
+        let cache = &mut self.text_widths;
+        let mut measure = |text: &str, is_mono: bool| -> f32 {
+            *cache.entry((is_mono, text.to_string())).or_insert_with(|| {
+                let (font, size) = if is_mono {
+                    (mono.clone(), painting::VERTICAL_VALUE_FONT)
+                } else {
+                    (ui.clone(), painting::VERTICAL_NAME_FONT)
+                };
+                let run = TextRun {
+                    len: text.len(),
+                    font,
+                    color: Hsla::default(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                    letter_spacing: None,
+                };
+                system
+                    .layout_line(text, px(size), &[run], None)
+                    .width
+                    .into()
+            })
+        };
+        self.label_widths = self
+            .graph
+            .nodes()
+            .filter(|n| !n.metadata.synthetic)
+            .map(|n| {
+                let label = self.node_labels.get(&n.id).map_or(&*n.type_key, |l| l);
+                (n.id, painting::measure_label_widths(n, label, &mut measure))
+            })
+            .collect();
     }
 
     /// Rebuild everything derived from the displayed graph. Called from the
@@ -2569,12 +2629,6 @@ impl NodeEditorPanel {
     /// switch, so nothing invalidates them today; a future switch has to
     /// call this (see the note in `node_locale`).
     fn refresh_graph_caches(&mut self, cx: &App) {
-        self.node_sizes = Self::compute_all_sizes(
-            &self.graph,
-            self.viewport.zoom,
-            self.show_param_values,
-            self.flow_direction,
-        );
         // Nodes without a registered template (and synthetic ones) get no
         // header tint, so they are simply absent from the map.
         self.node_categories = self
@@ -2593,6 +2647,10 @@ impl NodeEditorPanel {
             .nodes()
             .map(|n| (n.id, crate::node_locale::display_label(n, &self.registry)))
             .collect();
+        // Labels first: the top-down label column is measured from them, and
+        // the sizes read the measurement.
+        self.measure_label_columns(cx);
+        self.refresh_node_sizes();
         self.displayed_timings = Self::collect_readouts(&self.graph, cx);
     }
 
@@ -2633,10 +2691,21 @@ impl NodeEditorPanel {
         zoom: f32,
         show_param_values: bool,
         flow: FlowDirection,
+        label_widths: &HashMap<NodeId, painting::LabelWidths>,
     ) -> HashMap<NodeId, (f32, f32)> {
         graph
             .nodes()
-            .map(|n| (n.id, compute_node_size(n, zoom, show_param_values, flow)))
+            .map(|n| {
+                let label_w = label_widths.get(&n.id).map_or(
+                    // Unmeasured: the widest column.
+                    f32::MAX,
+                    |widths| widths.column(show_param_values),
+                );
+                (
+                    n.id,
+                    painting::compute_node_size_labeled(n, zoom, show_param_values, flow, label_w),
+                )
+            })
             .collect()
     }
 
@@ -5012,12 +5081,14 @@ mod tests {
             viewport.zoom,
             true,
             FlowDirection::Horizontal,
+            &HashMap::new(),
         );
         let hidden = NodeEditorPanel::compute_all_sizes(
             &graph,
             viewport.zoom,
             false,
             FlowDirection::Horizontal,
+            &HashMap::new(),
         );
         let (_, shown_h) = shown[&NodeId::new(1)];
         let (_, hidden_h) = hidden[&NodeId::new(1)];
@@ -7539,6 +7610,62 @@ mod tests {
                     panel
                         .node_at_local_pos(sx + extent_w + 5.0, sy + 2.0)
                         .is_none()
+                );
+            })
+            .unwrap();
+    }
+
+    /// The label column is measured from the real text: a short name leaves the
+    /// extent — and with it the hover popover's anchor — just right of the
+    /// name, a longer name widens it, and a rename re-measures.
+    #[gpui::test]
+    fn the_vertical_extent_tracks_the_measured_label(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+        cx.update(|cx| {
+            crate::app_settings::install(crate::app_settings::GlobalSettingsFile::default(), cx)
+        });
+        cx.update(crate::panels::toggle_node_flow_direction);
+
+        window
+            .update(cx, |panel, _window, cx| {
+                // Values off: the fixture's value lines are wider than the name.
+                panel.show_param_values = false;
+                panel.refresh_node_sizes();
+                let z = panel.viewport.zoom;
+                let node = panel.graph.node(blur).unwrap().clone();
+                let (box_w, _) = painting::vertical_box_size(&node, z);
+                let cap = painting::compute_node_size(&node, z, false, FlowDirection::Vertical).0;
+
+                let short_w = panel.node_sizes[&blur].0;
+                assert!(short_w > box_w, "the label has some width");
+                assert!(
+                    short_w < cap,
+                    "{short_w} is not narrower than the cap {cap}"
+                );
+
+                // Rename to something long: the extent widens (to the cap).
+                let mut renamed = (*node).clone();
+                renamed.metadata.label = Some("A very long user supplied node name indeed".into());
+                panel.graph = panel.graph.clone().replace_node(Arc::new(renamed));
+                panel.refresh_graph_caches(cx);
+                assert_eq!(panel.node_sizes[&blur].0, cap, "a long name is capped");
+
+                // And back to a short one.
+                let mut renamed = (**panel.graph.node(blur).unwrap()).clone();
+                renamed.metadata.label = Some("Out".into());
+                panel.graph = panel.graph.clone().replace_node(Arc::new(renamed));
+                panel.refresh_graph_caches(cx);
+                assert!(panel.node_sizes[&blur].0 < short_w);
+
+                // The popover opens just right of that short extent.
+                let (sx, _) = panel
+                    .viewport
+                    .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+                let (w, _) = panel.node_sizes[&blur];
+                assert!(
+                    w - box_w < 60.0 * z,
+                    "the anchor ({}) hugs the label",
+                    sx + w
                 );
             })
             .unwrap();

@@ -66,14 +66,23 @@ const BASE_VERTICAL_BOX_MIN_W: f32 = 72.0;
 /// diameter, so two neighbouring dots never share a hit target; the box
 /// widens past [`BASE_VERTICAL_BOX_MIN_W`] before they would.
 const BASE_VERTICAL_PORT_SPACING: f32 = 2.0 * PORT_HIT_RADIUS;
-/// Gap between the box and the label beside it, and the label column's width
-/// (names and values elide past it), both at zoom 1.0.
+/// Gap between the box and the label beside it, and the widest the label
+/// column may get (names and values elide past it), both at zoom 1.0. The
+/// column is as wide as the text actually is ([`LabelWidths`]) up to this cap.
 const BASE_VERTICAL_LABEL_GAP: f32 = 6.0;
 const BASE_VERTICAL_LABEL_W: f32 = 104.0;
+/// Slack added to a measured text width, at zoom 1.0: the width is measured at
+/// zoom 1 and scaled, and shaping is not exactly linear in the font size, so
+/// without it paint could elide a name the size just made room for.
+const LABEL_MEASURE_SLACK: f32 = 2.0;
 /// Height of the name line in the label column.
 const BASE_VERTICAL_NAME_H: f32 = 18.0;
 /// The category glyph centred in the box.
 const BASE_VERTICAL_ICON: f32 = 16.0;
+/// Font sizes of the label column at zoom 1.0: the name and the value lines.
+/// Measuring (panel) and painting both read these.
+pub const VERTICAL_NAME_FONT: f32 = 12.0;
+pub const VERTICAL_VALUE_FONT: f32 = 9.0;
 const BASE_HEADER_H: f32 = 24.0;
 const BASE_PORT_ROW_H: f32 = 18.0;
 const BASE_PARAM_ROW_H: f32 = 16.0;
@@ -148,11 +157,72 @@ pub fn painted_param_rows(node: &Node, show_param_values: bool) -> usize {
     }
 }
 
+/// [`compute_node_size_labeled`] with the widest label column — the size of a
+/// node nobody has measured text for (a fallback, and horizontal flow, which
+/// ignores it).
 pub fn compute_node_size(
     node: &Node,
     zoom: f32,
     show_param_values: bool,
     flow: FlowDirection,
+) -> (f32, f32) {
+    compute_node_size_labeled(node, zoom, show_param_values, flow, BASE_VERTICAL_LABEL_W)
+}
+
+/// What the top-down label column needs, measured at zoom 1.0: the name's
+/// width and the widest `key: value` line. Measured by the panel where it
+/// refreshes its sizes (the size function has no text system), cached by text.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LabelWidths {
+    pub name: f32,
+    pub values: f32,
+}
+
+impl LabelWidths {
+    /// The label column's width at zoom 1.0: the widest line that is drawn,
+    /// capped. **The one source** for both the size ([`compute_node_size_labeled`])
+    /// and the elision width paint uses (the extent minus the box).
+    pub fn column(&self, show_param_values: bool) -> f32 {
+        let widest = if show_param_values {
+            self.name.max(self.values)
+        } else {
+            self.name
+        };
+        (widest + LABEL_MEASURE_SLACK).clamp(0.0, BASE_VERTICAL_LABEL_W)
+    }
+}
+
+/// Measure a top-down node's label column. `measure(text, mono)` returns the
+/// width of `text` at zoom 1.0 in the UI font (`mono = false`, the name) or
+/// the monospace font (`mono = true`, the value lines).
+pub fn measure_label_widths(
+    node: &Node,
+    label: &str,
+    measure: &mut dyn FnMut(&str, bool) -> f32,
+) -> LabelWidths {
+    LabelWidths {
+        name: measure(label, false),
+        values: node
+            .parameters
+            .iter()
+            .map(|p| measure(&param_line(p), true))
+            .fold(0.0, f32::max),
+    }
+}
+
+/// One value line in the label column.
+fn param_line(param: &ravel_core::graph::Parameter) -> String {
+    format!("{}: {}", param.key, param_value_text(&param.value))
+}
+
+/// [`compute_node_size`] with a measured label column: `label_w` is its width
+/// at zoom 1.0 ([`LabelWidths::column`]).
+pub fn compute_node_size_labeled(
+    node: &Node,
+    zoom: f32,
+    show_param_values: bool,
+    flow: FlowDirection,
+    label_w: f32,
 ) -> (f32, f32) {
     let z = zoom;
     if flow == FlowDirection::Vertical {
@@ -164,7 +234,7 @@ pub fn compute_node_size(
         let rows = painted_param_rows(node, show_param_values);
         let label_h = (BASE_VERTICAL_NAME_H + rows as f32 * BASE_PARAM_ROW_H) * z;
         return (
-            box_w + (BASE_VERTICAL_LABEL_GAP + BASE_VERTICAL_LABEL_W) * z,
+            box_w + (BASE_VERTICAL_LABEL_GAP + label_w.clamp(0.0, BASE_VERTICAL_LABEL_W)) * z,
             box_h.max(label_h),
         );
     }
@@ -880,6 +950,9 @@ fn paint_single_node(
             label,
             (x, y),
             (face_w, face_h),
+            // The label column is whatever the extent leaves beside the box:
+            // elision uses the very width the size was measured to.
+            w - face_w - BASE_VERTICAL_LABEL_GAP * z,
             category,
             z,
             show_param_values,
@@ -1066,6 +1139,7 @@ fn paint_vertical_label(
     label: &str,
     origin: (f32, f32),
     box_size: (f32, f32),
+    column_w: f32,
     category: Option<NodeCategory>,
     z: f32,
     show_param_values: bool,
@@ -1106,8 +1180,8 @@ fn paint_vertical_label(
     }
 
     let col_x = x + box_size.0 + BASE_VERTICAL_LABEL_GAP * z;
-    let avail = BASE_VERTICAL_LABEL_W * z;
-    let font_name = 12.0 * z;
+    let avail = column_w.max(0.0);
+    let font_name = VERTICAL_NAME_FONT * z;
     shape_elided(
         label,
         font_name,
@@ -1130,10 +1204,10 @@ fn paint_vertical_label(
     .ok();
 
     let rows = painted_param_rows(node, show_param_values);
-    let font_param = 9.0 * z;
+    let font_param = VERTICAL_VALUE_FONT * z;
     let mono = crate::fonts::mono_font(cx);
     for (i, param) in node.parameters.iter().enumerate().take(rows) {
-        let text = format!("{}: {}", param.key, param_value_text(&param.value));
+        let text = param_line(param);
         shape_elided(
             &text,
             font_param,
@@ -2437,5 +2511,68 @@ mod tests {
         assert!(hit(Bezier, sx, sy));
         assert!(hit(Bezier, (sx + tx) / 2.0, mid_y));
         assert!(!hit(Bezier, sx + 60.0, sy));
+    }
+
+    /// A fake text system: six pixels a character, in either font.
+    fn six_per_char(text: &str, _mono: bool) -> f32 {
+        text.chars().count() as f32 * 6.0
+    }
+
+    fn extent_w(node: &Node, label: &str, show: bool) -> f32 {
+        let widths = measure_label_widths(node, label, &mut six_per_char);
+        compute_node_size_labeled(node, 1.0, show, V, widths.column(show)).0
+    }
+
+    /// The label column is as wide as the text: a short name gives a narrower
+    /// extent than a long one, and a very long one stops at the cap.
+    #[test]
+    fn the_vertical_extent_follows_the_measured_name_up_to_the_cap() {
+        let node = ported(1, 1, 1);
+        let short = extent_w(&node, "net.out", false);
+        let long = extent_w(&node, "a rather longer node name", false);
+        let huge = extent_w(&node, &"x".repeat(200), false);
+        let (box_w, _) = vertical_box_size(&node, 1.0);
+        assert_eq!(
+            short,
+            box_w + BASE_VERTICAL_LABEL_GAP + 7.0 * 6.0 + LABEL_MEASURE_SLACK
+        );
+        assert!(short < long);
+        assert_eq!(
+            huge,
+            box_w + BASE_VERTICAL_LABEL_GAP + BASE_VERTICAL_LABEL_W,
+            "capped"
+        );
+        assert_eq!(huge, compute_node_size(&node, 1.0, false, V).0);
+    }
+
+    /// The elision width paint uses is the extent minus the box and the gap —
+    /// exactly the column the size was built from, at any zoom.
+    #[test]
+    fn paint_elides_at_the_width_the_size_was_measured_to() {
+        let node = ported(1, 1, 1);
+        let widths = measure_label_widths(&node, &"y".repeat(60), &mut six_per_char);
+        for zoom in [0.5, 1.0, 2.0] {
+            let (w, _) = compute_node_size_labeled(&node, zoom, false, V, widths.column(false));
+            let (box_w, _) = vertical_box_size(&node, zoom);
+            let paint_avail = w - box_w - BASE_VERTICAL_LABEL_GAP * zoom;
+            assert!(
+                (paint_avail - BASE_VERTICAL_LABEL_W * zoom).abs() < 1e-3,
+                "z{zoom}: {paint_avail}"
+            );
+        }
+    }
+
+    /// A value line wider than the name widens the extent only while the
+    /// values flag is on.
+    #[test]
+    fn a_wide_value_line_widens_the_extent_only_when_values_are_shown() {
+        let node =
+            ported(1, 1, 1).with_param("amount", ParameterValue::String("0123456789".into()));
+        let off = extent_w(&node, "Blur", false);
+        let on = extent_w(&node, "Blur", true);
+        assert!(on > off, "{on} vs {off}");
+        let (_, shown_h) = compute_node_size_labeled(&node, 1.0, true, V, 50.0);
+        let (_, hidden_h) = compute_node_size_labeled(&node, 1.0, false, V, 50.0);
+        assert!(shown_h >= hidden_h);
     }
 }

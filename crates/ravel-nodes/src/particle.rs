@@ -1460,9 +1460,19 @@ pub(crate) mod tests {
         emitter: Option<Geometry>,
         forces: Vec<FieldValue>,
     ) -> (Graph, Evaluator) {
+        wired(evaluator(), params, emitter, forces)
+    }
+
+    /// [`with_forces`] on the evaluator `ev`, which has the simulation
+    /// registered.
+    fn wired(
+        mut ev: Evaluator,
+        params: &[(&str, ParameterValue)],
+        emitter: Option<Geometry>,
+        forces: Vec<FieldValue>,
+    ) -> (Graph, Evaluator) {
         use ravel_core::id::{EdgeId, InputPortIndex, OutputPortIndex};
         let mut graph = Graph::new().add_node(sim_node(params)).unwrap();
-        let mut ev = evaluator();
         let sim = NodeId::new(SIM);
         let wire =
             |graph: Graph, ev: &mut Evaluator, id: u64, slot: u32, value: Arc<dyn NodeData>| {
@@ -1686,6 +1696,172 @@ pub(crate) mod tests {
         });
         assert_eq!(warnings, 1);
         assert!(last.iter().all(|v| *v == Vec2(0.0, 0.0)));
+    }
+
+    // ---- the simulation cache ------------------------------------------------
+
+    /// A run that exercises everything the state carries: a path emitter with
+    /// an inherited attribute, a noise force, drag, and lives short enough
+    /// that columns are compacted all the while.
+    fn busy(ev: Evaluator) -> (Graph, Evaluator) {
+        let mut emitter = square();
+        emitter
+            .points_mut()
+            .insert(names::PSCALE, AttributeArray::F32(vec![1.0, 2.0, 3.0, 4.0]))
+            .unwrap();
+        let params = [
+            ("rate", float(150.0)),
+            ("life", float(14.0)),
+            ("life_variance", float(5.0)),
+            ("drag", float(0.5)),
+            ("seed", ParameterValue::Int(3)),
+            ("velocity_mode", ParameterValue::String("normal".into())),
+            ("initial_velocity", ParameterValue::vec2(25.0, 0.0)),
+            ("initial_spread", float(10.0)),
+            ("jitter", float(2.0)),
+        ];
+        let noise = FieldValue::new(MultiplyField {
+            left: FieldValue::new(NoiseField {
+                seed: 9,
+                frequency: 0.03,
+                octaves: 2,
+            }),
+            right: constant(300.0),
+        });
+        wired(ev, &params, Some(emitter), vec![noise])
+    }
+
+    /// Every column of a frame, so "identical" means all of it.
+    fn snapshot(geometry: &dyn NodeData) -> Vec<(String, AttributeArray)> {
+        let set = geometry.downcast_ref::<Geometry>().unwrap().points();
+        let mut columns: Vec<_> = set
+            .iter()
+            .map(|(name, column)| (name.to_string(), (**column).clone()))
+            .collect();
+        columns.sort_by(|a, b| a.0.cmp(&b.0));
+        columns
+    }
+
+    const FRAMES: u64 = 46;
+
+    /// The states of frames `0..FRAMES`, read forward one frame at a time.
+    fn played() -> Vec<Vec<(String, AttributeArray)>> {
+        let (graph, mut ev) = busy(evaluator());
+        (0..FRAMES)
+            .map(|frame| snapshot(&*geometry_at(&mut ev, &graph, frame)))
+            .collect()
+    }
+
+    #[test]
+    fn rewinding_and_replaying_gives_the_same_states() {
+        let forward = played();
+        assert!(
+            forward
+                .iter()
+                .any(|columns| columns.iter().any(|(_, column)| column.len() > 10)),
+            "the run is too quiet to prove anything"
+        );
+
+        let (graph, mut ev) = busy(evaluator());
+        let at = |ev: &mut Evaluator, frame: u64| snapshot(&*geometry_at(ev, &graph, frame));
+        for frame in 0..FRAMES {
+            at(&mut ev, frame);
+        }
+        // Back to the middle and over the same frames again.
+        for frame in (12..FRAMES).rev().step_by(5) {
+            assert_eq!(
+                at(&mut ev, frame),
+                forward[frame as usize],
+                "rewind to {frame}"
+            );
+        }
+        for frame in 12..FRAMES {
+            assert_eq!(
+                at(&mut ev, frame),
+                forward[frame as usize],
+                "replay of {frame}"
+            );
+        }
+
+        // And by another route altogether: a fresh evaluator jumping straight
+        // to the last frame, then back to an early one.
+        let (graph, mut fresh) = busy(evaluator());
+        let at = |ev: &mut Evaluator, frame: u64| snapshot(&*geometry_at(ev, &graph, frame));
+        assert_eq!(at(&mut fresh, FRAMES - 1), forward[FRAMES as usize - 1]);
+        assert_eq!(at(&mut fresh, 3), forward[3]);
+    }
+
+    #[test]
+    fn a_thinned_track_replays_the_frames_it_dropped() {
+        use ravel_core::cache_budget::{CacheBudgetConfig, SharedCacheBudget, Tier};
+        let forward = played();
+        // A sim share that holds a handful of states, not forty-six.
+        let budget = SharedCacheBudget::new(CacheBudgetConfig {
+            vram_bytes: 1 << 20,
+            ram_bytes: 200_000,
+            disk_bytes: 0,
+            sim_reserve_ratio: 0.25,
+        });
+        let mut budgeted = Evaluator::with_budget(budget.clone());
+        budgeted.register(
+            NodeId::new(SIM),
+            ravel_core::eval::stateful_processor(ParticleSimulate),
+        );
+        let (graph, mut ev) = busy(budgeted);
+        let counts: Vec<u64> = (0..FRAMES)
+            .map(|frame| snapshot(&*geometry_at(&mut ev, &graph, frame))[0].1.len() as u64)
+            .collect();
+
+        let stats = budget.stats();
+        assert!(
+            stats.sim_used[Tier::Ram as usize] <= stats.sim_reserved[Tier::Ram as usize],
+            "the track stays inside its share: {stats:?}"
+        );
+        // Thinned: well under the cost of keeping every frame.
+        let everything: u64 = counts.iter().map(|count| count * 32).sum();
+        assert!(
+            stats.sim_used[Tier::Ram as usize] < everything / 2,
+            "the budget was never tight enough to thin the track: {} vs {everything}",
+            stats.sim_used[Tier::Ram as usize]
+        );
+        // Charged for what it holds, so a state is never free: at least the
+        // columns of the newest frame.
+        assert!(stats.sim_used[Tier::Ram as usize] >= counts[FRAMES as usize - 1] * 32);
+
+        // Every frame, including the ones thinning dropped, replays to the
+        // state it had.
+        for frame in (0..FRAMES).rev() {
+            assert_eq!(
+                snapshot(&*geometry_at(&mut ev, &graph, frame)),
+                forward[frame as usize],
+                "frame {frame} after thinning"
+            );
+        }
+    }
+
+    #[test]
+    fn a_forward_jump_is_provisional_and_then_final() {
+        let forward = played();
+        let (graph, mut ev) = busy(evaluator());
+        ev.set_sim_provisional(Some(5));
+
+        // The first pull fills frame 0, and is not provisional.
+        let first = snapshot(&*geometry_at(&mut ev, &graph, 0));
+        assert_eq!(first, forward[0]);
+        assert!(!ev.has_provisional_sim());
+
+        // A long jump answers with the last state held, without stepping.
+        let shown = snapshot(&*geometry_at(&mut ev, &graph, FRAMES - 1));
+        assert!(ev.has_provisional_sim());
+        assert_eq!(shown, forward[0]);
+        assert_ne!(shown, forward[FRAMES as usize - 1]);
+
+        // Settled, the same pull fills the track and gives the final state.
+        ev.settle_provisional();
+        ev.set_sim_provisional(None);
+        let settled = snapshot(&*geometry_at(&mut ev, &graph, FRAMES - 1));
+        assert!(!ev.has_provisional_sim());
+        assert_eq!(settled, forward[FRAMES as usize - 1]);
     }
 
     /// Wall time of one steady-state step at 10k and 100k live particles, for

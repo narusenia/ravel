@@ -341,6 +341,8 @@ struct CompletionPopup {
     /// blink and scroll; repainting only when the menu changed keeps this view
     /// (and, through the keyed state, the host) from repainting forever.
     drawn: (u64, bool),
+    /// Where the caret's bottom edge was when last drawn, to notice it moving.
+    anchor: Option<gpui::Point<gpui::Pixels>>,
     _subscriptions: [Subscription; 2],
 }
 
@@ -350,6 +352,7 @@ impl CompletionPopup {
         Self {
             state: state.clone(),
             drawn: (0, false),
+            anchor: None,
             _subscriptions: [
                 cx.observe(state, |this, state, cx| {
                     let menu = state.read(cx).completion_menu_state();
@@ -371,7 +374,7 @@ impl CompletionPopup {
 }
 
 impl Render for CompletionPopup {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.tokens().clone();
         let menu = self.state.read(cx).completion_menu_state();
         if !menu.open || menu.items.is_empty() {
@@ -402,32 +405,45 @@ impl Render for CompletionPopup {
                             .child(SharedString::from(item.detail.clone().unwrap_or_default())),
                     )
             });
-        // Out of flow, just under the field. `anchored` takes the origin of
-        // this zero-size box and keeps the list inside the window.
-        div()
-            .absolute()
-            .left_0()
-            .top(relative(1.0))
-            .child(deferred(
-                anchored().snap_to_window_with_margin(px(8.0)).child(
-                    div()
-                        .debug_selector(|| "ravel-expression-completions".into())
-                        .occlude()
-                        .mt(theme.spacing.xs)
-                        .min_w(px(160.0))
-                        .max_w(px(320.0))
-                        .py(theme.spacing.xs)
-                        .rounded(theme.radius.radius)
-                        .border_1()
-                        .border_color(colors.border)
-                        .bg(colors.raised_surface())
-                        .text_color(colors.foreground)
-                        .font_family(theme.text.mono_font_family.clone())
-                        .text_size(theme.text.mono_font_size)
-                        .children(rows),
-                ),
-            ))
-            .into_any_element()
+        // Directly under the caret, in window coordinates. The caret is where
+        // the editor last painted it, so a keystroke shows the old position for
+        // one frame; asking for another frame when it moved settles it, and
+        // costs nothing once it holds still. Before the first paint there is no
+        // caret, and the list hangs from the field's bottom edge instead.
+        let anchor = self
+            .state
+            .read(cx)
+            .cursor_layout()
+            .map(|(caret, _)| gpui::point(caret.origin.x, caret.bottom()));
+        if anchor != self.anchor {
+            self.anchor = anchor;
+            window.request_animation_frame();
+        }
+        let list = div()
+            .debug_selector(|| "ravel-expression-completions".into())
+            .occlude()
+            .mt(theme.spacing.xs)
+            .min_w(px(160.0))
+            .max_w(px(320.0))
+            .py(theme.spacing.xs)
+            .rounded(theme.radius.radius)
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.raised_surface())
+            .text_color(colors.foreground)
+            .font_family(theme.text.mono_font_family.clone())
+            .text_size(theme.text.mono_font_size)
+            .children(rows);
+        let anchored = anchored().snap_to_window_with_margin(px(8.0));
+        match anchor {
+            Some(position) => deferred(anchored.position(position).child(list)).into_any_element(),
+            None => div()
+                .absolute()
+                .left_0()
+                .top(relative(1.0))
+                .child(deferred(anchored.child(list)))
+                .into_any_element(),
+        }
     }
 }
 
@@ -793,6 +809,10 @@ mod tests {
         vocabulary(&Scope::parameter_context())
     }
 
+    thread_local! {
+        static FIELD_SCOPE: Cell<bool> = const { Cell::new(false) };
+    }
+
     /// A window holding an editor with `text`, focused, with the caret at the end.
     fn built_with<'a>(
         cx: &'a mut TestAppContext,
@@ -806,7 +826,16 @@ mod tests {
         let escaped = Rc::new(Cell::new(false));
         let flag = escaped.clone();
         let (view, cx) = cx.add_window_view(move |window, cx| Host {
-            editor: expression_editor_state(text, scope(), window, cx),
+            editor: expression_editor_state(
+                text,
+                if FIELD_SCOPE.get() {
+                    vocabulary(&Scope::field_context())
+                } else {
+                    scope()
+                },
+                window,
+                cx,
+            ),
             escaped: flag,
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
@@ -1262,6 +1291,65 @@ mod tests {
         assert!(
             gap.abs() < gpui::px(2.5),
             "the text starts {gap:?} from the padding edge"
+        );
+    }
+
+    #[gpui::test]
+    fn an_at_opens_the_attribute_menu_wherever_a_token_can_start(cx: &mut TestAppContext) {
+        FIELD_SCOPE.set(true);
+        for (typed, expected_first) in [
+            ("@", "P"),
+            ("sin(@", "P"),
+            ("1 + @", "P"),
+            ("max(a, @P", ""),
+        ] {
+            let (cx, state, _) = built_with(cx, "");
+            type_text(cx, typed);
+            let found = labels(cx, &state);
+            if expected_first.is_empty() {
+                // `@P` is complete and nothing longer matches.
+                assert!(found.is_empty(), "{typed:?}: {found:?}");
+            } else {
+                assert_eq!(
+                    found.first().map(|(l, _)| l.as_str()),
+                    Some(expected_first),
+                    "{typed:?}"
+                );
+                assert!(menu_open(cx, &state), "{typed:?}");
+            }
+        }
+        FIELD_SCOPE.set(false);
+    }
+
+    /// The list hangs from the caret, not from the field's left edge.
+    #[gpui::test]
+    fn the_menu_opens_directly_under_the_caret(cx: &mut TestAppContext) {
+        let (cx, state, _) = built_with(cx, "");
+        type_text(cx, "1 + 2 * si");
+        for _ in 0..3 {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        let (caret, _) = cx
+            .update(|_, cx| state.read(cx).cursor_layout())
+            .expect("a painted caret");
+        let menu = cx
+            .debug_bounds("ravel-expression-completions")
+            .expect("the open menu is drawn");
+        assert!(
+            caret.origin.x > gpui::px(40.0),
+            "the caret is well right of the field's edge"
+        );
+        assert!(
+            (menu.origin.x - caret.origin.x).abs() < gpui::px(1.5),
+            "menu at {:?}, caret at {:?}",
+            menu.origin,
+            caret.origin
+        );
+        assert!(
+            menu.origin.y >= caret.bottom() && menu.origin.y < caret.bottom() + gpui::px(12.0),
+            "menu at {:?}, caret bottom {:?}",
+            menu.origin,
+            caret.bottom()
         );
     }
 

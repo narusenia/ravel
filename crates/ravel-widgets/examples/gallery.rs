@@ -164,12 +164,7 @@ impl GalleryInputs {
                     window,
                     cx,
                 ),
-                expression_editor_state(
-                    "a + b",
-                    vocabulary(&Scope::parameter_context()),
-                    window,
-                    cx,
-                ),
+                expression_editor_state("a + b", vocabulary(&Scope::field_context()), window, cx),
                 expression_editor_state("", vocabulary(&Scope::field_context()), window, cx),
             ],
             param_curve: cx.new(|cx| ParamCurveEditorState::new(CurveParam::default(), cx)),
@@ -901,17 +896,17 @@ fn expression_editor_section(theme: &RavelTheme, inputs: &GalleryInputs) -> AnyE
         .gap(theme.spacing.sm)
         .child(labelled(
             theme,
-            "colours",
+            "colours · field scope (`@` offers attributes)",
             ExpressionEditor::new(clean).w(px(360.0)),
         ))
         .child(labelled(
             theme,
-            "invalid · danger border and an error run",
+            "invalid · parameter scope (no `@` completion) · danger border, error run and underline",
             ExpressionEditor::new(bad).invalid(true).w(px(360.0)),
         ))
         .child(labelled(
             theme,
-            "compact",
+            "compact · field scope",
             ExpressionEditor::new(compact).compact().w(px(360.0)),
         ))
         .child(labelled(

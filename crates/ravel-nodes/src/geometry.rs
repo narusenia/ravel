@@ -14,8 +14,8 @@ use ravel_core::geometry::absent::absent_column;
 use ravel_core::geometry::rotation::Quat;
 use ravel_core::geometry::{
     AttributeArray, AttributeSet, ConnectInterpolation, ConnectMode, Domain, Geometry,
-    InstanceColumns, InstanceColumns3, InstanceImage, InstancePlacement3, InstanceSource,
-    InstanceTransform, Measure, Primitive, SortMode, blast, bounds_center, connect,
+    GeometryOpError, InstanceColumns, InstanceColumns3, InstanceImage, InstancePlacement3,
+    InstanceSource, InstanceTransform, Measure, Primitive, SortMode, blast, bounds_center, connect,
     group_selection, measure, names, resample, sort,
 };
 use ravel_core::graph::Node;
@@ -214,6 +214,23 @@ pub fn apply_transform_in_group<'a>(
             ..spatial_linear
         }
     };
+
+    // Bezier tangents are `Vec2`, so they can only follow a transform that
+    // keeps the XY plane (a turn about Z, any xy scale, any z scale or move).
+    // Turning a 3D geometry's curves out of that plane would leave the
+    // tangents behind in XY while the points moved, so it is refused, as an
+    // expansion refuses a curved source under a 3D placement.
+    if points_spatial
+        && (euler[0] != 0.0 || euler[1] != 0.0)
+        && [names::IN_TAN, names::OUT_TAN]
+            .iter()
+            .any(|name| geometry.points().get(name).is_some())
+    {
+        return Err(GeometryOpError::TangentsIn3D {
+            operation: "geometry.transform",
+        }
+        .into());
+    }
 
     let mut out = geometry.clone();
     if out.points().get(names::P).is_some() {
@@ -3717,5 +3734,74 @@ mod tests {
         let error = apply_transform(&instanced(Some(quarter_about_y()), None), &params)
             .expect_err("a shear cannot be written");
         assert!(format!("{error:#}").contains("shear"), "{error:#}");
+    }
+
+    fn curved_path3() -> Geometry {
+        let mut geo = Geometry::from_points3(vec![Vec3(1.0, 0.0, 2.0), Vec3(3.0, 0.0, 2.0)]);
+        geo.points_mut()
+            .insert(
+                names::OUT_TAN,
+                AttributeArray::Vec2(vec![Vec2(0.0, 1.0), Vec2(0.0, 0.0)]),
+            )
+            .unwrap();
+        geo.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        geo
+    }
+
+    /// A 3D path with `Vec2` tangents keeps transforming them as 2D while the
+    /// transform stays in the XY plane (turn about Z, xy scale, any z move) —
+    /// `(0, 1)` turned 90° about Z is `(-1, 0)`, and an xy scale of 2 doubles
+    /// it — and is refused when the turn would leave the plane.
+    #[test]
+    fn tangents_of_a_3d_path_follow_in_plane_transforms_and_refuse_the_rest() {
+        let mut params = ResolvedParams::default();
+        params.set("use_centroid", ravel_core::eval::ResolvedValue::Bool(false));
+        params.set(
+            "rotation",
+            ravel_core::eval::ResolvedValue::Vec3([0.0, 0.0, 90.0]),
+        );
+        params.set(
+            "scale",
+            ravel_core::eval::ResolvedValue::Vec3([2.0, 2.0, 3.0]),
+        );
+        params.set(
+            "translate",
+            ravel_core::eval::ResolvedValue::Vec3([0.0, 0.0, 5.0]),
+        );
+        let out = apply_transform(&curved_path3(), &params)
+            .unwrap()
+            .into_owned();
+        let tangent = out
+            .points()
+            .get(names::OUT_TAN)
+            .unwrap()
+            .as_vec2(names::OUT_TAN)
+            .unwrap()[0];
+        assert!(
+            (tangent.0 + 2.0).abs() < 1e-5 && tangent.1.abs() < 1e-5,
+            "{tangent:?}"
+        );
+        assert_eq!(point_positions3(&out)[0].2, 2.0 * 3.0 + 5.0);
+
+        for euler in [[90.0, 0.0, 0.0], [0.0, 45.0, 0.0]] {
+            let mut turned = ResolvedParams::default();
+            turned.set("use_centroid", ravel_core::eval::ResolvedValue::Bool(false));
+            turned.set("rotation", ravel_core::eval::ResolvedValue::Vec3(euler));
+            let error = apply_transform(&curved_path3(), &turned)
+                .expect_err("the curves would be left behind in XY");
+            assert!(format!("{error:#}").contains("tangents"), "{error:#}");
+        }
+        // A straight 3D path (no tangents) turns freely.
+        let mut straight = curved_path3();
+        straight.points_mut().remove(names::OUT_TAN);
+        let mut turned = ResolvedParams::default();
+        turned.set(
+            "rotation",
+            ravel_core::eval::ResolvedValue::Vec3([90.0, 0.0, 0.0]),
+        );
+        assert!(apply_transform(&straight, &turned).is_ok());
     }
 }

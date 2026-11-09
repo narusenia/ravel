@@ -3028,7 +3028,17 @@ fn scatter_grid() -> NodeTemplate {
             key: "count_y".into(),
             value: ParameterValue::Int(5),
         })
+        // A third axis, additive: 1 keeps the grid planar, and a graph saved
+        // without these still evaluates as the 2D grid it was.
+        .with_param(Parameter {
+            key: "count_z".into(),
+            value: ParameterValue::Int(1),
+        })
         .with_param(channel2_parameter("spacing", 20.0, 20.0))
+        .with_param(Parameter {
+            key: "spacing_z".into(),
+            value: ParameterValue::Float(20.0),
+        })
         .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
             key: "center_input".into(),
@@ -3052,13 +3062,25 @@ fn scatter_grid() -> NodeTemplate {
         // float channels, so folding them would change what the value means.
         .with_param_range("count_x", 1.0..=1000.0, 1.0..=50.0)
         .with_param_range("count_y", 1.0..=1000.0, 1.0..=50.0)
+        .with_param_range("count_z", 1.0..=1000.0, 1.0..=50.0)
         .with_param_range("spacing", -1e5..=1e5, 0.0..=200.0)
+        .with_param_range("spacing_z", -1e5..=1e5, 0.0..=200.0)
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_role("center", ParamRole::Position)
         // Where the points are, then how the connected geometries are handed
         // out to them — the same split on all three scatter nodes.
-        .with_param_group("layout", ["count_x", "count_y", "spacing", "center"])
+        .with_param_group(
+            "layout",
+            [
+                "count_x",
+                "count_y",
+                "count_z",
+                "spacing",
+                "spacing_z",
+                "center",
+            ],
+        )
         .with_param_group(
             "source",
             ["center_input", "piece_mode", "source_mode", "source_seed"],
@@ -3092,6 +3114,12 @@ fn scatter_circular() -> NodeTemplate {
             key: "align_rotation".into(),
             value: ParameterValue::Bool(true),
         })
+        // Which axis the ring turns about; `z` is the 2D ring in the XY plane.
+        .with_param(Parameter {
+            key: "axis".into(),
+            value: ParameterValue::String("z".into()),
+        })
+        .with_param_options("axis", ["z", "x", "y"])
         .with_param(Parameter {
             key: "center_input".into(),
             value: ParameterValue::Bool(true),
@@ -3115,7 +3143,10 @@ fn scatter_circular() -> NodeTemplate {
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_role("center", ParamRole::Position)
-        .with_param_group("layout", ["count", "radius", "center", "align_rotation"])
+        .with_param_group(
+            "layout",
+            ["count", "radius", "center", "axis", "align_rotation"],
+        )
         .with_param_group(
             "source",
             ["center_input", "piece_mode", "source_mode", "source_seed"],
@@ -3189,6 +3220,11 @@ fn scatter_scatter() -> NodeTemplate {
             value: ParameterValue::Int(20),
         })
         .with_param(channel2_parameter("area", 200.0, 200.0))
+        // Depth of the area; 0 keeps the scatter planar.
+        .with_param(Parameter {
+            key: "area_z".into(),
+            value: ParameterValue::Float(0.0),
+        })
         .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
             key: "seed".into(),
@@ -3214,13 +3250,14 @@ fn scatter_scatter() -> NodeTemplate {
         .with_param_options(PIECE_MODE_PARAM, [PIECE_MODE_WHOLE, PIECE_MODE_INSTANCES])
         .with_param_range("count", 0.0..=100000.0, 0.0..=500.0)
         .with_param_range("area", 0.0..=1e5, 0.0..=2000.0)
+        .with_param_range("area_z", 0.0..=1e5, 0.0..=2000.0)
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_role("center", ParamRole::Position)
         // `seed` places the points; `source_seed` picks which geometry lands
         // on each. Two seeds, two groups.
-        .with_param_group("layout", ["count", "area", "center", "seed"])
+        .with_param_group("layout", ["count", "area", "area_z", "center", "seed"])
         .with_param_group(
             "source",
             ["center_input", "piece_mode", "source_mode", "source_seed"],

@@ -276,6 +276,8 @@ kit フォークの改造は要らない。検証は kit（rev `7eafdc2`）の�
   後で二重になる
 - `docs/ui-impl-status.md` の「式エディタ」行、`docs/specifications/ui/` の
   該当仕様、`docs/dev/write-expression.md`、`docs/dev/add-widget.md` を更新
+- 補完ポップアップのマウス操作（EXED-4 はキーだけ）: 候補のクリックで確定、
+  ホバーで選択行を移す。クリックしてもフォーカスはエディタに残す（利用者判断、2026-11-09）
 
 **完了条件**
 

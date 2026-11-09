@@ -70,6 +70,8 @@ pub const KEY_CONTEXT: &str = "NodeEditor";
 
 /// Names the node a drop adds, so the wire of the same batch can reach it.
 const NEW_NODE_ALIAS: &str = "new";
+/// Gap between a node and the hover popover opened beside it, in pixels.
+const POPOVER_GAP: f32 = 8.0;
 const CUSTOM_PATH_TYPE_KEY: &str = "shape.custom_path";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3681,13 +3683,16 @@ impl Render for NodeEditorPanel {
             let (sx, sy) = self
                 .viewport
                 .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-            let (_, h) = painting::node_size_or_default(
+            let (w, _) = painting::node_size_or_default(
                 &self.node_sizes,
                 node,
                 self.viewport.zoom,
                 self.flow_direction,
             );
-            point(px(sx), px(sy + h))
+            // Beside the node, not under it: a popover too tall for the room
+            // below flips or slides upward, and from under the node that
+            // lands it on top of the node it describes.
+            point(px(sx + w + POPOVER_GAP), px(sy))
         });
         let hover_popover = match self
             .hover_popover
@@ -9220,14 +9225,14 @@ mod tests {
                 let (sx, sy) = panel
                     .viewport
                     .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-                let (_, h) = painting::node_size_or_default(
+                let (w, _) = painting::node_size_or_default(
                     &panel.node_sizes,
                     node,
                     panel.viewport.zoom,
                     panel.flow_direction,
                 );
                 let (ox, oy) = panel.canvas_origin.get();
-                (ox + sx, oy + sy + h)
+                (ox + sx + w + POPOVER_GAP, oy + sy)
             })
             .unwrap();
         let origin_x: f32 = bounds.origin.x.into();
@@ -9242,8 +9247,8 @@ mod tests {
         );
     }
 
-    /// The popover anchor wrapper is laid out at the hovered node's
-    /// bottom-left corner in window coordinates: gpui-component's Popover
+    /// The popover anchor wrapper is laid out just right of the hovered
+    /// node's top-right corner in window coordinates: gpui-component's Popover
     /// resolves its position from the wrapper's prepaint bounds, so the
     /// wrapper itself must land on the node — positioning only the trigger
     /// child would leave the popover opening at the canvas origin.
@@ -9274,14 +9279,14 @@ mod tests {
                 let (sx, sy) = panel
                     .viewport
                     .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-                let (_, h) = painting::node_size_or_default(
+                let (w, _) = painting::node_size_or_default(
                     &panel.node_sizes,
                     node,
                     panel.viewport.zoom,
                     panel.flow_direction,
                 );
                 let (ox, oy) = panel.canvas_origin.get();
-                (ox + sx, oy + sy + h)
+                (ox + sx + w + POPOVER_GAP, oy + sy)
             })
             .unwrap();
 
@@ -9289,7 +9294,7 @@ mod tests {
         let origin_y: f32 = bounds.origin.y.into();
         assert!(
             (origin_x - expected_x).abs() < 1.0,
-            "anchor x {origin_x} must match the node's left edge {expected_x}"
+            "anchor x {origin_x} must sit just right of the node {expected_x}"
         );
         assert!(
             (origin_y - expected_y).abs() < 1.0,

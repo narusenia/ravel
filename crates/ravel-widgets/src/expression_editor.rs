@@ -231,6 +231,12 @@ pub fn expression_editor_state(
     })
 }
 
+/// The left gutter the kit reserves in a code editor even with line numbers
+/// and folding off (`LINE_NUMBER_RIGHT_MARGIN`, private there). The field pulls
+/// the editor left by this much; `the_text_starts_at_the_frames_padding` fails
+/// if the kit's value ever changes.
+const KIT_GUTTER: gpui::Pixels = px(10.0);
+
 /// How many rows the menu shows before it scrolls with the selection.
 const MENU_ROWS: usize = 8;
 
@@ -321,6 +327,7 @@ fn accept_selected(
     true
 }
 
+#[cfg(test)]
 fn menu_is_open(state: &Entity<EditorState>, cx: &App) -> bool {
     state.read(cx).completion_menu_state().open
 }
@@ -330,6 +337,10 @@ fn menu_is_open(state: &Entity<EditorState>, cx: &App) -> bool {
 /// repaint for that. It owns no focus handle: the editor keeps the keyboard.
 struct CompletionPopup {
     state: Entity<EditorState>,
+    /// The menu as last drawn (revision, open). The state notifies on every
+    /// blink and scroll; repainting only when the menu changed keeps this view
+    /// (and, through the keyed state, the host) from repainting forever.
+    drawn: (u64, bool),
     _subscriptions: [Subscription; 2],
 }
 
@@ -338,8 +349,16 @@ impl CompletionPopup {
         let handle = state.read(cx).presentation().focus_handle().clone();
         Self {
             state: state.clone(),
+            drawn: (0, false),
             _subscriptions: [
-                cx.observe(state, |_, _, cx| cx.notify()),
+                cx.observe(state, |this, state, cx| {
+                    let menu = state.read(cx).completion_menu_state();
+                    let now = (menu.revision(), menu.open);
+                    if now != this.drawn {
+                        this.drawn = now;
+                        cx.notify();
+                    }
+                }),
                 // The kit ignores a blur while its menu is open (and emits no
                 // `Blur`), so the menu would outlive the focus without this.
                 cx.on_blur(&handle, window, |this, _, cx| {
@@ -570,7 +589,6 @@ impl RenderOnce for ExpressionEditor {
         // binding is added, so nothing else that uses Tab is touched: when the
         // menu is closed these let the action through unchanged.
         let on_tab = self.state.clone();
-        let on_enter = self.state.clone();
         let on_paste = self.state.clone();
 
         InputBase::new(("ravel-expression-editor", self.state.entity_id()))
@@ -613,8 +631,10 @@ impl RenderOnce for ExpressionEditor {
                 }
             })
             .capture_action(move |action: &Enter, _, cx| {
-                // The field is one row: Shift+Enter would add a second.
-                if action.shift && !menu_is_open(&on_enter, cx) {
+                // The field is one row: Shift+Enter would add a second. With the
+                // menu open the kit would also take it for an accept, so it is
+                // swallowed either way.
+                if action.shift {
                     cx.stop_propagation();
                 }
             })
@@ -631,7 +651,7 @@ impl RenderOnce for ExpressionEditor {
                 });
                 cx.stop_propagation();
             })
-            .child(self.state.clone())
+            .child(div().ml(-KIT_GUTTER).size_full().child(self.state.clone()))
             .child(popup)
             .refine_style(&self.style)
     }
@@ -1035,13 +1055,15 @@ mod tests {
             cx.update(|window, cx| window.focus(&handle, cx));
             cx.simulate_keystrokes("end tab left up down");
             cx.run_until_parked();
-            value(cx, &state)
+            let caret = cx.update(|_, cx| state.read(cx).selected_range());
+            (value(cx, &state), caret)
         };
         let without_widget = bare(cx);
         let (cx, state, _) = built_with(cx, "1 + 2");
         cx.simulate_keystrokes("tab left up down");
         cx.run_until_parked();
-        assert_eq!(value(cx, &state), without_widget);
+        let caret = cx.update(|_, cx| state.read(cx).selected_range());
+        assert_eq!((value(cx, &state), caret), without_widget);
     }
 
     #[gpui::test]
@@ -1209,6 +1231,38 @@ mod tests {
         assert_eq!(underlined(cx, &state), vec![Range { start: 0, end: 3 }]);
         cx.update(|_, cx| set_expression_error(&state, None, cx));
         assert!(underlined(cx, &state).is_empty());
+    }
+
+    #[gpui::test]
+    fn shift_enter_with_the_menu_open_does_nothing(cx: &mut TestAppContext) {
+        let (cx, state, _) = built_with(cx, "");
+        type_text(cx, "si");
+        cx.simulate_keystrokes("shift-enter");
+        cx.run_until_parked();
+        assert_eq!(value(cx, &state), "si", "it must not accept the row");
+        assert!(menu_open(cx, &state), "nor close the menu");
+    }
+
+    /// The kit reserves a 10px gutter on the left of a code editor even with
+    /// line numbers off; the field cancels it so the text starts at the frame's
+    /// padding like a plain input's.
+    #[gpui::test]
+    fn the_text_starts_at_the_frames_padding(cx: &mut TestAppContext) {
+        let (cx, state, _) = built_with(cx, "abc");
+        cx.simulate_keystrokes("home");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let (padding, border) = cx.update(|_, cx| {
+            let theme = cx.tokens().clone();
+            (Density::default().metrics(&theme).padding_x, gpui::px(1.0))
+        });
+        let (caret, _) = cx
+            .update(|_, cx| state.read(cx).cursor_layout())
+            .expect("a painted caret");
+        let gap = caret.origin.x - (padding + border);
+        assert!(
+            gap.abs() < gpui::px(2.5),
+            "the text starts {gap:?} from the padding edge"
+        );
     }
 
     struct NoStyles;

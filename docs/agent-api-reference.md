@@ -3304,7 +3304,6 @@ style_runs(&[(Span, TokenClass)], &Range<usize>, &Colors) -> Vec<(Range<usize>, 
     // gapless cover of the range; what `InputHighlighter::styles` returns.
     // A palette switch: the host calls `refresh_expression_colours(&state, cx)`
     // after `set_active_tokens` (no observer; `observe-global` is linted)
-    // No completion, popup or Tab / Shift+Enter / paste handling yet.
 
 // scrub_input.rs — the AE gesture: drag a label sideways to change a value.
 ScrubInputState / ScrubInput / ScrubEvent::{Change, Commit}

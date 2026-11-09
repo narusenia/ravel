@@ -2008,6 +2008,15 @@ pub struct Evaluator {
     /// starting inside the fill is a simulation downstream of a simulation,
     /// which v1 refuses.
     sim_active: bool,
+    /// Forward-jump length beyond which a stateful node answers with its
+    /// last held state instead of filling the gap (see
+    /// [`Evaluator::set_sim_provisional`]). `None` fills always.
+    sim_provisional_after: Option<u64>,
+    /// The pulls that so answered since the last
+    /// [`Evaluator::settle_provisional`].
+    sim_provisional: Vec<sim::ProvisionalSim>,
+    /// Asked between the frames of a fill; `true` stops it.
+    sim_cancel: Option<CancelCheck>,
     /// Wall-clock `process()` durations recorded by the current top-level
     /// evaluation (see [`Evaluator::take_timings`]).
     timings: Vec<(NodeId, std::time::Duration)>,

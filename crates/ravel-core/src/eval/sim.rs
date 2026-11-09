@@ -39,8 +39,8 @@
 //! `TimeShift(node, frame)`.
 
 use super::{
-    EvalContext, EvalError, EvalScope, Evaluator, NodeData, NodeKey, NodeProcessor, PathId,
-    PathSegment, ResolveBudget, ResolveOptions, ResolvedParams, parameter_overlays,
+    CancelCheck, EvalContext, EvalError, EvalScope, Evaluator, NodeData, NodeKey, NodeProcessor,
+    PathId, PathSegment, ResolveBudget, ResolveOptions, ResolvedParams, parameter_overlays,
 };
 use crate::cache_budget::{CacheKind, Evicted, Reservation, ReservationId, SharedCacheBudget};
 use crate::composition::Document;
@@ -186,6 +186,14 @@ impl<P: StatefulProcessor> NodeProcessor for StatefulAdapter<P> {
 // ===========================================================================
 // The cache
 // ===========================================================================
+
+/// A pull that answered with a stateful node's last held state instead of
+/// the frame asked for, and what is needed to dirty it again.
+pub(super) struct ProvisionalSim {
+    graph: Graph,
+    path: Vec<PathSegment>,
+    node: NodeId,
+}
 
 /// What a track's states were made from: the digest the track is accepted
 /// by, and the cheap evidence that the digest still describes the graph in
@@ -492,9 +500,48 @@ impl Evaluator {
     /// Whether a fill should stop here: a newer request is waiting, or a
     /// read-ahead has been told to give way.
     fn sim_fill_should_stop(&self) -> bool {
-        self.read_ahead
-            .as_ref()
-            .is_some_and(|cancelled| cancelled())
+        [&self.read_ahead, &self.sim_cancel]
+            .into_iter()
+            .flatten()
+            .any(|cancelled| cancelled())
+    }
+
+    /// Answer a forward jump of more than `after` frames with the last state
+    /// the track holds instead of filling the gap, or stop doing so
+    /// (`None`, the default: every pull fills to the frame asked for).
+    ///
+    /// A pull answered this way is **provisional**: it shows a frame the
+    /// simulation has not reached. [`Self::has_provisional_sim`] reports it,
+    /// and [`Self::settle_provisional`] must run before the next pull of the
+    /// same request, or the provisional value stays in the node cache.
+    pub fn set_sim_provisional(&mut self, after: Option<u64>) {
+        self.sim_provisional_after = after;
+    }
+
+    /// Ask a fill to stop between frames when `cancelled` returns `true`
+    /// (a newer request is waiting), or stop asking. The frames already
+    /// computed stay in the track; the pull fails with
+    /// [`EvalError::Cancelled`].
+    pub fn set_sim_cancel(&mut self, cancelled: Option<CancelCheck>) {
+        self.sim_cancel = cancelled;
+    }
+
+    /// Whether a pull since the last [`Self::settle_provisional`] was
+    /// answered with a state older than the frame asked for.
+    pub fn has_provisional_sim(&self) -> bool {
+        !self.sim_provisional.is_empty()
+    }
+
+    /// Take back what a provisional pull put in the node cache.
+    ///
+    /// The nodes that answered provisionally and everything downstream of
+    /// them are marked dirty, as an edit to them would, so the pull that
+    /// completes the fill recomputes them from the real state instead of
+    /// serving the old frame's. The track itself is untouched.
+    pub fn settle_provisional(&mut self) {
+        for hit in std::mem::take(&mut self.sim_provisional) {
+            self.mark_dirty_at(&hit.graph, &hit.path, hit.node);
+        }
     }
 
     /// [`EvalScope::sim_state`]: the state of `node` at `ctx.frame`.
@@ -539,16 +586,17 @@ impl Evaluator {
         }
 
         self.sim_active = true;
-        let filled = self.fill_sim_track(&graph, node, ctx, stepper, key, &premise);
+        let state = self.sim_state_or_provisional(&graph, node, ctx, stepper, key, &premise);
         self.sim_active = false;
-        filled
+        state
     }
 
-    /// Step the track of `key` forward until it holds `ctx.frame`.
+    /// The state at `ctx.frame` — or, when a long forward jump would make the
+    /// caller wait, the last state the track holds, recorded as provisional.
     ///
-    /// Every state is stored as soon as it exists, so a fill that fails or
-    /// gives way leaves the frames it did compute for the next pull.
-    fn fill_sim_track(
+    /// The start frame is always filled first: a track with nothing in it has
+    /// no "last state" to show.
+    fn sim_state_or_provisional(
         &mut self,
         graph: &Graph,
         node: &Node,
@@ -557,11 +605,55 @@ impl Evaluator {
         key: NodeKey,
         premise: &Premise,
     ) -> Result<SimState, EvalError> {
+        let Some(after) = self.sim_provisional_after else {
+            return self.fill_sim_track(graph, node, ctx, stepper, key, premise, ctx.frame);
+        };
+        let (last, shown) = match self.sim.last(&key) {
+            Some(held) => held,
+            None => {
+                let start =
+                    self.fill_sim_track(graph, node, ctx, stepper, key, premise, SIM_START_FRAME)?;
+                (SIM_START_FRAME, start)
+            }
+        };
+        if ctx.frame.saturating_sub(last) <= after {
+            return self.fill_sim_track(graph, node, ctx, stepper, key, premise, ctx.frame);
+        }
+        self.sim_provisional.push(ProvisionalSim {
+            graph: graph.clone(),
+            path: self.path.clone(),
+            node: node.id,
+        });
+        Ok(shown)
+    }
+
+    /// Step the track of `key` forward until it holds `target`.
+    ///
+    /// Every state is stored as soon as it exists, so a fill that fails or
+    /// gives way leaves the frames it did compute for the next pull.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_sim_track(
+        &mut self,
+        graph: &Graph,
+        node: &Node,
+        ctx: &EvalContext,
+        stepper: &dyn SimStepper,
+        key: NodeKey,
+        premise: &Premise,
+        target: u64,
+    ) -> Result<SimState, EvalError> {
         let budget = self.store.budget().cloned();
         let (mut frame, mut prev) = match self.sim.last(&key) {
             Some((last, state)) => (last + 1, Some(state)),
             None => (SIM_START_FRAME, None),
         };
+        // The track may already hold `target` (the provisional path fills the
+        // start frame first, then asks for it again).
+        if frame > target
+            && let Some(held) = &prev
+        {
+            return Ok(held.clone());
+        }
         loop {
             if self.sim_fill_should_stop() {
                 return Err(EvalError::Cancelled(node.id));
@@ -582,7 +674,7 @@ impl Evaluator {
                 .sim
                 .push(key, premise, state.clone(), bytes, budget.as_ref());
             self.store.drop_evicted(&rest);
-            if frame >= ctx.frame {
+            if frame >= target {
                 return Ok(state);
             }
             prev = Some(state);
@@ -1321,5 +1413,134 @@ mod tests {
             2,
             "states counted at 30 fps answered a 24 fps pull"
         );
+    }
+
+    // ---- provisional answers and cancellation --------------------------------
+
+    /// `input + 1000`, so a value that went through a downstream node is
+    /// recognisable.
+    struct PlusThousand;
+
+    impl NodeProcessor for PlusThousand {
+        fn process(
+            &self,
+            _node: &Node,
+            _ctx: &EvalContext,
+            inputs: &[Option<Arc<dyn NodeData>>],
+            _params: &ResolvedParams,
+            _scope: &mut dyn EvalScope,
+        ) -> anyhow::Result<Arc<dyn NodeData>> {
+            let input = inputs[0]
+                .as_ref()
+                .and_then(|data| data.downcast_ref::<Scalar>())
+                .ok_or_else(|| anyhow::anyhow!("expected a scalar"))?;
+            Ok(Arc::new(Scalar(input.0 + 1000.0)))
+        }
+    }
+
+    /// `sim(2) -> plus(3)`.
+    fn consumed_sim() -> Graph {
+        wire(
+            Graph::new()
+                .add_node(sim_node(2))
+                .unwrap()
+                .add_node(
+                    Node::new(NodeId::new(3), "test.plus")
+                        .with_input("a", &[DataTypeId::SCALAR])
+                        .with_output("out", DataTypeId::SCALAR),
+                )
+                .unwrap(),
+            1,
+            2,
+            3,
+        )
+    }
+
+    fn consumed_evaluator(counter: &Counter) -> Evaluator {
+        let mut ev = Evaluator::new();
+        ev.register(NodeId::new(2), stateful_processor(counter.clone()));
+        ev.register(NodeId::new(3), Arc::new(PlusThousand));
+        ev
+    }
+
+    #[test]
+    fn a_long_forward_jump_answers_with_the_last_state_and_does_not_poison_the_cache() {
+        let counter = Counter::default();
+        let graph = consumed_sim();
+        let mut ev = consumed_evaluator(&counter);
+        let sink = NodeId::new(3);
+        ev.set_sim_provisional(Some(5));
+
+        // The first pull has no last state to show, so it fills frame 0 and
+        // is not provisional: it did reach the frame it was asked for.
+        let first = ev.evaluate(&graph, sink, &ctx_at(0)).unwrap();
+        assert_eq!(value_of(&first), 1000.0);
+        assert!(!ev.has_provisional_sim());
+
+        let jumped = ev.evaluate(&graph, sink, &ctx_at(300)).unwrap();
+        assert_eq!(value_of(&jumped), 1000.0, "frame 0 stands in for frame 300");
+        assert!(ev.has_provisional_sim());
+        assert_eq!(
+            counter.steps.load(Ordering::Relaxed),
+            0,
+            "the jump must answer before filling anything"
+        );
+
+        // Completing the fill: the old frame's value must not be served from
+        // the node cache, at the sim node or below it.
+        ev.settle_provisional();
+        assert!(!ev.has_provisional_sim());
+        ev.set_sim_provisional(None);
+        let settled = ev.evaluate(&graph, sink, &ctx_at(300)).unwrap();
+
+        assert_eq!(value_of(&settled), 1000.0 + 300.0);
+        assert_eq!(counter.steps.load(Ordering::Relaxed), 300);
+        assert!(!ev.has_provisional_sim());
+    }
+
+    #[test]
+    fn a_short_forward_jump_fills_instead_of_answering_provisionally() {
+        let counter = Counter::default();
+        let (graph, node) = lone();
+        let mut ev = counter_evaluator(&counter, 2);
+        ev.set_sim_provisional(Some(5));
+        ev.evaluate(&graph, node, &ctx_at(0)).unwrap();
+
+        let out = ev.evaluate(&graph, node, &ctx_at(5)).unwrap();
+
+        assert_eq!(value_of(&out), 5.0);
+        assert!(!ev.has_provisional_sim());
+        assert_eq!(counter.steps.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn a_fill_that_gives_way_keeps_its_frames_and_resumes() {
+        let counter = Counter::default();
+        let (graph, node) = lone();
+        let mut ev = counter_evaluator(&counter, 2);
+        let checks = Arc::new(AtomicUsize::new(0));
+        let seen = checks.clone();
+        // Gives way on the fifth look: frames 0..=3 are computed first.
+        ev.set_sim_cancel(Some(Arc::new(move || {
+            seen.fetch_add(1, Ordering::SeqCst) >= 4
+        })));
+
+        let err = ev
+            .evaluate(&graph, node, &ctx_at(50))
+            .err()
+            .expect("the fill was told to stop");
+        assert!(err.is_cancelled(), "unexpected error: {err:?}");
+        assert_eq!(ev.sim_cached_frames(&[], node), Some(0..4));
+
+        ev.set_sim_cancel(None);
+        let out = ev.evaluate(&graph, node, &ctx_at(50)).unwrap();
+
+        assert_eq!(value_of(&out), 50.0);
+        assert_eq!(
+            counter.steps.load(Ordering::Relaxed),
+            50,
+            "the frames computed before giving way were computed again"
+        );
+        assert_eq!(counter.initials.load(Ordering::Relaxed), 1);
     }
 }

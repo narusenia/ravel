@@ -2562,8 +2562,8 @@ the pool on drop) and `ensure_cpu_geometry` mirror `ensure_gpu` /
 is submitted `BufferPool::acquire` skips that buffer, `upload_buffer` flushes
 before overwriting it and a readback flushes before copying a written one
 (the buffer counterpart of the texture pending-use rules). Nothing binds a
-pooled buffer to `dispatch_compute` yet, and no production site builds a
-`BufferPool`; the first consumer adds both, building it with
+pooled buffer to `dispatch_compute` yet. The first production `BufferPool` is
+`scene.render`'s static mesh cache (see `ScenePass` below); a pool is built with
 `BufferPool::with_vram_allowance` over the **same** `VramAllowance` as its
 `TexturePool` (`TexturePool::with_vram_allowance`) so idle textures and idle
 buffers together stay inside the budget's headroom.
@@ -2635,9 +2635,14 @@ slice order. A `SceneCall::Mesh { buffers, object, texture, class }` draws a
 buffers, a pipeline from `RasterPipeline::new_depth_tested`, a per-call uniform
 that carries the object's depth). **`MeshBuffers` are the only long-lived
 buffers and the pass never rebuilds one** — whether one is stale is the
-caller's judgement (`StaticMeshCache` in `scene_render/gpu.rs`, one private
-`allocate` is the whole allocation seam); `MeshBuffers::id()` is unique per
-allocation so reuse is a comparison of two numbers. Shader contract: group 0
+caller's judgement (`StaticMeshCache` in `scene_render/gpu.rs`; one private
+`allocate` is the whole allocation seam). `MeshBuffers::new(ctx, &Arc<Mutex<BufferPool>>, ..)`
+leases its vertex / index / colour buffers from the pool (`VERTEX | COPY_DST`,
+`INDEX | COPY_DST`, `STORAGE | COPY_DST`) and returns them on drop;
+`record_scene` marks them in flight. `MeshBuffers::id()` is unique per
+allocation and `lease_ids()` are the three `PooledBuffer::id`s, so reuse is a
+comparison of numbers. `TexturePool::vram_allowance()` hands out the shared
+`VramAllowance` (`None` for a fixed-budget pool). Shader contract: group 0
 object records, group 1 vertex colours, group 2 the sampled texture, vertex
 buffer 0 = `MeshVertex { position, normal, uv }`, entry points `mesh_vertex` /
 `mesh_fragment`. Textures and the colour attachment join the batch's

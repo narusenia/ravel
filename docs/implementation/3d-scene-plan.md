@@ -363,8 +363,12 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
   動的 = 160 B の `ObjectRecord`（`mvp` / `model` / 色 / フラグ）。変換は
   シェーダで適用し頂点に焼かない。再利用の鍵は `MeshKey`（各列の `Arc`
   アドレス + インデックス blob + 範囲）。変換・色・カメラは鍵に入らない。
-  確保は `StaticMeshCache::allocate` の 1 箇所で、GPU-1 の汎用バッファ
-  プールへの移行はそこだけ。16 フレーム使われない鍵は捨てる
+  確保は `StaticMeshCache::allocate` の 1 箇所で、頂点・インデックス・頂点色の
+  3 本を GPU-1 の `BufferPool` から借りる（`MeshBuffers` が drop されると
+  池へ戻る）。16 フレーム使われない鍵は捨てる。プールは `GpuSceneRenderer`
+  が持ち、`TexturePool` が `VramAllowance` を持つ（アプリ）ときは同じ
+  allowance から作る（`TexturePool::vram_allowance`）。パス記録時に 3 本を
+  `mark_buffer_use` するので、未送信バッチが読むバッファは `acquire` が飛ばす
 - **代表深度**: オブジェクトの頂点平均を view 空間へ移した `z`（大きいほど
   遠い）、同値は bbox の最遠角、それも同値なら挿入順。Path は点の平均
 - 画像インスタンスは**共有の単位正方形 Mesh**（`uv` 列つき、頂点 `±0.5`）に

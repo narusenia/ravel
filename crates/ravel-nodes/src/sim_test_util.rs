@@ -12,6 +12,7 @@ use ravel_core::eval::{
 use ravel_core::graph::Node;
 use ravel_core::types::{FrameBuffer, NodeData, Scalar};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The scalar `k * frame`.
 pub(crate) struct FrameScalar(pub f32);
@@ -76,6 +77,8 @@ pub(crate) struct Accumulate {
     pub as_frame: bool,
     /// Bytes charged per state (0 counts as 1), to drive checkpoint thinning.
     pub state_bytes: u64,
+    /// How many times a track started from nothing.
+    pub initials: Arc<AtomicUsize>,
 }
 
 fn input_number(inputs: &SimInputs<'_>) -> f32 {
@@ -90,6 +93,7 @@ impl StatefulProcessor for Accumulate {
     type State = f32;
 
     fn initial(&self, _ctx: &EvalContext, inputs: &SimInputs<'_>) -> f32 {
+        self.initials.fetch_add(1, Ordering::Relaxed);
         input_number(inputs)
     }
 

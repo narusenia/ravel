@@ -544,7 +544,9 @@ mod tests {
             .with_subnet(inner);
         let root = Graph::new()
             .add_node(
-                Node::new(NodeId::new(SOURCE), "test.frame").with_output("out", DataTypeId::SCALAR),
+                Node::new(NodeId::new(SOURCE), "test.frame")
+                    .with_output("out", DataTypeId::SCALAR)
+                    .with_param("k", ParameterValue::Float(1.0)),
             )
             .unwrap()
             .add_node(subnet)
@@ -676,5 +678,88 @@ mod tests {
             .unwrap();
 
         assert_eq!(scalar(&out), 3.0);
+    }
+
+    // ---- the premise includes what feeds the pins ---------------------------
+
+    /// Evaluate the subnet at `frame` and report how many times the inner
+    /// simulation has started from nothing.
+    fn starts(ev: &mut Evaluator, graph: &Graph, counter: &Accumulate, frame: u64) -> usize {
+        ev.evaluate(graph, NodeId::new(SUBNET), &ctx_at(frame))
+            .unwrap();
+        counter.initials.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn with_param(graph: &Graph, node: u64, key: &str, value: f32) -> Graph {
+        graph
+            .clone()
+            .set_params(
+                NodeId::new(node),
+                &[ravel_core::graph::Parameter {
+                    key: key.into(),
+                    value: ParameterValue::Float(value),
+                }],
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn editing_what_feeds_a_pin_discards_the_inner_sims_track() {
+        let counter = Accumulate::default();
+        let graph = animated_pin_graph("test.sim");
+        let mut ev = pin_evaluator(
+            stateful_processor(counter.clone()),
+            &graph,
+            Evaluator::new(),
+        );
+        assert_eq!(starts(&mut ev, &graph, &counter, 6), 1);
+
+        // The pin's source changes; the subnet's inner network is the same
+        // object, so only the producing scope's upstream can tell.
+        let edited = with_param(&graph, SOURCE, "k", 2.0);
+        ev.mark_dirty(&edited, NodeId::new(SOURCE));
+
+        assert_eq!(
+            starts(&mut ev, &edited, &counter, 8),
+            2,
+            "the track outlived an edit to what feeds its pin"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_edit_keeps_the_inner_sims_track() {
+        let counter = Accumulate::default();
+        let graph = animated_pin_graph("test.sim");
+        let mut ev = pin_evaluator(
+            stateful_processor(counter.clone()),
+            &graph,
+            Evaluator::new(),
+        );
+        assert_eq!(starts(&mut ev, &graph, &counter, 6), 1);
+
+        // A node in the subnet's own network that nothing upstream of the sim
+        // reads, and one in the outer graph that does not feed the pin.
+        let mut subnet = (**graph.node(NodeId::new(SUBNET)).unwrap()).clone();
+        let inner = subnet.subnet.as_deref().unwrap().clone();
+        subnet.subnet = Some(Arc::new(
+            inner
+                .add_node(
+                    Node::new(NodeId::new(40), "test.frame").with_output("out", DataTypeId::SCALAR),
+                )
+                .unwrap(),
+        ));
+        let edited = graph
+            .replace_node(Arc::new(subnet))
+            .add_node(
+                Node::new(NodeId::new(41), "test.frame").with_output("out", DataTypeId::SCALAR),
+            )
+            .unwrap();
+        ev.mark_dirty(&edited, NodeId::new(SUBNET));
+
+        assert_eq!(
+            starts(&mut ev, &edited, &counter, 8),
+            1,
+            "an unrelated edit restarted the simulation"
+        );
     }
 }

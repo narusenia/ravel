@@ -45,9 +45,14 @@ use super::{
 use crate::cache_budget::{
     CacheKind, Evicted, Reservation, ReservationId, SharedCacheBudget, Tier,
 };
-use crate::composition::Document;
+use crate::composition::compile::{NodeRole, decode_deterministic_node_id};
+use crate::composition::validate::{
+    COMP_INFO_COMP_PARAM, COMP_INFO_TYPE_KEY, LAYER_INFO_TYPE_KEY, LAYER_REF_TYPE_KEY,
+};
+use crate::composition::{Composition, Document, Layer};
 use crate::graph::{Graph, Node};
-use crate::id::NodeId;
+use crate::id::{CompId, LayerId, NodeId};
+use crate::network;
 use crate::types::FrameRate;
 use std::any::Any;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -201,25 +206,71 @@ pub(super) struct ProvisionalSim {
 /// by, and the cheap evidence that the digest still describes the graph in
 /// hand.
 ///
-/// Hashing the upstream subgraph costs a walk over it and a `Debug` of every
-/// parameter, and a pull happens once per played frame. `graph` lets a pull
-/// whose graph is the very object the digest was made from skip that
+/// Hashing the upstream subgraph costs a walk over it and a serialisation of
+/// every parameter, and a pull happens once per played frame. `graph` lets a
+/// pull whose graph is the very object the digest was made from skip that
 /// ([`Graph::ptr_eq`] is `O(1)`, and `true` proves identical content); a
-/// `false` only costs the recomputation.
+/// `false` only costs the recomputation. A track whose upstream reads from
+/// outside its scope also carries an [`ExternalStamp`], which holds the same
+/// kind of evidence for what lives there.
 #[derive(Clone)]
 pub(super) struct Premise {
     graph: Graph,
     fps: FrameRate,
     comp_resolution: (u32, u32),
     hash: u64,
+    external: Option<ExternalStamp>,
+}
+
+/// The objects an upstream that reaches outside its scope was hashed from: the
+/// document its layers and shells were read from, and the graph each
+/// binding-producing scope was hashed in. Every one is immutable, so pointer
+/// equality of all of them proves the digest still describes what is there; any
+/// difference only costs the recomputation.
+#[derive(Clone)]
+struct ExternalStamp {
+    document: Option<Arc<Document>>,
+    producers: Vec<Graph>,
+}
+
+/// What [`ExternalStamp`] is compared with: the same objects as they are now.
+pub(super) struct LiveExternal {
+    document: Option<Arc<Document>>,
+    producers: Vec<Graph>,
+}
+
+impl ExternalStamp {
+    fn holds(&self, live: &LiveExternal) -> bool {
+        let same_document = match (&self.document, &live.document) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        // The stamp holds the levels the hash walked; deeper live levels were
+        // never read, so they cannot have changed it.
+        same_document
+            && self.producers.len() <= live.producers.len()
+            && self
+                .producers
+                .iter()
+                .zip(&live.producers)
+                .all(|(then, now)| then.ptr_eq(now))
+    }
 }
 
 impl Premise {
-    /// Whether `hash` was made from `graph` and the frame axes of `ctx`.
-    fn describes(&self, graph: &Graph, ctx: &EvalContext) -> bool {
+    /// Whether `hash` was made from `graph`, the frame axes of `ctx` and — when
+    /// the upstream reads outside its scope — the external objects `live`
+    /// names (`None` when the caller did not look them up).
+    fn describes(&self, graph: &Graph, ctx: &EvalContext, live: Option<&LiveExternal>) -> bool {
         self.graph.ptr_eq(graph)
             && self.fps == ctx.fps
             && self.comp_resolution == ctx.comp_resolution
+            && match (&self.external, live) {
+                (None, _) => true,
+                (Some(stamp), Some(live)) => stamp.holds(live),
+                (Some(_), None) => false,
+            }
     }
 }
 
@@ -380,16 +431,26 @@ impl SimCache {
         Some((*frame, held.state.clone()))
     }
 
-    /// The digest of `key`'s track when it was made from this very graph and
-    /// these frame axes, so the caller can skip recomputing it.
-    pub(super) fn known_hash(
+    /// `key`'s track's premise when it was made from this very graph, these
+    /// frame axes and these external objects, so the caller can skip
+    /// recomputing it.
+    pub(super) fn known(
         &self,
         key: &NodeKey,
         graph: &Graph,
         ctx: &EvalContext,
-    ) -> Option<u64> {
+        live: Option<&LiveExternal>,
+    ) -> Option<Premise> {
         let premise = &self.tracks.get(key)?.premise;
-        premise.describes(graph, ctx).then_some(premise.hash)
+        premise.describes(graph, ctx, live).then(|| premise.clone())
+    }
+
+    /// Whether `key`'s track was made from something outside its scope, so a
+    /// pull has to look at what is there now before trusting [`Self::known`].
+    pub(super) fn has_external(&self, key: &NodeKey) -> bool {
+        self.tracks
+            .get(key)
+            .is_some_and(|track| track.premise.external.is_some())
     }
 
     /// The acceptance check: drop the track unless it was made from
@@ -527,9 +588,10 @@ impl Evaluator {
         self.sim.len()
     }
 
-    /// The hash of everything the states of `node` are made from, other than
-    /// the frame. Two equal values mean a track made under one may answer a
-    /// pull made under the other.
+    /// The premise of `node`'s track: the hash of everything its states are
+    /// made from, other than the frame, and the evidence it is still current.
+    /// Two equal hashes mean a track made under one may answer a pull made
+    /// under the other.
     ///
     /// Covers the **upstream subgraph** of `node` — itself, every node
     /// reachable through its wires and through `NodeOutput` parameter
@@ -539,17 +601,128 @@ impl Evaluator {
     /// it leaves out is what does not change a state: a node's position,
     /// label, colour and stacking order, and every node that is not upstream.
     ///
+    /// **And what that upstream reads from outside its scope**, which is not
+    /// in the subgraph at all:
+    ///
+    /// - a `net.in` reached upstream means the scope's bindings feed the
+    ///   states, so the producing scope's node is hashed the same way — its
+    ///   own upstream, level by level for as long as that reaches a `net.in`
+    ///   of its own (a subnet pin, an adjustment layer's `source`, an
+    ///   iteration piece);
+    /// - a `layer.ref` reads another layer's network and shell, and a
+    ///   `layer.info` / `comp.info` or a compiled shell node reads shells off
+    ///   the document. Those are hashed from the document at the granularity
+    ///   the reads have (a referenced layer's whole network, closed over its
+    ///   own references; a composition's metadata and every layer's shell).
+    ///
+    /// A sim that reaches none of that hashes exactly what it did before, so
+    /// an edit elsewhere in its own network still does not drop its track.
+    ///
     /// It does not see inside a processor (a media file replaced on disk, a
     /// registered processor swapped): those reach the track through
     /// [`Evaluator::invalidate_node`] and [`Evaluator::invalidate_all`].
-    fn sim_premise_hash(&mut self, graph: &Graph, node: &Node, ctx: &EvalContext) -> u64 {
+    fn sim_premise(&mut self, graph: &Graph, node: &Node, ctx: &EvalContext) -> Premise {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         ctx.fps.hash(&mut hasher);
         ctx.comp_resolution.hash(&mut hasher);
 
-        let index = self.current_graph_index(graph);
+        let mut reads = ExternalReads::default();
+        let scope = UpstreamScope {
+            path_id: self.path_id,
+            owner: owning_comp(&self.path),
+            producer: false,
+        };
+        let mut reached_interface =
+            self.hash_upstream(graph, node.id, scope, &mut hasher, &mut reads);
+
+        // Walk out through the producing scopes while the walk keeps reaching
+        // their interface node.
+        let mut producers = Vec::new();
+        let mut level = self.bindings_stack.last().and_then(|b| b.source.clone());
+        while reached_interface
+            && let Some(source) = level.take()
+            && let Some(anchor) = source.anchor
+        {
+            let (Some(producer), Some((key, _))) = (
+                self.processing_graphs
+                    .get(anchor.processing_len - 1)
+                    .cloned(),
+                self.processing.get(anchor.processing_len - 1).copied(),
+            ) else {
+                break;
+            };
+            producers.push(producer.clone());
+            let scope = UpstreamScope {
+                path_id: anchor.path_id,
+                owner: owning_comp(&self.path[..anchor.path_len.min(self.path.len())]),
+                producer: true,
+            };
+            reached_interface =
+                self.hash_upstream(&producer, key.node, scope, &mut hasher, &mut reads);
+            level = self
+                .bindings_stack
+                .get(anchor.bindings_len - 1)
+                .and_then(|b| b.source.clone());
+        }
+
+        let external = (reads.any() || !producers.is_empty()).then(|| {
+            let document = self.document.clone();
+            if let Some(document) = &document {
+                reads.hash_from(document, &mut hasher);
+            }
+            ExternalStamp {
+                document,
+                producers,
+            }
+        });
+        Premise {
+            graph: graph.clone(),
+            fps: ctx.fps,
+            comp_resolution: ctx.comp_resolution,
+            hash: hasher.finish(),
+            external,
+        }
+    }
+
+    /// The objects a stamp is compared with, as they are now: the document and
+    /// the graph of every scope that produced bindings for the current one.
+    fn live_external(&self) -> LiveExternal {
+        let mut producers = Vec::new();
+        let mut level = self.bindings_stack.last().and_then(|b| b.source.as_ref());
+        while let Some(anchor) = level.and_then(|source| source.anchor) {
+            let Some(producer) = self.processing_graphs.get(anchor.processing_len - 1) else {
+                break;
+            };
+            producers.push(producer.clone());
+            level = self
+                .bindings_stack
+                .get(anchor.bindings_len - 1)
+                .and_then(|b| b.source.as_ref());
+        }
+        LiveExternal {
+            document: self.document.clone(),
+            producers,
+        }
+    }
+
+    /// Hash `root` and everything upstream of it in `graph`, collecting what
+    /// it reads outside the graph into `reads`. Returns whether a `net.in` was
+    /// reached, i.e. whether the scope's bindings feed this subgraph.
+    ///
+    /// For a producing scope's node (`scope.producer`) only its header and its
+    /// upstream are hashed, not its inner network: the bindings are made from
+    /// what it was given, and its inner network is the sim's own scope.
+    fn hash_upstream(
+        &mut self,
+        graph: &Graph,
+        root: NodeId,
+        scope: UpstreamScope,
+        hasher: &mut impl Hasher,
+        reads: &mut ExternalReads,
+    ) -> bool {
+        let index = self.graph_index(graph, scope.path_id);
         let mut upstream: BTreeSet<NodeId> = BTreeSet::new();
-        let mut pending = vec![node.id];
+        let mut pending = vec![root];
         while let Some(id) = pending.pop() {
             if !upstream.insert(id) {
                 continue;
@@ -559,20 +732,27 @@ impl Evaluator {
                 pending.extend(reached.parameter_sources().into_iter().map(|(n, _)| n));
             }
         }
+        let mut reached_interface = false;
         for id in upstream {
-            id.hash(&mut hasher);
+            id.hash(hasher);
             let Some(reached) = graph.node(id) else {
                 // A dangling reference still changes the digest.
                 continue;
             };
-            hash_node(reached, &mut hasher);
+            if scope.producer && id == root {
+                hash_node_header(reached, hasher);
+            } else {
+                hash_node(reached, hasher);
+                scan_reads(reached, scope.owner, reads, true);
+                reached_interface |= reads.take_interface();
+            }
             let mut wires: Vec<_> = index.in_edges(id).iter().collect();
             wires.sort_by_key(|(port, source, source_port)| (port.0, source.raw(), source_port.0));
             for (port, source, source_port) in wires {
-                (port.0, source.raw(), source_port.0).hash(&mut hasher);
+                (port.0, source.raw(), source_port.0).hash(hasher);
             }
         }
-        hasher.finish()
+        reached_interface
     }
 
     /// Release the tracks the document edit left without an owner.
@@ -691,15 +871,14 @@ impl Evaluator {
             path: self.paths.intern(&scope),
             node: node.id,
         };
-        let hash = match self.sim.known_hash(&key, &graph, ctx) {
-            Some(hash) => hash,
-            None => self.sim_premise_hash(&graph, node, ctx),
-        };
-        let premise = Premise {
-            graph: graph.clone(),
-            fps: ctx.fps,
-            comp_resolution: ctx.comp_resolution,
-            hash,
+        // The comparison happens here, at the pull: a track that read from
+        // outside its scope is only trusted without rehashing when the
+        // document and the producing scopes are the very objects it was made
+        // from (see [`ExternalStamp`]).
+        let live = self.sim.has_external(&key).then(|| self.live_external());
+        let premise = match self.sim.known(&key, &graph, ctx, live.as_ref()) {
+            Some(premise) => premise,
+            None => self.sim_premise(&graph, node, ctx),
         };
         self.sim.discard_if_stale(&key, &premise);
         let budget = self.store.budget().cloned();
@@ -888,9 +1067,203 @@ fn sim_scope(path: &[PathSegment]) -> Vec<PathSegment> {
         .collect()
 }
 
+/// Where [`Evaluator::hash_upstream`] is walking.
+#[derive(Clone, Copy)]
+struct UpstreamScope {
+    /// The interned path of the scope the graph is evaluated in (it keys the
+    /// graph's wire index).
+    path_id: PathId,
+    /// The composition the scope's layer sits in, for readers that name "the
+    /// same composition".
+    owner: Option<CompId>,
+    /// The graph holds the node that produced the sim's bindings, not the sim.
+    producer: bool,
+}
+
+/// The composition of the innermost layer scope in `path`.
+fn owning_comp(path: &[PathSegment]) -> Option<CompId> {
+    path.iter().rev().find_map(|segment| match segment {
+        PathSegment::Layer(comp, _) => Some(*comp),
+        _ => None,
+    })
+}
+
+/// What an upstream reads from the document: which compositions' shells and
+/// which layers' networks. Collected while walking, hashed once from the
+/// document ([`Self::hash_from`]), so the walk never needs the document.
+#[derive(Default)]
+struct ExternalReads {
+    /// Compositions whose metadata and every layer's shell are read.
+    shells: BTreeSet<CompId>,
+    /// Compositions whose every layer is read, network and shell (a
+    /// `layer.ref` whose target cannot be named statically).
+    whole: BTreeSet<CompId>,
+    /// Layers whose network (closed over its own references) and shell are
+    /// read.
+    layers: BTreeSet<(CompId, LayerId)>,
+    /// A `net.in` was just scanned (see [`Self::take_interface`]).
+    interface: bool,
+}
+
+impl ExternalReads {
+    fn any(&self) -> bool {
+        !(self.shells.is_empty() && self.whole.is_empty() && self.layers.is_empty())
+    }
+
+    /// Whether a `net.in` was scanned since the last call.
+    fn take_interface(&mut self) -> bool {
+        std::mem::take(&mut self.interface)
+    }
+
+    /// Hash everything read, from `document`, in id order.
+    fn hash_from(&mut self, document: &Document, hasher: &mut impl Hasher) {
+        for comp in std::mem::take(&mut self.whole) {
+            if let Some(comp) = document.get_composition(comp) {
+                self.shells.insert(comp.id);
+                self.layers
+                    .extend(comp.layers.iter().map(|layer| (comp.id, layer.id)));
+            }
+        }
+        // A referenced layer's network may read further out; its reads join
+        // the set until nothing new appears.
+        let mut scanned: BTreeSet<(CompId, LayerId)> = BTreeSet::new();
+        while let Some(&next) = self.layers.iter().find(|layer| !scanned.contains(layer)) {
+            scanned.insert(next);
+            let layer = document
+                .get_composition(next.0)
+                .and_then(|comp| comp.get_layer(next.1));
+            if let Some(layer) = layer {
+                for node in layer.network.nodes() {
+                    scan_reads(node, Some(next.0), self, false);
+                }
+            }
+        }
+        self.interface = false;
+        for id in &self.shells {
+            id.hash(hasher);
+            match document.get_composition(*id) {
+                Some(comp) => hash_comp_shell(comp, hasher),
+                None => 0u8.hash(hasher),
+            }
+        }
+        for (comp, layer_id) in &self.layers {
+            (comp, layer_id).hash(hasher);
+            match document
+                .get_composition(*comp)
+                .and_then(|comp| comp.get_layer(*layer_id))
+            {
+                Some(layer) => {
+                    hash_graph(&layer.network, hasher);
+                    hash_layer_shell(layer, hasher);
+                }
+                None => 0u8.hash(hasher),
+            }
+        }
+    }
+}
+
+/// Record what `node` — and every node of a subnet it holds — reads from
+/// outside the graph it sits in. `owner` is the composition of the layer the
+/// graph belongs to. `top` is false for a nested node, whose `net.in` is its
+/// subnet's own interface and not the scope's.
+fn scan_reads(node: &Node, owner: Option<CompId>, reads: &mut ExternalReads, top: bool) {
+    let identifier = |key: &str| {
+        node.parameters
+            .iter()
+            .find(|param| param.key == key)
+            .and_then(|param| param.value.static_text_identifier())
+    };
+    match node.type_key.as_str() {
+        LAYER_REF_TYPE_KEY => {
+            // The referrer's shell too: the target's time is derived from it.
+            if let Some(owner) = owner {
+                reads.shells.insert(owner);
+                match identifier("layer") {
+                    Some(raw) => {
+                        reads.layers.insert((owner, LayerId::new(raw)));
+                    }
+                    None => {
+                        reads.whole.insert(owner);
+                    }
+                }
+            }
+        }
+        LAYER_INFO_TYPE_KEY => {
+            reads.shells.extend(owner);
+        }
+        COMP_INFO_TYPE_KEY => {
+            reads.shells.extend(owner);
+            reads
+                .shells
+                .extend(identifier(COMP_INFO_COMP_PARAM).map(CompId::new));
+        }
+        key => {
+            // A compiled shell node reads its layer's shell (and the network
+            // boundary its network) off the document by decoding its id.
+            if key.starts_with("comp.")
+                && let Some((comp, layer, role)) = decode_deterministic_node_id(node.id)
+            {
+                reads.shells.insert(comp);
+                if role == NodeRole::Network {
+                    reads.layers.insert((comp, layer));
+                }
+            }
+        }
+    }
+    if top && network::is_in_node(node) {
+        reads.interface = true;
+    }
+    if let Some(subnet) = &node.subnet {
+        for inner in subnet.nodes() {
+            scan_reads(inner, owner, reads, false);
+        }
+    }
+}
+
+/// A composition's own fields and every layer's shell, but no network.
+fn hash_comp_shell(comp: &Composition, hasher: &mut impl Hasher) {
+    comp.resolution.hash(hasher);
+    comp.frame_rate.hash(hasher);
+    comp.duration_frames.hash(hasher);
+    match bincode::serialize(&comp.background_color) {
+        Ok(bytes) => bytes.hash(hasher),
+        Err(_) => unique().hash(hasher),
+    }
+    for layer in &comp.layers {
+        hash_layer_shell(layer, hasher);
+    }
+}
+
+/// A layer's shell — timing, transform, opacity, blend, parenting, remap — and
+/// not the network it owns.
+fn hash_layer_shell(layer: &Layer, hasher: &mut impl Hasher) {
+    let mut shell = layer.clone();
+    shell.network = Graph::new();
+    match bincode::serialize(&shell) {
+        Ok(bytes) => bytes.hash(hasher),
+        Err(_) => unique().hash(hasher),
+    }
+}
+
+/// A value that equals no other, for a serialisation that cannot fail on plain
+/// data: the safe answer is a digest that never matches, so the track is
+/// dropped rather than reused.
+fn unique() -> u64 {
+    static UNIQUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    UNIQUE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Everything about `node` that decides what it computes — and nothing about
 /// where the editor drew it.
 fn hash_node(node: &Node, hasher: &mut impl Hasher) {
+    hash_node_header(node, hasher);
+    if let Some(subnet) = &node.subnet {
+        hash_graph(subnet, hasher);
+    }
+}
+
+/// [`hash_node`] without the nested network.
+fn hash_node_header(node: &Node, hasher: &mut impl Hasher) {
     node.type_key.hash(hasher);
     node.metadata.bypassed.hash(hasher);
     for port in &node.inputs {
@@ -911,9 +1284,6 @@ fn hash_node(node: &Node, hasher: &mut impl Hasher) {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 .hash(hasher);
         }
-    }
-    if let Some(subnet) = &node.subnet {
-        hash_graph(subnet, hasher);
     }
 }
 
@@ -1548,6 +1918,176 @@ mod tests {
         assert_eq!(value, 10.0 + 55.0);
         assert_eq!(counter.initials.load(Ordering::Relaxed), 1);
         assert_eq!(counter.steps.load(Ordering::Relaxed), 10);
+    }
+
+    // ---- what an upstream reads from outside its scope -----------------------
+
+    /// `reader(1) -> sim(2)` where `reader` has type `type_key` and, when
+    /// given, a `param` naming its target.
+    fn reading_network(type_key: &str, target: Option<(&str, &str)>) -> Graph {
+        let mut reader = Node::new(NodeId::new(1), type_key).with_output("out", DataTypeId::SCALAR);
+        if let Some((key, value)) = target {
+            reader = reader.with_param(key, ParameterValue::String(value.into()));
+        }
+        wire(
+            Graph::new()
+                .add_node(reader)
+                .unwrap()
+                .add_node(sim_node(2))
+                .unwrap(),
+            1,
+            1,
+            2,
+        )
+    }
+
+    /// Comp 1 with the layer the simulation sits in (layer 1, `network`),
+    /// the layer it reads (layer 2, `target`, starting at `target_start`) and
+    /// a bystander (layer 3, `bystander`).
+    fn three_layer_document(
+        network: &Graph,
+        target: &Graph,
+        target_start: i64,
+        bystander: &Graph,
+    ) -> Arc<Document> {
+        let layer = |id: u64, network: &Graph, start: i64| {
+            Layer::new(LayerId::new(id), format!("L{id}"), network.clone()).with_time(start, 0, 300)
+        };
+        Arc::new(
+            Document::default().with_composition(
+                Composition::new(comp_id(), "C", (16, 16), FPS, 300)
+                    .add_layer(layer(1, network, 0))
+                    .add_layer(layer(2, target, target_start))
+                    .add_layer(layer(3, bystander, 0)),
+            ),
+        )
+    }
+
+    /// An evaluator over `reading_network`, with the reader's value coming
+    /// from `FrameSource` whatever its type key.
+    fn reading_evaluator(counter: &Counter, document: Arc<Document>) -> Evaluator {
+        let mut ev = fed_evaluator(counter);
+        ev.set_document(document);
+        ev
+    }
+
+    /// Pull the simulation at `frame` and report how many times it has
+    /// started from nothing since the evaluator was made.
+    fn restarts_after_pulling(
+        ev: &mut Evaluator,
+        counter: &Counter,
+        network: &Graph,
+        frame: u64,
+    ) -> usize {
+        pull_in_layer(ev, network, frame);
+        counter.initials.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn editing_a_layer_a_layer_ref_upstream_points_at_discards_the_track() {
+        let counter = Counter::default();
+        let network = reading_network("layer.ref", Some(("layer", "2")));
+        let target = Graph::new();
+        let bystander = Graph::new();
+        let mut ev = reading_evaluator(
+            &counter,
+            three_layer_document(&network, &target, 0, &bystander),
+        );
+        assert_eq!(restarts_after_pulling(&mut ev, &counter, &network, 6), 1);
+
+        // The referenced layer's network changes; nothing in the sim's own
+        // network does, so only the premise can tell.
+        let edited = target.add_node(source_node(60)).unwrap();
+        ev.set_document(three_layer_document(&network, &edited, 0, &bystander));
+
+        assert_eq!(
+            restarts_after_pulling(&mut ev, &counter, &network, 8),
+            2,
+            "the track outlived an edit to the layer it reads"
+        );
+        assert_eq!(
+            ev.sim_cached_frames(&layer_scope(), NodeId::new(2)),
+            Some(0..9)
+        );
+    }
+
+    #[test]
+    fn editing_the_shell_of_a_layer_ref_target_discards_the_track() {
+        let counter = Counter::default();
+        let network = reading_network("layer.ref", Some(("layer", "2")));
+        let (target, bystander) = (Graph::new(), Graph::new());
+        let mut ev = reading_evaluator(
+            &counter,
+            three_layer_document(&network, &target, 0, &bystander),
+        );
+        assert_eq!(restarts_after_pulling(&mut ev, &counter, &network, 6), 1);
+
+        ev.set_document(three_layer_document(&network, &target, 12, &bystander));
+
+        assert_eq!(restarts_after_pulling(&mut ev, &counter, &network, 8), 2);
+    }
+
+    #[test]
+    fn a_shell_reader_upstream_makes_a_shell_edit_discard_the_track() {
+        let counter = Counter::default();
+        let network = reading_network("layer.info", Some(("layer", "2")));
+        let (target, bystander) = (Graph::new(), Graph::new());
+        let mut ev = reading_evaluator(
+            &counter,
+            three_layer_document(&network, &target, 0, &bystander),
+        );
+        assert_eq!(restarts_after_pulling(&mut ev, &counter, &network, 6), 1);
+
+        // Same networks, one layer's time placement moved.
+        ev.set_document(three_layer_document(&network, &target, 12, &bystander));
+
+        assert_eq!(
+            restarts_after_pulling(&mut ev, &counter, &network, 8),
+            2,
+            "the track outlived an edit to a shell its upstream reads"
+        );
+    }
+
+    #[test]
+    fn an_edit_to_a_layer_nothing_upstream_reads_keeps_the_track() {
+        let counter = Counter::default();
+        let network = reading_network("layer.ref", Some(("layer", "2")));
+        let (target, bystander) = (Graph::new(), Graph::new());
+        let mut ev = reading_evaluator(
+            &counter,
+            three_layer_document(&network, &target, 0, &bystander),
+        );
+        assert_eq!(restarts_after_pulling(&mut ev, &counter, &network, 6), 1);
+
+        // Layer 3's network changes, and so does the document — but layer 3 is
+        // not what the reader names. (Shells are compared per composition, so
+        // only a network edit is "unrelated" here.)
+        let edited = bystander.add_node(source_node(70)).unwrap();
+        ev.set_document(three_layer_document(&network, &target, 0, &edited));
+
+        assert_eq!(restarts_after_pulling(&mut ev, &counter, &network, 8), 1);
+    }
+
+    #[test]
+    fn a_sim_that_reads_nothing_outside_keeps_its_track_through_any_document_edit() {
+        let counter = Counter::default();
+        let network = fed_graph();
+        let (target, bystander) = (Graph::new(), Graph::new());
+        let mut ev = reading_evaluator(
+            &counter,
+            three_layer_document(&network, &target, 0, &bystander),
+        );
+        assert_eq!(restarts_after_pulling(&mut ev, &counter, &network, 6), 1);
+
+        ev.set_document(three_layer_document(
+            &network,
+            &target.add_node(source_node(60)).unwrap(),
+            12,
+            &bystander,
+        ));
+
+        assert_eq!(restarts_after_pulling(&mut ev, &counter, &network, 8), 1);
+        assert_eq!(counter.steps.load(Ordering::Relaxed), 8);
     }
 
     #[test]

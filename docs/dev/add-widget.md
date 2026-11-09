@@ -185,6 +185,11 @@ disabled で消すものと残すものは分かれる（計画書の「disabled
   パス）を直す。**借り続けている部品を自前と書かない**
 - [`../../AGENTS.md`](../../AGENTS.md) のリポジトリマップの `ravel-widgets`
   の記述に足す
+- 部品に**ホストの義務**が残るなら（パレット切替の再読込、エラー位置の再設定など
+  部品が自分ではできないもの）、そのホストの置き場所を書く。式エディタでは
+  `ravel-app` の `theme_tokens::track_expression_editor` が生きている状態を持ち、
+  `apply_ravel_theme` が `refresh_expression_colours` を呼ぶ。部品を使う画面は
+  状態を作るたびに `track_expression_editor` を呼ぶだけでよい
 - 手順が足りなかったら**このページと
   [`../gpui-ui-guide.md`](../gpui-ui-guide.md#部品を追加する) を直す**。
   手順書は使わないと腐る

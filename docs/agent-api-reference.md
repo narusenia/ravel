@@ -3285,7 +3285,9 @@ ExpressionEditor::new(&Entity<EditorState>).compact() / .invalid(..)
     // editor's own. No key is bound here: Tab, Shift+Enter and paste are the
     // kit's `IndentInline` / `Enter{shift}` / `Paste` actions caught in the
     // capture phase on the field; Shift+Enter inserts nothing, a paste with line
-    // breaks is flattened by `single_line`.
+    // breaks is flattened by `single_line`. The rows take the pointer too: hover
+    // moves the selection, a left click accepts the row through the same path as
+    // Tab (one undo step) and focuses the editor, never blurring it.
 set_expression_error(&Entity<EditorState>, Option<(Span, &str)>, &mut App)
     // Danger underline at the span (widened to one visible character when the
     // span is empty); `None` clears. Positions come from `Span::line_column`
@@ -3303,7 +3305,12 @@ token_color(TokenClass, &Colors) -> Hsla      // pure, exhaustive `match`
 style_runs(&[(Span, TokenClass)], &Range<usize>, &Colors) -> Vec<(Range<usize>, HighlightStyle)>
     // gapless cover of the range; what `InputHighlighter::styles` returns.
     // A palette switch: the host calls `refresh_expression_colours(&state, cx)`
-    // after `set_active_tokens` (no observer; `observe-global` is linted)
+    // after `set_active_tokens` (no observer; `observe-global` is linted).
+    // In the app: `theme_tokens::track_expression_editor(&state, cx)` once per
+    // state; `apply_ravel_theme` then refreshes every live one.
+// ravel_ui::properties::expression: `ExpressionScope::{Parameter, Field}` (.scope() /
+//   .vocabulary()), `string_parameter_scope(type_key, key) -> Option<ExpressionScope>`
+//   (today only `field.expression` / `expression`), `compile_diagnostic_in(src, scope)`
 
 // scrub_input.rs — the AE gesture: drag a label sideways to change a value.
 ScrubInputState / ScrubInput / ScrubEvent::{Change, Commit}

@@ -2,10 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 //! Golden test for particles as another node's source (REQ-MOGRAPH-002: the
-//! particle points can feed other nodes).
+//! particle points can feed other nodes): a shape stands at each particle.
 //!
 //! ```text
-//! particle.simulate -> scatter.scatter -> geometry.transform -> rasterize
+//! particle.simulate -> scatter.points <- shape.rect
+//!                          |
+//!                          v
+//!                  geometry.transform -> rasterize
 //! ```
 //!
 //! built from the real registry templates and evaluated through a real
@@ -15,17 +18,11 @@
 //! with the same launch velocity of `(240, 0)` px/s: at 30 fps that is 8 px
 //! per frame, and one particle is born per frame. At frame 5 the six
 //! particles therefore stand at `x = 0, 8, ... 40` on the line `y = 0`. The
-//! expected positions come from that arithmetic, not from a render: each
-//! particle's pixel must be covered, and the spots between them must not.
-//!
-//! `scatter.scatter` with one instance at the origin stamps the whole particle
-//! cloud (its `instance_source`) once, which is what the particles being a
-//! source for another node means. The instance carries the node's seeded
-//! random turn, so the line of particles is rotated about the origin by it;
-//! `geometry.transform` then moves the result to the middle of the canvas.
+//! expected positions come from that arithmetic, not from a render: a 6 x 6
+//! square must cover each particle's pixel, and the spots between them (4 px
+//! on, outside a square's half width of 3) must stay empty.
 
 use ravel_core::eval::{EvalContext, Evaluator, NodeProcessor, stateful_processor};
-use ravel_core::geometry::element_hash;
 use ravel_core::graph::{Graph, Node, ParameterValue};
 use ravel_core::id::{EdgeId, InputPortIndex, NodeId, OutputPortIndex};
 use ravel_core::registry::NodeRegistry;
@@ -34,7 +31,8 @@ use ravel_core::types::{FrameBuffer, FrameRate};
 use ravel_nodes::geometry::GeometryTransformProcessor;
 use ravel_nodes::particle::ParticleSimulate;
 use ravel_nodes::rasterize::RasterizeProcessor;
-use ravel_nodes::scatter::ScatterProcessor;
+use ravel_nodes::scatter::PointsProcessor;
+use ravel_nodes::shape::RectProcessor;
 use std::sync::Arc;
 
 const CANVAS: (u32, u32) = (96, 96);
@@ -66,7 +64,7 @@ fn node(
     node
 }
 
-fn particles_through_scatter() -> FrameBuffer {
+fn shapes_on_particles() -> FrameBuffer {
     let mut registry = NodeRegistry::new();
     register_builtins(&mut registry);
     let nodes = [
@@ -83,22 +81,21 @@ fn particles_through_scatter() -> FrameBuffer {
                 ),
             ],
         ),
-        // One instance at the origin; the source stays where it is.
         node(
             &registry,
-            "scatter.scatter",
+            "shape.rect",
             2,
             &[
-                ("count", ParameterValue::Int(1)),
-                ("area", ParameterValue::vec2(0.0, 0.0)),
                 ("center", ParameterValue::vec2(0.0, 0.0)),
-                ("center_input", ParameterValue::Bool(false)),
+                ("width", ParameterValue::Float(6.0)),
+                ("height", ParameterValue::Float(6.0)),
             ],
         ),
+        node(&registry, "scatter.points", 3, &[]),
         node(
             &registry,
             "geometry.transform",
-            3,
+            4,
             &[
                 (
                     "translate",
@@ -107,7 +104,7 @@ fn particles_through_scatter() -> FrameBuffer {
                 ("use_centroid", ParameterValue::Bool(false)),
             ],
         ),
-        node(&registry, "rasterize", 4, &[]),
+        node(&registry, "rasterize", 5, &[]),
     ];
     let mut graph = Graph::new();
     let mut evaluator = Evaluator::new();
@@ -115,26 +112,32 @@ fn particles_through_scatter() -> FrameBuffer {
         graph = graph.add_node(node.clone()).unwrap();
         let processor: Arc<dyn NodeProcessor> = match node.type_key.as_str() {
             "particle.simulate" => stateful_processor(ParticleSimulate),
-            "scatter.scatter" => Arc::new(ScatterProcessor::from_node(node)),
+            "shape.rect" => Arc::new(RectProcessor),
+            "scatter.points" => Arc::new(PointsProcessor::from_node(node)),
             "geometry.transform" => Arc::new(GeometryTransformProcessor),
             "rasterize" => Arc::new(RasterizeProcessor::from_node(node)),
             other => panic!("no CPU processor wired for {other}"),
         };
         evaluator.register(node.id, processor);
     }
-    for (i, (from, to)) in [(1u64, 2u64), (2, 3), (3, 4)].into_iter().enumerate() {
+    // (from, to, input slot): the particles are the points, the square is the
+    // source in the variadic group after them.
+    for (i, (from, to, slot)) in [(1u64, 3u64, 0u32), (2, 3, 1), (3, 4, 0), (4, 5, 0)]
+        .into_iter()
+        .enumerate()
+    {
         graph = graph
             .add_edge(
                 EdgeId::new(i as u64 + 1),
                 NodeId::new(from),
                 OutputPortIndex(0),
                 NodeId::new(to),
-                InputPortIndex(0),
+                InputPortIndex(slot),
             )
             .unwrap();
     }
     evaluator
-        .evaluate(&graph, NodeId::new(4), &ctx())
+        .evaluate(&graph, NodeId::new(5), &ctx())
         .expect("evaluation succeeds")
         .downcast_ref::<FrameBuffer>()
         .expect("the CPU rasterizer answers a FrameBuffer")
@@ -146,44 +149,37 @@ fn alpha(frame: &FrameBuffer, x: f64, y: f64) -> f32 {
     frame.as_f32()[((py * frame.width + px) * 4 + 3) as usize]
 }
 
-/// The turn `scatter.scatter` gives its instance `index` with seed 0: the
-/// third draw of the element hash, as a fraction of a full turn. The hash is
-/// the shared, documented one, so the expectation does not read the render.
-fn scatter_rotation(index: u32) -> f64 {
-    let h = element_hash(element_hash(0, index), 2);
-    f64::from(h & 0x00FF_FFFF) / f64::from(0x0100_0000u32) * std::f64::consts::TAU
-}
-
 #[test]
-fn particle_points_stand_where_the_simulation_put_them() {
-    let frame = particles_through_scatter();
-    let turn = scatter_rotation(0);
-    let (sin, cos) = turn.sin_cos();
-    // Where a point `distance` along the particles' line lands: the cloud is
-    // stamped by an instance that turned by `turn` about the origin.
-    let land = |distance: f64| (ORIGIN + distance * cos, ORIGIN + distance * sin);
-
-    // The default sprite is two pixels in radius: a particle covers its own
-    // pixel, and the spot half a step from it on the line is empty.
+fn a_shape_stands_at_each_particle_position() {
+    let frame = shapes_on_particles();
     for k in 0..=FRAME {
-        let (x, y) = land(k as f64 * STEP);
-        assert!(
-            alpha(&frame, x, y) > 0.5,
-            "particle {k} should be drawn at ({x:.1}, {y:.1})"
-        );
+        let x = ORIGIN + k as f64 * STEP;
+        // The square is 6 px wide, so it covers its own centre and the pixel
+        // 2 px to either side of it...
+        for dx in [-2.0, 0.0, 2.0] {
+            assert!(
+                alpha(&frame, x + dx, ORIGIN) > 0.99,
+                "particle {k}: the square should cover x = {}",
+                x + dx
+            );
+        }
+        // ...and nothing stands between two squares, 4 px on from the centre.
         if k < FRAME {
-            let (x, y) = land((k as f64 + 0.5) * STEP);
             assert_eq!(
-                alpha(&frame, x, y),
+                alpha(&frame, x + STEP / 2.0, ORIGIN),
                 0.0,
-                "nothing between, at ({x:.1}, {y:.1})"
+                "nothing between particles {k} and {}",
+                k + 1
             );
         }
     }
-    // Past the oldest particle, off the line, and in a corner: empty.
-    let (x, y) = land((FRAME + 1) as f64 * STEP);
-    assert_eq!(alpha(&frame, x, y), 0.0);
-    let (x, y) = land(2.0 * STEP);
-    assert_eq!(alpha(&frame, x - 12.0 * sin, y + 12.0 * cos), 0.0);
+    // The square has height as well, so it is a shape and not a sprite line,
+    // and nothing is drawn off the line, past the oldest, or in a corner.
+    assert!(alpha(&frame, ORIGIN, ORIGIN + 2.0) > 0.99);
+    assert_eq!(alpha(&frame, ORIGIN, ORIGIN + 8.0), 0.0);
+    assert_eq!(
+        alpha(&frame, ORIGIN + (FRAME + 1) as f64 * STEP, ORIGIN),
+        0.0
+    );
     assert_eq!(alpha(&frame, 1.0, 1.0), 0.0);
 }

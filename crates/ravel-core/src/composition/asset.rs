@@ -403,7 +403,10 @@ pub const MEDIA_ASSET_PARAM_KEY: &str = "asset_id";
 /// `"video"` is the pre-normalization alias
 /// (`Document::normalize_node_type_aliases`): a loaded document only holds
 /// `"media"`, but a document assembled in memory can still carry the old key.
-pub const MEDIA_TYPE_KEYS: [&str; 2] = ["media", "video"];
+/// `"mesh.import"` reads a model file from the same table, so the asset
+/// queries, the watermark scan and the identifier rule have to see it too.
+/// Keep `"media"` first: tests index `[0]` for "the media node".
+pub const MEDIA_TYPE_KEYS: [&str; 3] = ["media", "video", "mesh.import"];
 
 /// The display name a freshly imported file starts out with: its file stem.
 ///

@@ -1,0 +1,16 @@
+# One triangle, +Y up in the file: apex at the top, tilted toward +Z.
+# The normal is the triangle's own, so it agrees with the winding.
+o wedge
+v -1 0 0
+v 1 0 0
+v 0 2 0.5
+vn 0 -0.242536 0.970143
+f 1//1 2//1 3//1
+# A second object, so the importer has more than one to keep apart.
+o slab
+v 0 0 0
+v 4 0 0
+v 4 0 3
+v 0 0 3
+vn 0 1 0
+f 4//2 5//2 6//2 7//2

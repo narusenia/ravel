@@ -1206,6 +1206,12 @@ pivot = "Origin of the rotation and scale while use_centroid is off."
 [node."geometry.from_image".group]
 transform = "Transform"
 
+[node."mesh.import"]
+label = "Import Model"
+description = "Reads a glTF, GLB or OBJ model from the asset table. The scene output keeps the file hierarchy; the geometry output merges every mesh for geometry and field nodes."
+[node."mesh.import".params]
+asset_id = "Which model asset to read."
+
 [node."scene.add"]
 label = "Scene Add"
 description = "Places a geometry or another scene into a 3D scene with a transform."

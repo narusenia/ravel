@@ -67,6 +67,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use thiserror::Error;
 
+mod sim;
+use sim::SimCache;
+pub use sim::{
+    SimInputs, SimState, SimStepper, StatefulAdapter, StatefulProcessor, stateful_processor,
+};
+
 /// Maximum number of recursively pulled nodes (including parameter-source
 /// bindings) in one evaluation branch. Returning an error at this boundary
 /// keeps malformed or adversarial graphs from overflowing the process stack.
@@ -547,7 +553,6 @@ impl PathInterner {
     ///
     /// Lets a read-only caller ask about a path without interning it as a
     /// side effect.
-    #[cfg(test)]
     fn id_of(&self, path: &[PathSegment]) -> Option<PathId> {
         self.ids.get(path).copied()
     }
@@ -997,6 +1002,27 @@ pub trait EvalScope {
         frame: u64,
         ctx: &EvalContext,
     ) -> Result<Option<Arc<dyn NodeData>>, EvalError>;
+
+    /// The state of the stateful node `node` at `ctx.frame`, filling the
+    /// simulation cache up to it (REQ-CORE-011).
+    ///
+    /// Only the [`StatefulAdapter`] calls this, from inside its own `process`;
+    /// the scope runs `stepper` over every frame the node's track does not yet
+    /// hold, pulling the node's inputs and parameters **at each of those
+    /// frames**. The default refuses, which is right for any scope that has no
+    /// simulation cache.
+    fn sim_state(
+        &mut self,
+        node: &Node,
+        ctx: &EvalContext,
+        stepper: &dyn SimStepper,
+    ) -> Result<SimState, EvalError> {
+        let _ = (ctx, stepper);
+        Err(EvalError::ProcessFailed {
+            node: node.id,
+            source: anyhow::anyhow!("this evaluation scope has no simulation cache"),
+        })
+    }
 
     /// Bindings offered by the caller of the innermost active scope.
     fn bindings(&self) -> &[(String, Arc<dyn NodeData>)];
@@ -1975,6 +2001,13 @@ pub struct Evaluator {
     /// can leave some of a node's ports unchanged, so this map is empty on
     /// every ordinary pull.
     fresh_output_ports: HashMap<NodeKey, Vec<bool>>,
+    /// Simulation state of the stateful nodes (REQ-CORE-011), apart from
+    /// `store` and keyed by the same [`NodeKey`] (see [`sim`]).
+    sim: SimCache,
+    /// Whether a stateful node is filling its track right now. A second one
+    /// starting inside the fill is a simulation downstream of a simulation,
+    /// which v1 refuses.
+    sim_active: bool,
     /// Wall-clock `process()` durations recorded by the current top-level
     /// evaluation (see [`Evaluator::take_timings`]).
     timings: Vec<(NodeId, std::time::Duration)>,
@@ -2202,7 +2235,10 @@ impl Evaluator {
     /// call cannot place is kept rather than discarded. Deciding an id
     /// belongs to nobody is the settling pass's job, not this one's.
     pub fn drop_evicted(&mut self, evicted: &[crate::cache_budget::Evicted]) {
-        self.store.drop_evicted(evicted);
+        // Simulation tracks first: they hold their own reservations, and an
+        // id the store does not know would otherwise be parked as foreign.
+        let rest = self.sim.drop_evicted(evicted);
+        self.store.drop_evicted(&rest);
     }
 
     /// Eviction entries the result cache was told about but does not own.
@@ -2249,6 +2285,9 @@ impl Evaluator {
             self.drop_scope_owner_caches(path);
         }
         self.pull_log.retain(|key, _| key.node != node);
+        // A replaced or edited stateful node starts its simulation over: its
+        // states were made by the processor and parameters it no longer has.
+        self.sim.remove_node(node);
         self.store.mark_dirty(NodeKey {
             path: ROOT_PATH,
             node,
@@ -2527,6 +2566,7 @@ impl Evaluator {
     /// on the next pull). Processor registrations are kept.
     pub fn invalidate_all(&mut self) {
         self.store.clear();
+        self.sim.clear();
         // Scope state is derived from evaluation and rebuilt on the next
         // entry, so a full invalidation drops it too: keeping it would hold
         // the bindings' frame buffers (and the `Graph` clones inside
@@ -3064,46 +3104,7 @@ impl Evaluator {
         // stays visible and can still be disconnected — an existing document
         // must keep opening — and `ravel-cli render` reports every parameter
         // this drops (`docs/implementation/render-warning-channel-plan.md`).
-        let mut overlays: Vec<(String, ResolvedValue)> = node_ref
-            .parameters
-            .iter()
-            .filter(|param| {
-                crate::composition::validate::is_identifier_parameter(
-                    &node_ref.type_key,
-                    &param.key,
-                )
-            })
-            .map(|param| (param.key.clone(), identifier_overlay(&param.value)))
-            .collect();
-        for (index, port) in node_ref.inputs.iter().enumerate() {
-            if !port.is_param {
-                continue;
-            }
-            let Some(value) = input_values[index].take() else {
-                continue;
-            };
-            // An identifier's overlay is already decided above; the input is
-            // still stripped, because a processor must never see a parameter
-            // port as one of its inputs.
-            if overlays.iter().any(|(decided, _)| *decided == port.name) {
-                continue;
-            }
-            let Some(param) = node_ref.parameters.iter().find(|p| p.key == port.name) else {
-                // Validate rejects this shape at document boundaries;
-                // tolerate it at eval time.
-                continue;
-            };
-            match param_port_overlay(&param.value, value.as_ref()) {
-                Some(resolved) => overlays.push((port.name.clone(), resolved)),
-                None => tracing::warn!(
-                    node = node.raw(),
-                    param = %port.name,
-                    got = ?value.data_type_id(),
-                    "parameter port value has an unconvertible type; \
-                     falling back to the stored parameter"
-                ),
-            }
-        }
+        let overlays = parameter_overlays(&node_ref, &mut input_values);
         let overridden =
             |key: &str| -> bool { overlays.iter().any(|(overlaid, _)| overlaid == key) };
 
@@ -3307,6 +3308,50 @@ impl Evaluator {
             Some(ports) => ports.get(port.0 as usize).copied().unwrap_or(true),
             None => true,
         }
+    }
+
+    /// The shifted pull behind [`EvalScope::evaluate_input_at`]. `log` records
+    /// it in `pull_log` so the cache replays it on a hit; a stateful node's
+    /// fill passes `false`, because it validates by the premise hash instead
+    /// and a replay of one pull per simulated frame would cost O(frames) on
+    /// every cache hit.
+    fn pull_input_at(
+        &mut self,
+        node: &Node,
+        port: usize,
+        frame: u64,
+        ctx: &EvalContext,
+        log: bool,
+    ) -> Result<Option<Arc<dyn NodeData>>, EvalError> {
+        let Some(graph) = self.processing_graphs.last().cloned() else {
+            return Err(EvalError::ProcessFailed {
+                node: node.id,
+                source: anyhow::anyhow!("evaluate_input_at called outside process"),
+            });
+        };
+        let index = self.current_graph_index(&graph);
+        let Some(&(_, source, source_port)) = index
+            .in_edges(node.id)
+            .iter()
+            .find(|(target, _, _)| target.0 as usize == port)
+        else {
+            // Nothing wired: no dependency to replay, so nothing to record.
+            return Ok(None);
+        };
+        if log && let Some((key, _)) = self.processing.last() {
+            let pulls = self.pull_log.entry(*key).or_default();
+            if !pulls.contains(&(port, frame)) {
+                pulls.push((port, frame));
+            }
+        }
+        let value = self.evaluate_time_shifted(node.id, frame, &graph, source, ctx)?;
+        let port_count = graph.node(source).map_or(1, |n| n.outputs.len());
+        PortRecord::extract(&value, port_count, source_port)
+            .map(Some)
+            .ok_or_else(|| EvalError::ProcessFailed {
+                node: source,
+                source: anyhow::anyhow!("edge from port {source_port:?} has no value"),
+            })
     }
 
     /// Replay the shifted pulls `node`'s cached value was made from; `true` if
@@ -3707,35 +3752,16 @@ impl EvalScope for Evaluator {
         frame: u64,
         ctx: &EvalContext,
     ) -> Result<Option<Arc<dyn NodeData>>, EvalError> {
-        let Some(graph) = self.processing_graphs.last().cloned() else {
-            return Err(EvalError::ProcessFailed {
-                node: node.id,
-                source: anyhow::anyhow!("evaluate_input_at called outside process"),
-            });
-        };
-        let index = self.current_graph_index(&graph);
-        let Some(&(_, source, source_port)) = index
-            .in_edges(node.id)
-            .iter()
-            .find(|(target, _, _)| target.0 as usize == port)
-        else {
-            // Nothing wired: no dependency to replay, so nothing to record.
-            return Ok(None);
-        };
-        if let Some((key, _)) = self.processing.last() {
-            let log = self.pull_log.entry(*key).or_default();
-            if !log.contains(&(port, frame)) {
-                log.push((port, frame));
-            }
-        }
-        let value = self.evaluate_time_shifted(node.id, frame, &graph, source, ctx)?;
-        let port_count = graph.node(source).map_or(1, |n| n.outputs.len());
-        PortRecord::extract(&value, port_count, source_port)
-            .map(Some)
-            .ok_or_else(|| EvalError::ProcessFailed {
-                node: source,
-                source: anyhow::anyhow!("edge from port {source_port:?} has no value"),
-            })
+        self.pull_input_at(node, port, frame, ctx, true)
+    }
+
+    fn sim_state(
+        &mut self,
+        node: &Node,
+        ctx: &EvalContext,
+        stepper: &dyn SimStepper,
+    ) -> Result<SimState, EvalError> {
+        self.sim_state_at(node, ctx, stepper)
     }
 
     fn bindings(&self) -> &[(String, Arc<dyn NodeData>)] {
@@ -3864,6 +3890,57 @@ fn holds_a_node_of(network: &Graph, keys: &[&str]) -> bool {
                 .as_deref()
                 .is_some_and(|inner| holds_a_node_of(inner, keys))
     })
+}
+
+/// The parameter values a node's wires and identifier rules decide before its
+/// stored parameters are read, in `(key, value)` form.
+///
+/// Strips every connected `is_param` input out of `input_values` (a processor
+/// never sees a parameter port as one of its inputs) and converts it into an
+/// overlay. Shared by [`Evaluator::eval_node`] and the per-frame step of a
+/// stateful node, so both read parameter ports by one rule.
+fn parameter_overlays(
+    node: &Node,
+    input_values: &mut [Option<Arc<dyn NodeData>>],
+) -> Vec<(String, ResolvedValue)> {
+    let mut overlays: Vec<(String, ResolvedValue)> = node
+        .parameters
+        .iter()
+        .filter(|param| {
+            crate::composition::validate::is_identifier_parameter(&node.type_key, &param.key)
+        })
+        .map(|param| (param.key.clone(), identifier_overlay(&param.value)))
+        .collect();
+    for (index, port) in node.inputs.iter().enumerate() {
+        if !port.is_param {
+            continue;
+        }
+        let Some(value) = input_values[index].take() else {
+            continue;
+        };
+        // An identifier's overlay is already decided above; the input is
+        // still stripped, because a processor must never see a parameter
+        // port as one of its inputs.
+        if overlays.iter().any(|(decided, _)| *decided == port.name) {
+            continue;
+        }
+        let Some(param) = node.parameters.iter().find(|p| p.key == port.name) else {
+            // Validate rejects this shape at document boundaries;
+            // tolerate it at eval time.
+            continue;
+        };
+        match param_port_overlay(&param.value, value.as_ref()) {
+            Some(resolved) => overlays.push((port.name.clone(), resolved)),
+            None => tracing::warn!(
+                node = node.id.raw(),
+                param = %port.name,
+                got = ?value.data_type_id(),
+                "parameter port value has an unconvertible type; \
+                 falling back to the stored parameter"
+            ),
+        }
+    }
+    overlays
 }
 
 /// The value a processor sees for an **identifier** parameter: its stored

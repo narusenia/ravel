@@ -2620,7 +2620,7 @@ dependencies = [
 [[package]]
 name = "gpui-base"
 version = "0.6.0"
-source = "git+https://github.com/narusenia/gpui-kit-ravel?rev=7eafdc2a656ef4e635cc76cb9e873b0d9f9b7de9#7eafdc2a656ef4e635cc76cb9e873b0d9f9b7de9"
+source = "git+https://github.com/narusenia/gpui-kit-ravel?rev=b751abf523dc0a2d02a55cb97667b4ea6c341d96#b751abf523dc0a2d02a55cb97667b4ea6c341d96"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2656,7 +2656,7 @@ dependencies = [
 [[package]]
 name = "gpui-ce"
 version = "0.2.2"
-source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=a93d6ccd0ae1d62688417bd61c66833ed5411ee7#a93d6ccd0ae1d62688417bd61c66833ed5411ee7"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=7a52224f18c05748409f08f14f2de2a1bbc4ccbb#7a52224f18c05748409f08f14f2de2a1bbc4ccbb"
 dependencies = [
  "accesskit",
  "anyhow",
@@ -2729,7 +2729,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.6.0"
-source = "git+https://github.com/narusenia/gpui-kit-ravel?rev=7eafdc2a656ef4e635cc76cb9e873b0d9f9b7de9#7eafdc2a656ef4e635cc76cb9e873b0d9f9b7de9"
+source = "git+https://github.com/narusenia/gpui-kit-ravel?rev=b751abf523dc0a2d02a55cb97667b4ea6c341d96#b751abf523dc0a2d02a55cb97667b4ea6c341d96"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2772,7 +2772,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.6.0"
-source = "git+https://github.com/narusenia/gpui-kit-ravel?rev=7eafdc2a656ef4e635cc76cb9e873b0d9f9b7de9#7eafdc2a656ef4e635cc76cb9e873b0d9f9b7de9"
+source = "git+https://github.com/narusenia/gpui-kit-ravel?rev=b751abf523dc0a2d02a55cb97667b4ea6c341d96#b751abf523dc0a2d02a55cb97667b4ea6c341d96"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2783,7 +2783,7 @@ dependencies = [
 [[package]]
 name = "gpui-kit-assets"
 version = "0.6.0"
-source = "git+https://github.com/narusenia/gpui-kit-ravel?rev=7eafdc2a656ef4e635cc76cb9e873b0d9f9b7de9#7eafdc2a656ef4e635cc76cb9e873b0d9f9b7de9"
+source = "git+https://github.com/narusenia/gpui-kit-ravel?rev=b751abf523dc0a2d02a55cb97667b4ea6c341d96#b751abf523dc0a2d02a55cb97667b4ea6c341d96"
 dependencies = [
  "anyhow",
  "gpui-ce",
@@ -2797,7 +2797,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_apple"
 version = "0.1.0"
-source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=a93d6ccd0ae1d62688417bd61c66833ed5411ee7#a93d6ccd0ae1d62688417bd61c66833ed5411ee7"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=7a52224f18c05748409f08f14f2de2a1bbc4ccbb#7a52224f18c05748409f08f14f2de2a1bbc4ccbb"
 dependencies = [
  "anyhow",
  "block",
@@ -2821,7 +2821,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_collections"
 version = "0.2.2"
-source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=a93d6ccd0ae1d62688417bd61c66833ed5411ee7#a93d6ccd0ae1d62688417bd61c66833ed5411ee7"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=7a52224f18c05748409f08f14f2de2a1bbc4ccbb#7a52224f18c05748409f08f14f2de2a1bbc4ccbb"
 dependencies = [
  "gpui_ce_util",
  "indexmap",
@@ -2831,7 +2831,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_derive_refineable"
 version = "0.2.2"
-source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=a93d6ccd0ae1d62688417bd61c66833ed5411ee7#a93d6ccd0ae1d62688417bd61c66833ed5411ee7"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=7a52224f18c05748409f08f14f2de2a1bbc4ccbb#7a52224f18c05748409f08f14f2de2a1bbc4ccbb"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2841,7 +2841,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_linux"
 version = "0.1.0"
-source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=a93d6ccd0ae1d62688417bd61c66833ed5411ee7#a93d6ccd0ae1d62688417bd61c66833ed5411ee7"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=7a52224f18c05748409f08f14f2de2a1bbc4ccbb#7a52224f18c05748409f08f14f2de2a1bbc4ccbb"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -2889,7 +2889,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_macos"
 version = "0.1.0"
-source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=a93d6ccd0ae1d62688417bd61c66833ed5411ee7#a93d6ccd0ae1d62688417bd61c66833ed5411ee7"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=7a52224f18c05748409f08f14f2de2a1bbc4ccbb#7a52224f18c05748409f08f14f2de2a1bbc4ccbb"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -2936,7 +2936,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_macros"
 version = "0.1.0"
-source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=a93d6ccd0ae1d62688417bd61c66833ed5411ee7#a93d6ccd0ae1d62688417bd61c66833ed5411ee7"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=7a52224f18c05748409f08f14f2de2a1bbc4ccbb#7a52224f18c05748409f08f14f2de2a1bbc4ccbb"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -2947,7 +2947,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_media"
 version = "0.2.2"
-source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=a93d6ccd0ae1d62688417bd61c66833ed5411ee7#a93d6ccd0ae1d62688417bd61c66833ed5411ee7"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=7a52224f18c05748409f08f14f2de2a1bbc4ccbb#7a52224f18c05748409f08f14f2de2a1bbc4ccbb"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -2961,7 +2961,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_platform"
 version = "0.1.0"
-source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=a93d6ccd0ae1d62688417bd61c66833ed5411ee7#a93d6ccd0ae1d62688417bd61c66833ed5411ee7"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=7a52224f18c05748409f08f14f2de2a1bbc4ccbb#7a52224f18c05748409f08f14f2de2a1bbc4ccbb"
 dependencies = [
  "console_error_panic_hook",
  "gpui-ce",
@@ -2974,7 +2974,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_refineable"
 version = "0.2.2"
-source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=a93d6ccd0ae1d62688417bd61c66833ed5411ee7#a93d6ccd0ae1d62688417bd61c66833ed5411ee7"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=7a52224f18c05748409f08f14f2de2a1bbc4ccbb#7a52224f18c05748409f08f14f2de2a1bbc4ccbb"
 dependencies = [
  "gpui_ce_derive_refineable",
 ]
@@ -2982,7 +2982,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_scheduler"
 version = "0.2.2"
-source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=a93d6ccd0ae1d62688417bd61c66833ed5411ee7#a93d6ccd0ae1d62688417bd61c66833ed5411ee7"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=7a52224f18c05748409f08f14f2de2a1bbc4ccbb#7a52224f18c05748409f08f14f2de2a1bbc4ccbb"
 dependencies = [
  "async-task",
  "backtrace",
@@ -2998,7 +2998,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_shared_string"
 version = "0.1.0"
-source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=a93d6ccd0ae1d62688417bd61c66833ed5411ee7#a93d6ccd0ae1d62688417bd61c66833ed5411ee7"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=7a52224f18c05748409f08f14f2de2a1bbc4ccbb#7a52224f18c05748409f08f14f2de2a1bbc4ccbb"
 dependencies = [
  "schemars",
  "serde",
@@ -3008,7 +3008,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_sum_tree"
 version = "0.2.2"
-source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=a93d6ccd0ae1d62688417bd61c66833ed5411ee7#a93d6ccd0ae1d62688417bd61c66833ed5411ee7"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=7a52224f18c05748409f08f14f2de2a1bbc4ccbb#7a52224f18c05748409f08f14f2de2a1bbc4ccbb"
 dependencies = [
  "heapless",
  "log",
@@ -3019,7 +3019,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_util"
 version = "0.2.6"
-source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=a93d6ccd0ae1d62688417bd61c66833ed5411ee7#a93d6ccd0ae1d62688417bd61c66833ed5411ee7"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=7a52224f18c05748409f08f14f2de2a1bbc4ccbb#7a52224f18c05748409f08f14f2de2a1bbc4ccbb"
 dependencies = [
  "anyhow",
  "log",
@@ -3029,7 +3029,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_web"
 version = "0.1.0"
-source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=a93d6ccd0ae1d62688417bd61c66833ed5411ee7#a93d6ccd0ae1d62688417bd61c66833ed5411ee7"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=7a52224f18c05748409f08f14f2de2a1bbc4ccbb#7a52224f18c05748409f08f14f2de2a1bbc4ccbb"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -3053,7 +3053,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_wgpu"
 version = "0.1.0"
-source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=a93d6ccd0ae1d62688417bd61c66833ed5411ee7#a93d6ccd0ae1d62688417bd61c66833ed5411ee7"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=7a52224f18c05748409f08f14f2de2a1bbc4ccbb#7a52224f18c05748409f08f14f2de2a1bbc4ccbb"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -3079,7 +3079,7 @@ dependencies = [
 [[package]]
 name = "gpui_ce_windows"
 version = "0.1.0"
-source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=a93d6ccd0ae1d62688417bd61c66833ed5411ee7#a93d6ccd0ae1d62688417bd61c66833ed5411ee7"
+source = "git+https://github.com/narusenia/gpui-ce-ravel?rev=7a52224f18c05748409f08f14f2de2a1bbc4ccbb#7a52224f18c05748409f08f14f2de2a1bbc4ccbb"
 dependencies = [
  "accesskit",
  "accesskit_windows",

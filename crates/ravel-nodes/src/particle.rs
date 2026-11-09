@@ -634,6 +634,11 @@ impl<'a> Forces<'a> {
 // The processor
 // ===========================================================================
 
+/// How many fresh ids remain after `next_id` (ids are `0..i32::MAX`).
+fn ids_left(next_id: i32) -> usize {
+    usize::try_from(i32::MAX - next_id.max(0)).unwrap_or(0)
+}
+
 /// What one emission pass did.
 struct Emission {
     carry: f64,
@@ -682,7 +687,12 @@ impl ParticleSimulate {
         }
         let wanted = carry + config.rate / ctx.fps.as_f64();
         let whole = wanted.floor();
-        let room = config.max_points.saturating_sub(alive);
+        // Ids are never reused: a reused id would replay another particle's
+        // random draws, so emission stops once they run out, like at `max_points`.
+        let room = config
+            .max_points
+            .saturating_sub(alive)
+            .min(ids_left(next_id));
         // `as usize` saturates, and `room` bounds the result.
         let count = (whole as usize).min(room);
         let capped = (whole as usize) > room;
@@ -690,7 +700,7 @@ impl ParticleSimulate {
         let mut rows = Vec::new();
         for _ in 0..count {
             let id = next_id;
-            next_id = next_id.wrapping_add(1);
+            next_id += 1;
             let sample = emitter.sample(config.seed, id);
             let life = (config.life
                 + config.life_variance * (2.0 * random(config.seed, id, 0) - 1.0))
@@ -737,7 +747,7 @@ fn warn_on_entering(prev: Option<&ParticleState>, state: &ParticleState, config:
     if state.capped && !prev.is_some_and(|prev| prev.capped) {
         tracing::warn!(
             max_points = config.max_points,
-            "particle.simulate reached max_points; emission is suppressed until particles expire"
+            "particle.simulate reached max_points (or used every particle id); emission is suppressed"
         );
     }
     if state.emitter_unusable && !prev.is_some_and(|prev| prev.emitter_unusable) {
@@ -1043,6 +1053,13 @@ pub(crate) mod tests {
         tracing::subscriber::with_default(subscriber, f);
         let guard = count.lock().unwrap();
         *guard
+    }
+
+    #[test]
+    fn ids_run_out_instead_of_wrapping() {
+        assert_eq!(ids_left(0), i32::MAX as usize);
+        assert_eq!(ids_left(i32::MAX - 3), 3);
+        assert_eq!(ids_left(i32::MAX), 0);
     }
 
     #[test]

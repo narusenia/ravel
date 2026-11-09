@@ -822,6 +822,7 @@ impl NodeEditorPanel {
                 if resolved.node_editor_flow_direction != this.flow_direction {
                     this.flow_direction = resolved.node_editor_flow_direction;
                     this.hovered_port = None;
+                    this.measure_label_columns(cx);
                     this.refresh_node_sizes();
                     changed = true;
                 }
@@ -2567,6 +2568,12 @@ impl NodeEditorPanel {
     /// so playback never changes it and nothing here runs per frame.
     fn measure_label_columns(&mut self, cx: &App) {
         const MAX_CACHED_TEXTS: usize = 8192;
+        // Only the top-down body has a label column; switching to it
+        // measures (see the settings observer).
+        if self.flow_direction != FlowDirection::Vertical {
+            self.label_widths.clear();
+            return;
+        }
         if self.text_widths.len() > MAX_CACHED_TEXTS {
             self.text_widths.clear();
         }

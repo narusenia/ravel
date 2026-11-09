@@ -205,11 +205,11 @@ fn source_binding(source: Option<Arc<dyn NodeData>>) -> BindingValues {
 
 /// The composited lower stack an adjustment layer reads, at another frame.
 ///
-/// `at` is in the layer network's own time, so it is mapped back to
-/// composition time by the same frame offset the layer network sits at.
-/// **Shortcut:** a layer with a time remap has no inverse, so under one the
-/// offset is applied as a plain frame delta; revisit if a remapped adjustment
-/// layer ever needs a shifted `source` that follows the remap.
+/// The rule: a shift inside the layer's network moves `source` by the same
+/// number of frames **in composition time**. `at` is in the network's own time,
+/// so the frame difference from the entry context is applied to the composition
+/// frame. A time remap has no inverse, which is why the rule is a delta and not
+/// a map back from the remapped frame; it holds with or without a remap.
 struct LowerStack {
     /// The context the shell node was processed under (composition time).
     outer: EvalContext,
@@ -430,11 +430,20 @@ mod tests {
     /// adjustment layer starting at comp frame `start`, an evaluator that
     /// knows it, and the network node to pull.
     fn adjustment_setup(start: i64, ev: Evaluator) -> (Graph, NodeId, Evaluator) {
+        adjustment_setup_remapped(start, None, ev)
+    }
+
+    fn adjustment_setup_remapped(
+        start: i64,
+        remap: Option<f32>,
+        ev: Evaluator,
+    ) -> (Graph, NodeId, Evaluator) {
         let comp_id = ravel_core::id::CompId::new(1);
         let layer_id = ravel_core::id::LayerId::new(1);
         let mut layer =
             Layer::new(layer_id, "Adjust", adjustment_network()).with_time(start, 0, 300);
         layer.adjustment = true;
+        layer.time_remap = remap.map(ravel_core::animation::channel::AnimationChannel::constant);
         let document = Document::default()
             .with_composition(Composition::new(comp_id, "C", (1, 1), FPS, 300).add_layer(layer));
         let network_id = ravel_core::composition::compile::deterministic_node_id(
@@ -617,5 +626,21 @@ mod tests {
         ev.set_document(Arc::new(two_layer_document(lower_network(0))));
 
         assert_eq!(adjust_starts(&mut ev, &root, adjust, &counter, 8), 1);
+    }
+
+    /// Under a time remap the shifted `source` still moves by the same frame
+    /// delta in composition time (a remap has no inverse to map back through).
+    #[test]
+    fn a_remapped_adjustment_layer_shifts_its_source_by_the_frame_delta() {
+        // The remap pins the network at its frame 5 whatever the comp frame, so
+        // the sim's steps 0..=5 are at deltas -5..=0 from the entry frame.
+        let (root, network, mut ev) = adjustment_setup_remapped(0, Some(5.0), Evaluator::new());
+
+        let ctx = EvalContext::new(9, FPS, (1, 1));
+        let out = ev.evaluate(&root, network, &ctx).unwrap();
+
+        // Comp frames 9 + (k - 5) for k in 0..=5, i.e. 4..=9.
+        let expected: f32 = (4..=9).map(|f| 10.0 * f as f32).sum();
+        assert_eq!(number_of(out.as_ref()), expected);
     }
 }

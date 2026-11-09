@@ -1077,7 +1077,10 @@ pub trait EvalScope {
     /// adjustment layer's `source` / the iteration piece as they are at the
     /// shifted frame, re-pulled in the scope that produced them
     /// ([`Self::bindings_at`]). Bindings with no way to be produced again are
-    /// carried over unchanged. This is a time remap only: not motion blur, and
+    /// carried over unchanged. A producer whose inner time differs from its
+    /// outer time defines the mapping: an adjustment layer's network shifted by
+    /// `d` frames reads its `source` `d` frames away in composition time, a rule
+    /// that holds under a time remap (which has no inverse). This is a time remap only: not motion blur, and
     /// not a layer shell's `time_remap`.
     fn evaluate_time_shifted(
         &mut self,

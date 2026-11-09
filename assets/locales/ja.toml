@@ -2092,3 +2092,9 @@ function = "関数"
 constant = "定数"
 variable = "変数"
 attribute = "属性"
+
+[expression_editor.arity]
+# 補完メニューの関数の引数の数。`{count}`・`{min}`・`{max}` は数に置き換わる。
+one = "引数 1 個"
+exact = "引数 {count} 個"
+range = "引数 {min}〜{max} 個"

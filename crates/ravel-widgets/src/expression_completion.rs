@@ -155,11 +155,25 @@ pub fn complete(
 
 fn detail(candidate: &Candidate) -> String {
     match (candidate.kind, candidate.arity) {
-        (CandidateKind::Function, Some(arity)) => arity.describe().to_string(),
+        (CandidateKind::Function, Some(arity)) => arity_text(arity),
         (CandidateKind::Function, None) => t!("expression_editor.kind.function"),
         (CandidateKind::Constant, _) => t!("expression_editor.kind.constant"),
         (CandidateKind::Variable, _) => t!("expression_editor.kind.variable"),
         (CandidateKind::Attribute, _) => t!("expression_editor.kind.attribute"),
+    }
+}
+
+/// A function's argument count in the UI language. `Arity::describe` is the
+/// compiler's English wording for error messages, so it is not reused here.
+fn arity_text(arity: Arity) -> String {
+    match arity {
+        Arity::Exact(1) => t!("expression_editor.arity.one"),
+        Arity::Exact(count) => {
+            t!("expression_editor.arity.exact").replace("{count}", &count.to_string())
+        }
+        Arity::Range(min, max) => t!("expression_editor.arity.range")
+            .replace("{min}", &min.to_string())
+            .replace("{max}", &max.to_string()),
     }
 }
 
@@ -345,7 +359,7 @@ mod tests {
         );
         let item = completion_item(sin, true);
         assert_eq!(item.label, "sin");
-        assert_eq!(item.detail.as_deref(), Some("1 argument"));
+        assert_eq!(item.detail, Some(t!("expression_editor.arity.one")));
         assert_eq!(item.preselect, Some(true));
         assert_eq!(completion_item(sin, false).preselect, Some(false));
     }

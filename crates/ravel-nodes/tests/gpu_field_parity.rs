@@ -137,6 +137,22 @@ fn geometry() -> Geometry {
             AttributeArray::F32((0..COUNT).map(|i| knots[i % knots.len()]).collect()),
         )
         .unwrap();
+    // Non-finite sources: a curve or ramp reads its end value for NaN and
+    // clamps an infinity, and the GPU must not interpolate garbage instead.
+    let wild = [
+        f32::NAN,
+        0.3,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        -f32::NAN,
+        0.7,
+    ];
+    points
+        .insert(
+            "wild",
+            AttributeArray::F32((0..COUNT).map(|i| wild[i % wild.len()]).collect()),
+        )
+        .unwrap();
     points
         .insert(
             "speed",
@@ -240,6 +256,11 @@ fn assert_matches(name: &str, cpu: &Geometry, gpu: &Geometry, target: &str, tole
         assert_eq!(e.len(), a.len(), "{name}: {column_name} length");
         if column_name.as_str() == target {
             for (index, (e, a)) in e.iter().zip(&a).enumerate() {
+                // Identical non-finite answers agree (an empty curve passes a
+                // NaN or an infinity straight through).
+                if e == a || (e.is_nan() && a.is_nan()) {
+                    continue;
+                }
                 let error = (e - a).abs() / (1.0 + e.abs());
                 assert!(
                     error <= tolerance,
@@ -445,7 +466,7 @@ fn every_field() -> Vec<(&'static str, FieldValue, f32)> {
         ),
         (
             "curve bezier",
-            fv(CurveRemapField::new(fv(noise(1, 1.0, 1)), bezier)),
+            fv(CurveRemapField::new(fv(noise(1, 1.0, 1)), bezier.clone())),
             1e-3,
         ),
         (
@@ -485,6 +506,75 @@ fn every_field() -> Vec<(&'static str, FieldValue, f32)> {
             fv(RampField::new(
                 attribute("knot"),
                 ramp(RampInterpolation::Constant),
+            )),
+            0.0,
+        ),
+        (
+            "curve linear, non-finite source",
+            fv(CurveRemapField::new(
+                attribute("wild"),
+                curve(Interpolation::Linear),
+            )),
+            1e-6,
+        ),
+        (
+            "curve bezier, non-finite source",
+            fv(CurveRemapField::new(attribute("wild"), bezier.clone())),
+            1e-3,
+        ),
+        (
+            "curve step, non-finite source",
+            fv(CurveRemapField::new(
+                attribute("wild"),
+                curve(Interpolation::Step),
+            )),
+            0.0,
+        ),
+        (
+            "curve one point, non-finite source",
+            fv(CurveRemapField::new(
+                attribute("wild"),
+                CurveParam::linear([(0.0, 3.0)]),
+            )),
+            0.0,
+        ),
+        (
+            "curve empty, non-finite source",
+            fv(CurveRemapField::new(
+                attribute("wild"),
+                CurveParam::from_points([]),
+            )),
+            0.0,
+        ),
+        (
+            "ramp linear, non-finite source",
+            fv(RampField::new(
+                attribute("wild"),
+                ramp(RampInterpolation::Linear),
+            )),
+            1e-5,
+        ),
+        (
+            "ramp smooth, non-finite source",
+            fv(RampField::new(
+                attribute("wild"),
+                ramp(RampInterpolation::Smooth),
+            )),
+            1e-5,
+        ),
+        (
+            "ramp constant, non-finite source",
+            fv(RampField::new(
+                attribute("wild"),
+                ramp(RampInterpolation::Constant),
+            )),
+            0.0,
+        ),
+        (
+            "ramp one stop",
+            fv(RampField::new(
+                attribute("wild"),
+                RampParam::linear([(0.5, Color::new(0.2, 0.4, 0.6, 0.8))]),
             )),
             0.0,
         ),

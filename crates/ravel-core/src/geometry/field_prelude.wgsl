@@ -17,6 +17,17 @@ fn pf(k: u32) -> f32 {
     return bitcast<f32>(field_params[k]);
 }
 
+// NaN and infinity are tested on the bits: WGSL lets a compiler assume neither
+// occurs, which would fold `x != x` and `isInf` away. The CPU handles both
+// explicitly (`CurveParam::evaluate`, `RampParam::evaluate`, `unit_vector`).
+fn is_nan_bits(x: f32) -> bool {
+    return (bitcast<u32>(x) & 0x7fffffffu) > 0x7f800000u;
+}
+
+fn is_finite_bits(x: f32) -> bool {
+    return (bitcast<u32>(x) & 0x7f800000u) != 0x7f800000u;
+}
+
 // ---- noise: `simplex_2d` / `hash_lattice` / `NoiseField::sample` -------------
 
 var<private> SIMPLEX_GRADIENTS: array<vec2<f32>, 8> = array<vec2<f32>, 8>(
@@ -95,7 +106,7 @@ fn fbm_noise(p: vec2<f32>, seed: u32, frequency: f32, octaves: u32) -> f32 {
 
 fn unit_vector(v: vec2<f32>) -> vec2<f32> {
     let len = length(v);
-    if (len > 0.0 && len <= 3.4028234e38) {
+    if (len > 0.0 && is_finite_bits(len)) {
         return v / len;
     }
     return vec2<f32>(0.0, 0.0);
@@ -151,6 +162,11 @@ fn curve_eval(base: u32, x: f32) -> f32 {
     }
     let first = base + 1u;
     let last = first + (count - 1u) * 7u;
+    // NaN reads the last output, as on the CPU (it would otherwise reach the
+    // scan below and interpolate between the wrong points).
+    if (is_nan_bits(x) || count == 1u) {
+        return pf(last + 1u);
+    }
     if (x <= pf(first)) {
         return pf(first + 1u);
     }
@@ -214,6 +230,9 @@ fn ramp_eval(base: u32, mode: u32, position: f32) -> vec4<f32> {
     let count = field_params[base];
     let first = base + 1u;
     let last = first + (count - 1u) * 5u;
+    if (is_nan_bits(position) || count == 1u) {
+        return ramp_stop_color(last);
+    }
     if (position <= pf(first)) {
         return ramp_stop_color(first);
     }

@@ -433,6 +433,27 @@ mod tests {
         adjustment_setup_remapped(start, None, ev)
     }
 
+    /// The one adjustment layer (id 1, constant `remap`) and a sibling layer
+    /// (id 7) whose shell starts at `sibling_start` and whose network is empty.
+    fn adjustment_document(start: i64, remap: Option<f32>, sibling_start: i64) -> Document {
+        let comp_id = ravel_core::id::CompId::new(1);
+        let mut layer = Layer::new(
+            ravel_core::id::LayerId::new(1),
+            "Adjust",
+            adjustment_network(),
+        )
+        .with_time(start, 0, 300);
+        layer.adjustment = true;
+        layer.time_remap = remap.map(ravel_core::animation::channel::AnimationChannel::constant);
+        let sibling = Layer::new(ravel_core::id::LayerId::new(7), "Sibling", Graph::new())
+            .with_time(sibling_start, 0, 300);
+        Document::default().with_composition(
+            Composition::new(comp_id, "C", (1, 1), FPS, 300)
+                .add_layer(sibling)
+                .add_layer(layer),
+        )
+    }
+
     fn adjustment_setup_remapped(
         start: i64,
         remap: Option<f32>,
@@ -440,12 +461,7 @@ mod tests {
     ) -> (Graph, NodeId, Evaluator) {
         let comp_id = ravel_core::id::CompId::new(1);
         let layer_id = ravel_core::id::LayerId::new(1);
-        let mut layer =
-            Layer::new(layer_id, "Adjust", adjustment_network()).with_time(start, 0, 300);
-        layer.adjustment = true;
-        layer.time_remap = remap.map(ravel_core::animation::channel::AnimationChannel::constant);
-        let document = Document::default()
-            .with_composition(Composition::new(comp_id, "C", (1, 1), FPS, 300).add_layer(layer));
+        let document = adjustment_document(start, remap, 0);
         let network_id = ravel_core::composition::compile::deterministic_node_id(
             comp_id,
             layer_id,
@@ -642,5 +658,48 @@ mod tests {
         // Comp frames 9 + (k - 5) for k in 0..=5, i.e. 4..=9.
         let expected: f32 = (4..=9).map(|f| 10.0 * f as f32).sum();
         assert_eq!(number_of(out.as_ref()), expected);
+    }
+
+    #[test]
+    fn editing_the_adjustment_layers_remap_discards_its_sims_track() {
+        let counter = Accumulate::default();
+        let (root, adjust, mut ev) = adjustment_setup_remapped(0, Some(4.0), Evaluator::new());
+        // Re-register the counter-carrying sim (the setup's has its own).
+        ev.register(
+            NodeId::new(SIM),
+            stateful_processor(Accumulate {
+                as_frame: true,
+                ..counter.clone()
+            }),
+        );
+        assert_eq!(adjust_starts(&mut ev, &root, adjust, &counter, 9), 1);
+
+        // The shell changes and the network does not: the rebind maps each
+        // simulated frame through the remap, so the states are different.
+        ev.set_document(Arc::new(adjustment_document(0, Some(5.0), 0)));
+
+        assert_eq!(
+            adjust_starts(&mut ev, &root, adjust, &counter, 9),
+            2,
+            "the track outlived an edit to the layer's own remap"
+        );
+    }
+
+    #[test]
+    fn editing_a_sibling_layer_keeps_the_adjustment_sims_track() {
+        let counter = Accumulate::default();
+        let (root, adjust, mut ev) = adjustment_setup_remapped(0, Some(4.0), Evaluator::new());
+        ev.register(
+            NodeId::new(SIM),
+            stateful_processor(Accumulate {
+                as_frame: true,
+                ..counter.clone()
+            }),
+        );
+        assert_eq!(adjust_starts(&mut ev, &root, adjust, &counter, 9), 1);
+
+        ev.set_document(Arc::new(adjustment_document(0, Some(4.0), 12)));
+
+        assert_eq!(adjust_starts(&mut ev, &root, adjust, &counter, 9), 1);
     }
 }

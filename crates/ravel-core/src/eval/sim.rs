@@ -642,7 +642,7 @@ impl Evaluator {
         let mut reads = ExternalReads::default();
         let scope = UpstreamScope {
             path_id: self.path_id,
-            owner: owning_comp(&self.path),
+            owner: owning_layer(&self.path),
             producer: false,
         };
         let mut reached_interface =
@@ -667,7 +667,7 @@ impl Evaluator {
             producers.push(producer.clone());
             let scope = UpstreamScope {
                 path_id: anchor.path_id,
-                owner: owning_comp(&self.path[..anchor.path_len.min(self.path.len())]),
+                owner: owning_layer(&self.path[..anchor.path_len.min(self.path.len())]),
                 producer: true,
             };
             reached_interface =
@@ -773,6 +773,13 @@ impl Evaluator {
             self.hash_epochs(reached, !(scope.producer && id == root), hasher);
             if scope.producer && id == root {
                 hash_node_header(reached, hasher);
+                // What its rebind reads off the document: the layer's own
+                // shell (timing, remap), not the network the sim sits in.
+                if reached.type_key.starts_with("comp.")
+                    && let Some((comp, layer, _)) = decode_deterministic_node_id(reached.id)
+                {
+                    reads.layer_shells.insert((comp, layer));
+                }
             } else {
                 hash_node(reached, hasher);
                 scan_reads(reached, scope.owner, reads, true);
@@ -1108,17 +1115,17 @@ struct UpstreamScope {
     /// The interned path of the scope the graph is evaluated in (it keys the
     /// graph's wire index).
     path_id: PathId,
-    /// The composition the scope's layer sits in, for readers that name "the
-    /// same composition".
-    owner: Option<CompId>,
+    /// The layer the scope belongs to and its composition, for readers that
+    /// name "the same composition" or read the layer's own placement.
+    owner: Option<(CompId, LayerId)>,
     /// The graph holds the node that produced the sim's bindings, not the sim.
     producer: bool,
 }
 
-/// The composition of the innermost layer scope in `path`.
-fn owning_comp(path: &[PathSegment]) -> Option<CompId> {
+/// The composition and layer of the innermost layer scope in `path`.
+fn owning_layer(path: &[PathSegment]) -> Option<(CompId, LayerId)> {
     path.iter().rev().find_map(|segment| match segment {
-        PathSegment::Layer(comp, _) => Some(*comp),
+        PathSegment::Layer(comp, layer) => Some((*comp, *layer)),
         _ => None,
     })
 }
@@ -1136,13 +1143,21 @@ struct ExternalReads {
     /// Layers whose network (closed over its own references) and shell are
     /// read.
     layers: BTreeSet<(CompId, LayerId)>,
+    /// Compositions whose own fields and layer count are read, not the layers.
+    comp_meta: BTreeSet<CompId>,
+    /// Layers whose shell alone is read.
+    layer_shells: BTreeSet<(CompId, LayerId)>,
     /// A `net.in` was just scanned (see [`Self::take_interface`]).
     interface: bool,
 }
 
 impl ExternalReads {
     fn any(&self) -> bool {
-        !(self.shells.is_empty() && self.whole.is_empty() && self.layers.is_empty())
+        !(self.shells.is_empty()
+            && self.whole.is_empty()
+            && self.layers.is_empty()
+            && self.comp_meta.is_empty()
+            && self.layer_shells.is_empty())
     }
 
     /// Whether a `net.in` was scanned since the last call.
@@ -1169,7 +1184,7 @@ impl ExternalReads {
                 .and_then(|comp| comp.get_layer(next.1));
             if let Some(layer) = layer {
                 for node in layer.network.nodes() {
-                    scan_reads(node, Some(next.0), self, false);
+                    scan_reads(node, Some(next), self, false);
                 }
             }
         }
@@ -1178,6 +1193,26 @@ impl ExternalReads {
             id.hash(hasher);
             match document.get_composition(*id) {
                 Some(comp) => hash_comp_shell(comp, hasher),
+                None => 0u8.hash(hasher),
+            }
+        }
+        for id in &self.comp_meta {
+            id.hash(hasher);
+            match document.get_composition(*id) {
+                Some(comp) => {
+                    hash_comp_fields(comp, hasher);
+                    comp.layers.len().hash(hasher);
+                }
+                None => 0u8.hash(hasher),
+            }
+        }
+        for (comp, layer_id) in &self.layer_shells {
+            (comp, layer_id).hash(hasher);
+            match document
+                .get_composition(*comp)
+                .and_then(|comp| comp.get_layer(*layer_id))
+            {
+                Some(layer) => hash_layer_shell(layer, hasher),
                 None => 0u8.hash(hasher),
             }
         }
@@ -1198,10 +1233,9 @@ impl ExternalReads {
 }
 
 /// Record what `node` — and every node of a subnet it holds — reads from
-/// outside the graph it sits in. `owner` is the composition of the layer the
-/// graph belongs to. `top` is false for a nested node, whose `net.in` is its
+/// outside the graph it sits in. `owner` is the layer the graph belongs to. `top` is false for a nested node, whose `net.in` is its
 /// subnet's own interface and not the scope's.
-fn scan_reads(node: &Node, owner: Option<CompId>, reads: &mut ExternalReads, top: bool) {
+fn scan_reads(node: &Node, owner: Option<(CompId, LayerId)>, reads: &mut ExternalReads, top: bool) {
     let identifier = |key: &str| {
         node.parameters
             .iter()
@@ -1211,7 +1245,7 @@ fn scan_reads(node: &Node, owner: Option<CompId>, reads: &mut ExternalReads, top
     match node.type_key.as_str() {
         LAYER_REF_TYPE_KEY => {
             // The referrer's shell too: the target's time is derived from it.
-            if let Some(owner) = owner {
+            if let Some((owner, _)) = owner {
                 reads.shells.insert(owner);
                 match identifier("layer") {
                     Some(raw) => {
@@ -1224,12 +1258,17 @@ fn scan_reads(node: &Node, owner: Option<CompId>, reads: &mut ExternalReads, top
             }
         }
         LAYER_INFO_TYPE_KEY => {
-            reads.shells.extend(owner);
+            reads.shells.extend(owner.map(|(comp, _)| comp));
         }
+        // Composition fields and the layer count of the target, plus the
+        // reading layer's own placement (its time is converted to comp time).
         COMP_INFO_TYPE_KEY => {
-            reads.shells.extend(owner);
+            if let Some((comp, layer)) = owner {
+                reads.layer_shells.insert((comp, layer));
+                reads.comp_meta.insert(comp);
+            }
             reads
-                .shells
+                .comp_meta
                 .extend(identifier(COMP_INFO_COMP_PARAM).map(CompId::new));
         }
         key => {
@@ -1257,15 +1296,20 @@ fn scan_reads(node: &Node, owner: Option<CompId>, reads: &mut ExternalReads, top
 
 /// A composition's own fields and every layer's shell, but no network.
 fn hash_comp_shell(comp: &Composition, hasher: &mut impl Hasher) {
+    hash_comp_fields(comp, hasher);
+    for layer in &comp.layers {
+        hash_layer_shell(layer, hasher);
+    }
+}
+
+/// A composition's own fields, with no layer in them.
+fn hash_comp_fields(comp: &Composition, hasher: &mut impl Hasher) {
     comp.resolution.hash(hasher);
     comp.frame_rate.hash(hasher);
     comp.duration_frames.hash(hasher);
     match bincode::serialize(&comp.background_color) {
         Ok(bytes) => bytes.hash(hasher),
         Err(_) => unique().hash(hasher),
-    }
-    for layer in &comp.layers {
-        hash_layer_shell(layer, hasher);
     }
 }
 
@@ -2124,6 +2168,40 @@ mod tests {
             2,
             "the track outlived an edit to a shell its upstream reads"
         );
+    }
+
+    #[test]
+    fn a_comp_info_reader_keeps_the_track_through_a_sibling_shell_edit() {
+        let counter = Counter::default();
+        let network = reading_network("comp.info", None);
+        let (target, bystander) = (Graph::new(), Graph::new());
+        let mut ev = reading_evaluator(
+            &counter,
+            three_layer_document(&network, &target, 0, &bystander),
+        );
+        assert_eq!(restarts_after_pulling(&mut ev, &counter, &network, 6), 1);
+
+        // Layer 2's placement moves; comp.info reads composition fields and
+        // the layer count, and this layer's own placement, not its siblings'.
+        ev.set_document(three_layer_document(&network, &target, 12, &bystander));
+
+        assert_eq!(restarts_after_pulling(&mut ev, &counter, &network, 8), 1);
+    }
+
+    #[test]
+    fn a_comp_info_reader_discards_the_track_when_a_composition_field_changes() {
+        let counter = Counter::default();
+        let network = reading_network("comp.info", None);
+        let (target, bystander) = (Graph::new(), Graph::new());
+        let document = three_layer_document(&network, &target, 0, &bystander);
+        let mut ev = reading_evaluator(&counter, document.clone());
+        assert_eq!(restarts_after_pulling(&mut ev, &counter, &network, 6), 1);
+
+        let mut comp = (**document.get_composition(comp_id()).unwrap()).clone();
+        comp.duration_frames += 10;
+        ev.set_document(Arc::new((*document).clone().with_composition(comp)));
+
+        assert_eq!(restarts_after_pulling(&mut ev, &counter, &network, 8), 2);
     }
 
     #[test]

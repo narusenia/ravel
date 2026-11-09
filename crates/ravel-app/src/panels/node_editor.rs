@@ -3117,13 +3117,14 @@ impl NodeEditorPanel {
 
                 // Idle hover tracking: re-arm the dwell when the
                 // hovered node changes; repaint when an open popover
-                // just closed.
+                // just closed, and when a new node is hovered so the
+                // popover's anchor is laid out there before it opens.
                 let hovered = self.node_at_local_pos(lx, ly);
                 let (repaint, arm) = self.hover_popover.pointer_moved(hovered);
                 if arm {
                     self.arm_hover_dwell(cx);
                 }
-                if repaint {
+                if repaint || arm {
                     cx.notify();
                 }
             }
@@ -3668,6 +3669,26 @@ impl Render for NodeEditorPanel {
         // without adding a canvas hit target, and the content is rebuilt
         // from the document on every repaint, so animated values follow the
         // displayed frame without any evaluation request.
+        // The anchor follows the hovered node even before the dwell opens
+        // the popover: the popover positions itself from the trigger's
+        // previous layout, so an anchor that only moved on the opening frame
+        // would open at the canvas origin until something repainted.
+        let hovered_node = self
+            .hover_popover
+            .target()
+            .and_then(|id| self.graph.node(id));
+        let anchor = hovered_node.map_or(point(px(0.0), px(0.0)), |node| {
+            let (sx, sy) = self
+                .viewport
+                .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+            let (_, h) = painting::node_size_or_default(
+                &self.node_sizes,
+                node,
+                self.viewport.zoom,
+                self.flow_direction,
+            );
+            point(px(sx), px(sy + h))
+        });
         let hover_popover = match self
             .hover_popover
             .open_target()
@@ -3677,18 +3698,9 @@ impl Render for NodeEditorPanel {
                 let frame = self.current_local_frame(cx).unwrap_or(0);
                 let eval = self.display_eval_context(cx);
                 let info = hover_info(node, &self.registry, frame, &eval);
-                let (sx, sy) = self
-                    .viewport
-                    .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
-                let (_, h) = painting::node_size_or_default(
-                    &self.node_sizes,
-                    node,
-                    self.viewport.zoom,
-                    self.flow_direction,
-                );
-                hover_popover_element(Some(&info), point(px(sx), px(sy + h)), true, cx)
+                hover_popover_element(Some(&info), anchor, true, cx)
             }
-            None => hover_popover_element(None, point(px(0.0), px(0.0)), false, cx),
+            None => hover_popover_element(None, anchor, false, cx),
         };
 
         // With no network open, say *why*: a multi-layer selection is a closed
@@ -9177,6 +9189,57 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    /// The anchor is already on the hovered node while the dwell runs: the
+    /// popover positions itself from the wrapper's previous layout, so an
+    /// anchor that moved only on the opening frame opened the popover at the
+    /// canvas origin whenever nothing else repainted (playback stopped).
+    #[gpui::test]
+    fn the_popover_anchor_sits_on_the_hovered_node_before_it_opens(cx: &mut TestAppContext) {
+        let (window, _project, _path, blur) = setup(cx);
+        window
+            .update(cx, |panel, _window, cx| {
+                panel.hover_popover.pointer_moved(Some(blur));
+                cx.notify();
+            })
+            .unwrap();
+        let mut visual = VisualTestContext::from_window(*window, cx);
+        visual.update(|window, _cx| window.refresh());
+        visual.run_until_parked();
+        let open = window
+            .update(cx, |panel, _window, _cx| panel.hover_popover.open_target())
+            .unwrap();
+        assert_eq!(open, None, "still inside the dwell");
+        let bounds = visual
+            .debug_bounds("node-hover-popover-anchor")
+            .expect("the anchor wrapper renders while closed");
+        let (expected_x, expected_y) = window
+            .update(cx, |panel, _window, _cx| {
+                let node = panel.graph.node(blur).expect("blur node");
+                let (sx, sy) = panel
+                    .viewport
+                    .flow_to_screen(node.metadata.position.0, node.metadata.position.1);
+                let (_, h) = painting::node_size_or_default(
+                    &panel.node_sizes,
+                    node,
+                    panel.viewport.zoom,
+                    panel.flow_direction,
+                );
+                let (ox, oy) = panel.canvas_origin.get();
+                (ox + sx, oy + sy + h)
+            })
+            .unwrap();
+        let origin_x: f32 = bounds.origin.x.into();
+        let origin_y: f32 = bounds.origin.y.into();
+        assert!(
+            (origin_x - expected_x).abs() < 1.0,
+            "x {origin_x} vs {expected_x}"
+        );
+        assert!(
+            (origin_y - expected_y).abs() < 1.0,
+            "y {origin_y} vs {expected_y}"
+        );
     }
 
     /// The popover anchor wrapper is laid out at the hovered node's

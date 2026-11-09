@@ -1543,7 +1543,26 @@ trait Field: Send + Sync {
     fn sample(&self, input: &FieldSample<'_>) -> AttributeArray;
     fn byte_size(&self) -> u64;   // NO default; combinators recurse into
                                   // their operands, same rule as NodeData
+    fn wgsl(&self, b: &mut FieldWgsl<'_>) -> Option<WgslFn> { None }
+        // WGSL version: ONE function `field_fn_N(p: vec2<f32>, i: u32) -> T`;
+        // emit the operands' first. Parameters go through b.f32 / b.u32 /
+        // b.block (data, never text, so the source depends on the tree's shape
+        // only). Return None wherever `sample` would warn and fall back.
 }
+FieldProgram::compile(&dyn Field, &EvalContext, &dyn AttributeLookup, len) -> Option<FieldProgram>
+    // None when ANY node of the tree has no WGSL version (field.expression never
+    // has). .root_type() / .params() (u32 words, never empty) / .attributes()
+    // (<= MAX_FIELD_ATTRIBUTES = 3, binding order) / .root_call("p", "i") /
+    // .wgsl(first_binding) (prelude + `field_params` at first_binding + one
+    // `field_attr_K` per attribute + the functions). THE ENTRY POINT a kernel
+    // calls fields through — field.apply's kernel is the smallest user;
+    // particle forces will be the next.
+apply_kernel(&FieldProgram, &ApplyKernelSpec { position, target, combine, mask,
+    group }) -> String   // field.apply as one kernel; bindings table in its docs;
+                         // entry `main`, APPLY_WORKGROUP, APPLY_ROW_WIDTH
+wgsl_element_type(AttributeType) -> Option<&str>   // the one column-layout table
+                                                   // (ravel_gpu::column_wgsl_type delegates)
+ComponentMask::{resolved_for(arity, target), bits()}
 FieldSample { positions, attributes, ctx }   // whole domain, not just P
     ::new(positions, &AttributeSet, &ctx) / ::positions_only(positions, &ctx)
 FieldValue(Arc<dyn Field>)   // NodeData (FIELD), lazy — consumers sample
@@ -2605,12 +2624,26 @@ the pool on drop) and `ensure_cpu_geometry` mirror `ensure_gpu` /
 `GpuContext::mark_buffer_in_flight(&PooledBuffer, written)`: until the batch
 is submitted `BufferPool::acquire` skips that buffer, `upload_buffer` flushes
 before overwriting it and a readback flushes before copying a written one
-(the buffer counterpart of the texture pending-use rules). Nothing binds a
-pooled buffer to `dispatch_compute` yet. The first production `BufferPool` is
+(the buffer counterpart of the texture pending-use rules). `dispatch_compute` binds no pooled
+buffer; `dispatch_buffers` (below) does. The first production `BufferPool` is
 `scene.render`'s static mesh cache (see `ScenePass` below); a pool is built with
 `BufferPool::with_vram_allowance` over the **same** `VramAllowance` as its
 `TexturePool` (`TexturePool::with_vram_allowance`) so idle textures and idle
 buffers together stay inside the budget's headroom.
+**Buffer dispatch** (unit 2): `GpuContext::dispatch_buffers(&BufferDispatch {
+label, pipeline, uniform, buffers: &[BufferBinding { buffer, written }], width,
+height })` — the uniform binds at `@binding(0)`, the buffers at `@binding(1..)`
+(`BindingKind::StorageBuffer` is the read-write slot, `ReadOnlyStorageBuffer` the
+read-only one), the bind group is not cached, and **recording marks every bound
+buffer in flight itself**, so a scratch buffer may be `release`d to its pool right
+after recording. `GpuColumn::{upload(ctx, &pool, &AttributeArray), adopt(&pool,
+buffer, ty, len), read(ctx)}`, `GpuGeometry::{with_column, attribute_info}`.
+The production pools come from `ravel_nodes::shared_pools_with_budget(ctx,
+budget) -> (texture pool, buffer pool)`, built over **one** `VramAllowance`
+(`GpuEvalHooks` does); `shared_buffer_pool(ctx)` is the standalone one for tests.
+`ravel_nodes::register_all_processors_with_fields` /
+`processor_for_node_with_fields` take the `GpuFieldBackend` (`None` = CPU
+`field.apply`); the unsuffixed functions delegate with `None`.
 A GPU node's per-frame work is one
 `GpuContext::dispatch_compute(&ComputeDispatch { pipeline, inputs, output,
 uniform, width, height, .. })` call: inputs are `TextureBinding`s from
@@ -2740,7 +2773,7 @@ processor runs, and **§P** means the section's `translate` also carries
 | `field.time` | CPU | emit `FieldValue` answering the evaluation clock: `mode` is `frame` (continuous, `EvalContext::sample_frame`), `seconds` (the default) or `normalized` (frame ÷ `duration`), then `× scale + offset`. `duration` is stated on the node because a field is handed the frame, never the timeline's length; a non-positive one normalizes to `0.0` rather than an infinity. **Always `is_time_dependent()`** — a `FieldValue` is lazy, so this node's re-pull is the only thing that marks `field.apply` downstream as having a fresh input (the trap `field.expression` documents) |
 | `field.constant` | CPU | emit `FieldValue` answering `value` everywhere (default `1.0`, the multiplicative identity — `0.0` is what an unconnected `FIELD` port already answers). How a field graph writes a subtraction or a division, there being no `field.subtract` |
 | `field.add` / `.multiply` / `.max` / `.blend` | CPU | combine two field inputs |
-| `field.apply` | CPU | Geometry + Field → Geometry; modulate a named attribute |
+| `field.apply` | CPU reference; GPU when it can (`GpuApplyFieldProcessor` over `GpuFieldBackend`) | Geometry + Field → Geometry; modulate a named attribute. **Fields have WGSL versions** (`Field::wgsl`) except `field.expression`, a `normalize`d `field.attribute`, and every configuration whose CPU answer is a warning + default: the whole tree is sampled on the CPU then (the CPU path is the reference and raises every error / creates every column). On the GPU the field tree, the combine mode, the component mask and the group are **one dispatch**. A resident input (`GpuGeometry`) takes the GPU path whenever possible and comes back resident with only the target column replaced (no readback); a CPU `Geometry` goes to the GPU only from `GPU_MIN_ELEMENTS` (65 536) elements. `field/gpu.rs` |
 | `text.font` | CPU | `family` / `weight` / `style` → `FontRef` (`DataTypeId::FONT`), through `ravel_core::text::shared()`. **Never fails**: a family this machine does not have yields the built-in face with `is_fallback` set plus one warning, so a project authored elsewhere renders in the wrong font rather than erroring. Stateless — the library owns the index and both caches |
 | `text.layout` § | CPU | `FontRef` + `text` / `size` / `tracking` / `leading` / `align` / `wrap_width` / `anchor` / `writing_mode` / `position` → Geometry of one instance per grapheme cluster, glyph outlines in `instance_sources` (one per distinct cluster, addressed by `source_index`) — the same output shape `scatter.*` produces, so the existing instance path in `rasterize` draws it. Writes `index` / `P` / `rot` / `scale` plus `char_index` (per line) / `word_index` / `line_index` / `char_progress` (0..1) / `advance`; per-character animation is `field.attribute` → `field.curve_remap` → `field.apply`, not a parameter here. An unconnected `font` input resolves `DEFAULT_FAMILY` rather than failing. `writing_mode = vertical` is `vertical-rl`: it shapes with the `vert` / `vrt2` alternates, takes the column width from `vhea` and the step down the column from `vmtx` (a face with neither gets a column one em wide and rustybuzz's own `ascender - descender` step, so the two stay in proportion), and **swaps the axes** — `advance` becomes a Y step, `align` acts down the column, `anchor` across the columns leftwards, `wrap_width` limits a column's length. Line breaking pushes out (追い出し) at a cut that would begin a line with `。』」` or end one with `「（`, giving up rather than emptying a line; no hanging punctuation, no 縦中横. `position` (`ParamRole::Position`) offsets the instance `P` column after shaping, which is what makes a text block grabbable in the Viewer without a `geometry.transform` (REQ-UI-011's movement semantics): `layout_text` itself stays a pure shaping function whose origin is the origin, and `anchor` / `align` decide how the block sits against the point — hence `position` rather than `center`. **`text.on_path` rebuilds `P` from the path, so `position` has no effect downstream of it**; `text.to_path` bakes it in with the rest of the placement and keeps it |
 | `geometry.transform` | CPU | scale→rotate→translate around a pivot (`use_centroid` default on = bbox center, else the `pivot` Channel3); `translate` / `scale` / `pivot` are Channel3 and `rotation` is a Channel3 of Euler degrees; a `Vec2` `P` uses only the xy/Z components (the rest are inert, identity fast path included), a `Vec3` `P` uses all three with the fixed ZYX Euler order; transforms point `P` and instance placement (`P`, then the node's linear part composed EXACTLY with each instance's own through `InstanceTransform::compose`, so a non-uniform scale over a turned instance writes a `shear` column; `rot` / `scale` / `shear` are written only when already present or changed); CoW columns |

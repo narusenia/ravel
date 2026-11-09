@@ -287,6 +287,86 @@ REQ-GPU-003 の「フィールドの WGSL 評価」に相当。
 - WGSL 未実装フィールドが CPU フォールバックする（結果が正しい）テスト。
 - 合成チェーンが 1 パスにまとまることの検証（dispatch 回数）。
 
+**実装メモ（2026-11-10）**
+
+- **WGSL の組み立て**（`ravel-core/src/geometry/field_wgsl.rs`、プレリュードは
+  `field_prelude.wgsl`）。`Field::wgsl(&self, &mut FieldWgsl) -> Option<WgslFn>`、
+  既定は `None`。**1 フィールド = 1 関数**
+  `fn field_fn_N(p: vec2<f32>, i: u32) -> T`（位置 `p` と要素番号 `i`）。
+  合成子は先にオペランドの `wgsl` を呼んでから自分の関数を出す。位置を引数に
+  取る形にしたのは `field.gradient` / `field.curl_noise` が**オフセットした位置で
+  ソースを再評価する**ため。木全体が 1 モジュール・1 ルート関数になるので、
+  合成チェーンは**1 dispatch**（`field.apply` の combine / 成分マスク / group も
+  同じカーネルに入る）。純粋な文字列と数値だけで GPU 型を知らないので、
+  `ravel-core` に置いた（`ravel-gpu` が `ravel-core` に依存するため逆は不可）。
+- **構造はソース、数値はデータ**。周波数・時計・カーブの制御点などは
+  `FieldProgram::params()` の 32 ビット語として storage buffer で渡し、シェーダは
+  `pf(k)` / `field_params[k]` で読む。生成ソースは木の形だけで決まり、
+  パラメータを動かしてもパイプラインは増えない
+  （`identical_fields_reuse_one_pipeline_while_their_parameters_change`）。
+  `field.time` は時計を **CPU で 1 回読んで**値として渡すので、CPU と同じ値を使う。
+- **フォールバック規則**: `wgsl` が `None` のフィールド、**および CPU が
+  警告して既定値に落ちる構成すべて**（未知の属性、長さ違い、`Str` 列、列に無い成分、
+  スカラ要求の所へベクタ、結合できないオペランド型）は `None` を返す。木のどこかが
+  `None` なら木全体が CPU で評価される。CPU が基準で、エラーも警告も
+  すでに正しく出すので、GPU 側で再実装しない。**部分木ごとのフォールバック
+  （CPU で評価した列を GPU に渡す）はしていない**: `gradient` / `curl_noise` は
+  オフセット位置が要るので部分木を列にできず、規則が 2 つになるため。
+- **式フィールド（`field.expression`）は CPU のまま**。式言語（関数・属性参照・
+  `f64` 評価）を WGSL へ移すのは小さくなく、2 つの評価器の保守が一生ついて回る。
+  式はバッチあたり 1 回評価で済む場合（属性を読まない）が多く、そこは CPU でも安い。
+  GPU に載せたくなったら式 IR からの生成として別単位で切る。
+- **`field.attribute` の `normalize` も CPU**: 列全体の min/max
+  という縮約が要り、要素ごとの関数にならない。
+- **属性の結合上限 `MAX_FIELD_ATTRIBUTES = 3`**。属性 1 本が storage バインド 1 つで、
+  compute ステージの保証は 8。`field.apply` のカーネル自身が 5
+  （`P`・旧ターゲット・新ターゲット・group・パラメータ）使うので残りが 3。
+  超える木は CPU。
+- **`ravel-gpu` の足し物**: `BufferDispatch` / `BufferBinding` と
+  `GpuContext::dispatch_buffers`（uniform が `@binding(0)`、バッファが
+  `@binding(1..)`、`BindingKind::StorageBuffer` = 読み書き）。**記録時に束ねた
+  プールバッファを `mark_buffer_in_flight` する**ので、呼び側は足場バッファを
+  記録直後に `release` してよい。`GpuColumn::{upload, adopt, read}` と
+  `GpuGeometry::{with_column, attribute_info}`。`column_wgsl_type` は
+  `ravel-core` の `wgsl_element_type` に委譲し、レイアウト表と生成シェーダが
+  食い違えないようにした。要素数は uniform で渡し `arrayLength` は使わない。
+- **`field.apply` の経路**（`ravel-nodes/src/field/gpu.rs` の `GpuFieldBackend`）。
+  常駐入力（`GpuGeometry`）は可能なら常にこの経路で、結果は `GpuGeometry`
+  （ターゲット列以外を共有）、**読み戻しなし**。CPU の `Geometry` は
+  `GPU_MIN_ELEMENTS = 1 << 16` 要素以上のときだけ GPU に送り、カーネルが読む列
+  だけをアップロードし、ターゲット列だけを読み戻す。閾値は実測
+  （Apple GPU、release、負荷のあるマシンで目安）: `noise(3 oct) * falloff + 定数`
+  で CPU は 1 万 0.5 ms / 5 万 1.8 ms / 10 万 3.4 ms / 100 万 36.7 ms、GPU は
+  CPU 入出力込みで 1.6 / 1.6 / 1.8 / 5.7 ms（常駐なら 100 万でも 1.7 ms）。
+  単純な木ほど交差が遅いので、5 万の交差の少し上に置いた。
+  GPU が受けない呼び出し（`Detail` ドメイン、無いターゲット＝作成が要る、
+  型の合わないターゲット、Bool でない group）は `Ok(None)` で CPU の
+  `apply_field` が答える（エラーも警告も列の作成も CPU が基準）。
+  `amount == 0` は dispatch せず入力をそのまま返す（「変調なし」はビット一致）。常駐入力が CPU に
+  落ちたときは読み戻して `Geometry` を返す（「読み戻し境界」）。
+  `GpuApplyFieldProcessor` が `ApplyFieldProcessor`（CPU の基準実装、常駐入力は
+  読み戻して処理）を包む。
+- **配線**: `GpuEvalHooks` が `shared_pools_with_budget` で `TexturePool` と
+  `BufferPool` を**1 つの `VramAllowance` から**作る（単位 1 のメモが
+  「最初の消費者が足す」とした部分）。`processor_for_node_with_fields` /
+  `register_all_processors_with_fields` が `GpuFieldBackend` を受け、
+  従来の関数は `None`（CPU のみ）で委譲する。
+- **パーティクルが呼ぶ入口**: `FieldProgram`。粒子ドメインの属性に対して
+  `FieldProgram::compile(field, ctx, &lookup, len)` し、力カーネルのモジュールに
+  `FieldProgram::wgsl(first_binding)` を入れ、`params()` と属性列を宣言された
+  バインドに渡し、要素ごとに `FieldProgram::root_call("p", "i")` を呼ぶ。
+  `field.apply` のカーネル（`apply_kernel`）はその最小の利用例。
+- **許容誤差と残る不一致**: 各フィールドの許容誤差は
+  `tests/gpu_field_parity.rs` の表に明記（相対 1e-6〜5e-3。属性読み出しは 0 =
+  ビット一致、`curl_noise` / `gradient` は有限差分が GPU の `sin` 等の誤差を
+  `1/(2·step)` 倍するため 5e-3）。GPU の積和融合・`length`（Rust は `hypot`）・
+  `atan2` は ULP 単位で違う。**NaN / ±inf の挙動は WGSL では規定されない**ので
+  GPU と CPU の一致は有限値でのみ保証する（`atan2` のゼロベクトルは
+  `atan2_ieee` で IEEE の符号付きゼロ規則に合わせた）。
+- **検証の注意**: パリティテストはアダプタが無いと `skipping` で通る。
+  アダプタ無しでも走るのは WGSL の naga 検証
+  （`the_wgsl_of_every_field_validates_without_an_adapter`）だけ。
+
 ### 単位 3: 生成ノードの GPU 化
 
 - `scatter.grid` / `scatter.circular` / `scatter.path_array` /

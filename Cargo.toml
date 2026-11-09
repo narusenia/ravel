@@ -45,20 +45,20 @@ ravel-cli = { path = "crates/ravel-cli" }
 # `gpui_platform` → `gpui_ce_platform`), so every entry needs `package =`. The
 # dependency *keys* stay the old names because the library names did not
 # change: `use gpui::…` and `use gpui_platform::…` still resolve.
-gpui = { package = "gpui-ce", git = "https://github.com/narusenia/gpui-ce-ravel", rev = "a93d6ccd0ae1d62688417bd61c66833ed5411ee7" }
-gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/narusenia/gpui-ce-ravel", rev = "a93d6ccd0ae1d62688417bd61c66833ed5411ee7", features = ["font-kit"] }
+gpui = { package = "gpui-ce", git = "https://github.com/narusenia/gpui-ce-ravel", rev = "7a52224f18c05748409f08f14f2de2a1bbc4ccbb" }
+gpui_platform = { package = "gpui_ce_platform", git = "https://github.com/narusenia/gpui-ce-ravel", rev = "7a52224f18c05748409f08f14f2de2a1bbc4ccbb", features = ["font-kit"] }
 # `gpui-component` 0.6 lives in the GPUI Kit workspace, whose fork points the
 # whole `gpui` family at the same gpui-ce revision pinned above. Both must move
 # together: two revisions would put two `gpui` crates in the tree and make
 # `Entity<T>` / `App` two different types (the shape `MED-GPU-07` took with
 # wgpu, only harder to read).
-gpui-component = { git = "https://github.com/narusenia/gpui-kit-ravel", rev = "7eafdc2a656ef4e635cc76cb9e873b0d9f9b7de9" }
+gpui-component = { git = "https://github.com/narusenia/gpui-kit-ravel", rev = "b751abf523dc0a2d02a55cb97667b4ea6c341d96" }
 # The behaviour layer under `gpui-component`. Ravel's own widgets are built on
 # this rather than on `gpui-component`'s styled parts
 # (`docs/implementation/ui-component-layer-plan.md`, `UIX-2` onward).
-gpui-base = { git = "https://github.com/narusenia/gpui-kit-ravel", rev = "7eafdc2a656ef4e635cc76cb9e873b0d9f9b7de9" }
+gpui-base = { git = "https://github.com/narusenia/gpui-kit-ravel", rev = "b751abf523dc0a2d02a55cb97667b4ea6c341d96" }
 # Renamed with the kit: `gpui-component-assets` → `gpui-kit-assets`.
-gpui-kit-assets = { git = "https://github.com/narusenia/gpui-kit-ravel", rev = "7eafdc2a656ef4e635cc76cb9e873b0d9f9b7de9" }
+gpui-kit-assets = { git = "https://github.com/narusenia/gpui-kit-ravel", rev = "b751abf523dc0a2d02a55cb97667b4ea6c341d96" }
 rust-embed = "8"
 # **No direct `palette` dependency.** `gpui::Hsla` is
 # `palette::Alpha<palette::Hsl, f32>`, but nothing here has to name palette's
@@ -172,10 +172,10 @@ dialoguer = { version = "0.12", default-features = false }
 # `[workspace.dependencies]` above. A mismatch is not an error — it silently
 # resolves a second `gpui`.
 [patch.crates-io]
-gpui = { package = "gpui-ce", git = "https://github.com/narusenia/gpui-ce-ravel", rev = "a93d6ccd0ae1d62688417bd61c66833ed5411ee7" }
+gpui = { package = "gpui-ce", git = "https://github.com/narusenia/gpui-ce-ravel", rev = "7a52224f18c05748409f08f14f2de2a1bbc4ccbb" }
 
 [patch."https://github.com/zed-industries/zed"]
-gpui = { package = "gpui-ce", git = "https://github.com/narusenia/gpui-ce-ravel", rev = "a93d6ccd0ae1d62688417bd61c66833ed5411ee7" }
+gpui = { package = "gpui-ce", git = "https://github.com/narusenia/gpui-ce-ravel", rev = "7a52224f18c05748409f08f14f2de2a1bbc4ccbb" }
 
 # Keep `cargo run` (dev profile) interactive: at opt-level 0 the per-pixel
 # CPU passes (shell compositing in ravel-nodes, the viewer's frame

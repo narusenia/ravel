@@ -61,11 +61,11 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
 use ravel_core::eval::EvalContext;
-use ravel_core::geometry::absent::{Absent, absent};
+use ravel_core::geometry::absent::derived_color_sources;
 use ravel_core::geometry::{
     APPLY_ROW_WIDTH, APPLY_WORKGROUP, ApplyKernelSpec, AttributeArray, AttributeLookup,
     AttributeType, Domain, Field, FieldApply, FieldProgram, Geometry, apply_kernel, created_column,
-    created_column_type, names,
+    created_column_type,
 };
 use ravel_core::types::NodeData;
 use ravel_gpu::{
@@ -289,15 +289,8 @@ impl GpuFieldBackend {
                     // Only a colour that follows another (a point's `Cd` follows
                     // its path's) reads columns; read back just those, and
                     // nothing at all for a constant default.
-                    let derived = target_type == AttributeType::Color
-                        && matches!(absent(domain, spec.target), Some(Absent::Inherited));
-                    let wanted: &[(Domain, &str)] = if derived {
-                        &[
-                            (Domain::Primitive, names::STROKE_COLOR),
-                            (Domain::Primitive, names::CD),
-                            (domain, names::STROKE_COLOR),
-                            (domain, names::CD),
-                        ]
+                    let wanted = if target_type == AttributeType::Color {
+                        derived_color_sources(domain, spec.target)
                     } else {
                         &[]
                     };

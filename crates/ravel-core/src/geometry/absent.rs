@@ -153,6 +153,23 @@ pub fn absent_column(
     broadcast_value(&absent_value(domain, name, attr_type), len)
 }
 
+/// The columns [`absent_column`] reads to fill an absent `name` on `domain`:
+/// empty for a constant default. A caller holding the geometry elsewhere (the
+/// GPU path) fetches exactly these instead of restating the inheritance rule
+/// of [`derived_colors`]; the match arms of the two must stay in step.
+pub fn derived_color_sources(domain: Domain, name: &str) -> &'static [(Domain, &'static str)] {
+    match (domain, name) {
+        (Domain::Point, names::CD | names::STROKE_COLOR) => &[
+            (Domain::Point, names::CD),
+            (Domain::Primitive, names::STROKE_COLOR),
+            (Domain::Primitive, names::CD),
+        ],
+        (Domain::Primitive, names::STROKE_COLOR) => &[(Domain::Primitive, names::CD)],
+        (Domain::Instance, names::STROKE_COLOR) => &[(Domain::Instance, names::CD)],
+        _ => &[],
+    }
+}
+
 /// The colour column `name` follows on `geometry`, when it follows one.
 pub(super) fn derived_colors(
     geometry: &Geometry,

@@ -422,10 +422,14 @@ trait NodeProcessor: Send + Sync {
 trait EvalScope {                                 // implemented by Evaluator
     fn evaluate_sub(&mut self, segment: PathSegment, graph: &Graph,
         output: NodeId, ctx: &EvalContext,
-        bindings: Vec<(String, Arc<dyn NodeData>)>) -> Result<Arc<dyn NodeData>, EvalError>;
+        bindings: Bindings) -> Result<Arc<dyn NodeData>, EvalError>;
+        // Bindings = values + an optional Rebind (how to produce them at another
+        // frame). Bindings::new(vec) / Vec.into() = plain values;
+        // Bindings::rebindable(vec, Arc<dyn Rebind>) = re-pullable. Call inside process
     fn evaluate_time_shifted(&mut self, shift_node: NodeId, frame: u64, graph: &Graph,
         upstream: NodeId, ctx: &EvalContext) -> Result<Arc<dyn NodeData>, EvalError>;
-        // `upstream` at `frame` as TimeShift(shift_node, frame): own cache entries
+        // `upstream` at `frame` as TimeShift(shift_node, frame): own cache entries.
+        // The scope's bindings are read AT `frame` (bindings_at), not carried over
     fn evaluate_input_at(&mut self, node: &Node, port: usize, frame: u64,
         ctx: &EvalContext) -> Result<Option<Arc<dyn NodeData>>, EvalError>;
         // the same for "what is wired into my input `port`" (None = unwired); the
@@ -434,10 +438,26 @@ trait EvalScope {                                 // implemented by Evaluator
         stepper: &dyn SimStepper) -> Result<SimState, EvalError>;
         // the state of a stateful node at ctx.frame, filling its track; only
         // StatefulAdapter calls it. The default refuses (no sim cache)
-    fn bindings(&self) -> &[(String, Arc<dyn NodeData>)];
+    fn bindings(&self) -> &[(String, Arc<dyn NodeData>)];   // as of the entry frame
+    fn bindings_at(&mut self, at: &EvalContext) -> Result<Bindings, EvalError>;
+        // the same scope's bindings for `at`: a Rebind re-pulls them in the scope
+        // that produced them (stacks cut back to its Anchor), cached under
+        // TimeShift(producer, frame); without a Rebind the values carry over
+    fn process_args_at(&mut self, at: &EvalContext) -> Result<ProcessArgs, EvalError>;
+        // the node being processed: Arc<Node> + inputs + ResolvedParams for `at`.
+        // What a Rebind::rebind calls; default refuses
     fn document(&self) -> Option<Arc<Document>>;
     fn path(&self) -> &[PathSegment];   // current ownership path (layer.ref
                                         // finds its enclosing layer here)
+}
+
+trait Rebind: Send + Sync {                       // implemented by the scope's producer
+    fn rebind(&self, scope: &mut dyn EvalScope, at: &EvalContext)
+        -> Result<BindingValues, EvalError>;
+        // `at` is in the INNER scope's time (a layer network maps it back to comp
+        // time itself). Build the values with the same fn process used. The four
+        // producers: SubnetPins (subnet.rs), PieceAt (iterate.rs), LowerStack
+        // (comp/mod.rs, adjustment `source`); layer.ref binds nothing
 }
 
 // Stateful nodes (REQ-CORE-011, ravel-core/src/eval/sim.rs): a value that is
@@ -467,7 +487,8 @@ Evaluator
     .has_provisional_sim() / .settle_provisional()
     .set_sim_cancel(Option<CancelCheck>)  // a fill gives way between frames
     // A track is dropped when its upstream premise hash changes (checked on
-    // every pull), by invalidate_node / invalidate_all / reset, and — for a
+    // every pull; the hash also covers what the upstream reads outside its scope:
+    // a net.in's producing scope, layer.ref targets, shell readers), by invalidate_node / invalidate_all / reset, and — for a
     // deleted node or layer — by set_document. A sim downstream of a sim is
     // an EvalError::ProcessFailed.
 

@@ -160,6 +160,19 @@ fn evaluate(&self, path: &[PathSegment], node_id: NodeId, frame: Frame, ctx: &Ev
 スコープごとに 1 回だけ求めてグラフが同一オブジェクトの間は再利用し、
 インターフェースノードは出力ポート単位で fresh を報告するので、
 `source` の変化が `t` や `base_geometry` の消費者に波及しない。
+
+バインディングは値であると同時に、**別のフレームで引き直す手段**
+（`Rebind`）を持てる。バインディングを作るのは `subnet` / `geometry.iterate` /
+`comp.network`（調整レイヤー）で、それぞれ自分の `process` と同じ関数で値を
+組み直す。`TimeShift` の下（`evaluate_time_shifted`、したがって `time.*` の
+ようなステートレスな時間ノードと sim の充填・replay の**両方**）で `net.in` が
+読むバインディングは、要求フレームの値の引き継ぎではなく、**バインディングを
+作ったスコープでシフト先のフレームに引き直した値**（`EvalScope::bindings_at`）。
+引き直しは作ったノード・グラフ・パスの位置（`Anchor`）まで評価スタックを
+切り戻して行うので、キャッシュは作ったスコープ配下の
+`TimeShift(作ったノード, f)` に入り、現在フレームのエントリを汚さない。
+引き直し手段を持たないバインディング（`layer.ref` は何も束縛しない）は
+従来どおり引き継ぐ。シフトなしの評価は引き直しも複製も増えない。
 殻コンパイルは最下段に synthetic な `comp.background` を置き、
 `Composition.background_color` を RGBA のまま `FrameBuffer` にしてから各レイヤーを
 合成する。空コンプや現在フレームに映像レイヤーが無い場合も、この背景が
@@ -470,7 +483,7 @@ coalesce された `Params` が求めたプロセッサ再構築が失われる�
 | 共有デコードキャッシュのヒット（`ravel-media` `FrameKey`）とリーダー | 素材の版（`MediaAssetEntry::content_revision`、セッション限り） | 素材の監視（`media/watch.rs`）が変更を検知したら `rederive` で版を進める。パスをキーにした音声デコードキャッシュとサムネイルも同時に捨てる |
 | `scene.render` の静的メッシュバッファのヒット（`StaticMeshCache`） | メッシュの鍵（`MeshKey`: `P` / `N` / `uv` / `Cd` / `alpha` 各列の `Arc` アドレス、インデックス blob のアドレスと長さ、頂点・インデックス範囲） | 何もしない。列を編集すると copy-on-write で別アドレスになり鍵が変わる。エントリがジオメトリを保持するのでアドレスは再利用されない。16 フレーム使われなかったエントリは捨てる |
 | ライブ編集の削除の承認（`live_edit::handle`） | 確認を出した時点のプロジェクトの世代（`ProjectState::generation`）と文書 | 何もしない。新規・読み込みで世代が進み、編集で文書が変わる。不一致なら `document-changed` を返す |
-| sim トラックの状態の再利用（`Evaluator::sim_state_at`、`eval/sim.rs`） | 上流サブグラフの構造・パラメータ・fps・コンプ基準のハッシュ（`SimTrack` の `Premise::hash`） | 何もしない。引くたびに現在値と比べ、不一致ならトラックを全破棄して充填し直す。処理系の差し替え・素材の中身は上流ハッシュに映らないので `invalidate_node` / `invalidate_all` が落とし、ノード・レイヤーの削除はスコープ剪定（`sim_prune_scope`）が解放する |
+| sim トラックの状態の再利用（`Evaluator::sim_state_at`、`eval/sim.rs`） | 上流サブグラフの構造・パラメータ・fps・コンプ基準のハッシュ（`SimTrack` の `Premise::hash`）に、**上流がスコープの外から読むもの**を足したもの: `net.in` に届くなら束縛を作ったスコープのノードの上流（`net.in` に届く限り外へ辿る）、`layer.ref` の参照先レイヤーのネットワーク（参照の閉包）とシェル、`layer.info` / `comp.info` / 殻ノードが読むコンポジションのメタ情報と全レイヤーのシェル。高速経路（`known`）はグラフに加えて**文書と束縛を作ったスコープのグラフが同一オブジェクト**であることも確かめる（`ExternalStamp`） | 何もしない。引くたびに現在値と比べ、不一致ならトラックを全破棄して充填し直す。外を読まない sim は従来のハッシュのままで、同じネットワーク内の無関係な編集でも落ちない。処理系の差し替え・素材の中身は上流ハッシュに映らないので `invalidate_node` / `invalidate_all` が落とし、ノード・レイヤーの削除はスコープ剪定（`sim_prune_scope`）が解放する |
 
 照合はすべて「一致しなければ捨てる」に倒す。有効な結果を捨てた損失は
 再評価 1 回、古い結果を受け入れた損失は次の無効化まで誤った絵が残ることだから。

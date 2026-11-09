@@ -394,11 +394,270 @@ impl Projector {
     }
 }
 
+/// One row of a clipped point domain: an original point, or the point a
+/// fraction `t` of the way from one original point to another.
+#[derive(Clone, Copy, Debug)]
+enum Row {
+    Original(usize),
+    Between(usize, usize, f32),
+}
+
+/// Whether a point is on the visible side of the near plane: clip-space
+/// `z >= 0`. The clip-space `z` is affine in the object-space position, so a
+/// crossing found here is found at the same `t` in object space.
+fn in_front(depth: f32) -> bool {
+    depth >= 0.0
+}
+
+/// Where the segment from a point at clip depth `from` to one at `to` crosses
+/// the near plane.
+fn crossing(from: f32, to: f32) -> f32 {
+    from / (from - to)
+}
+
+/// Clip one path against the near plane, as rows of the point domain.
+///
+/// - **Fully in front**: unchanged, and still closed if it was.
+/// - **Fully behind**: nothing.
+/// - **Open and crossing**: the visible part, split into one open polyline per
+///   run in front (a path that dips behind the camera and returns becomes two).
+/// - **Closed and crossing**: the polygon clipped to the half-space, which is
+///   again one closed polygon whose new edge lies on the near plane — fill is
+///   exact, and a stroke also runs along that edge (the cut is not a contour of
+///   the shape, but a closed path has no loose end to leave open).
+///
+/// The shared rule for the CPU reference and the GPU renderer: both read the
+/// geometry this produces, so neither ever projects a point from behind the
+/// camera (whose perspective divide inverts and explodes).
+fn clip_path(
+    verts: std::ops::Range<usize>,
+    closed: bool,
+    depth: impl Fn(usize) -> f32,
+) -> Vec<(Vec<Row>, bool)> {
+    let ring: Vec<usize> = verts.collect();
+    if ring.iter().all(|&i| in_front(depth(i))) {
+        return vec![(ring.into_iter().map(Row::Original).collect(), closed)];
+    }
+    if ring.iter().all(|&i| !in_front(depth(i))) {
+        return Vec::new();
+    }
+    if closed {
+        let mut polygon = Vec::new();
+        for (position, &a) in ring.iter().enumerate() {
+            let b = ring[(position + 1) % ring.len()];
+            let (da, db) = (depth(a), depth(b));
+            if in_front(da) {
+                polygon.push(Row::Original(a));
+            }
+            if in_front(da) != in_front(db) {
+                polygon.push(Row::Between(a, b, crossing(da, db)));
+            }
+        }
+        return if polygon.len() >= 3 {
+            vec![(polygon, true)]
+        } else {
+            Vec::new()
+        };
+    }
+    let mut pieces = Vec::new();
+    let mut current: Vec<Row> = Vec::new();
+    for (position, &index) in ring.iter().enumerate() {
+        let visible = in_front(depth(index));
+        let previous = position.checked_sub(1).map(|p| ring[p]);
+        if let Some(previous) = previous {
+            let (dp, di) = (depth(previous), depth(index));
+            if in_front(dp) != visible {
+                current.push(Row::Between(previous, index, crossing(dp, di)));
+                if !visible {
+                    pieces.push(std::mem::take(&mut current));
+                }
+            }
+        }
+        if visible {
+            current.push(Row::Original(index));
+        }
+    }
+    pieces.push(current);
+    pieces
+        .into_iter()
+        .filter(|piece| piece.len() >= 2)
+        .map(|piece| (piece, false))
+        .collect()
+}
+
+fn mix(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+/// The column `column` read at `rows`. A row between two points interpolates
+/// the numeric types; a type with no interpolation (`I32`, `Bool`, `Str`)
+/// takes the first point's value, and a tangent (an offset, meaningless at a
+/// point that was never on the curve) is zero there.
+fn gather(name: &str, column: &AttributeArray, rows: &[Row]) -> AttributeArray {
+    let tangent = name == names::IN_TAN || name == names::OUT_TAN;
+    macro_rules! each {
+        ($values:expr, $original:expr, $between:expr) => {
+            rows.iter()
+                .map(|row| match *row {
+                    Row::Original(i) => $original(&$values[i]),
+                    Row::Between(i, j, t) => $between(&$values[i], &$values[j], t),
+                })
+                .collect()
+        };
+    }
+    match column {
+        AttributeArray::F32(v) => {
+            AttributeArray::F32(each!(v, |x: &f32| *x, |a: &f32, b: &f32, t| mix(*a, *b, t)))
+        }
+        AttributeArray::Vec2(v) => AttributeArray::Vec2(each!(
+            v,
+            |x: &Vec2| *x,
+            |a: &Vec2, b: &Vec2, t| if tangent {
+                Vec2(0.0, 0.0)
+            } else {
+                Vec2(mix(a.0, b.0, t), mix(a.1, b.1, t))
+            }
+        )),
+        AttributeArray::Vec3(v) => AttributeArray::Vec3(each!(
+            v,
+            |x: &Vec3| *x,
+            |a: &Vec3, b: &Vec3, t| Vec3(mix(a.0, b.0, t), mix(a.1, b.1, t), mix(a.2, b.2, t))
+        )),
+        AttributeArray::Vec4(v) => AttributeArray::Vec4(each!(
+            v,
+            |x: &ravel_core::types::Vec4| *x,
+            |a: &ravel_core::types::Vec4, b: &ravel_core::types::Vec4, t| {
+                ravel_core::types::Vec4(
+                    mix(a.0, b.0, t),
+                    mix(a.1, b.1, t),
+                    mix(a.2, b.2, t),
+                    mix(a.3, b.3, t),
+                )
+            }
+        )),
+        AttributeArray::Color(v) => {
+            AttributeArray::Color(each!(v, |x: &Color| *x, |a: &Color, b: &Color, t| {
+                Color::new(
+                    mix(a.r, b.r, t),
+                    mix(a.g, b.g, t),
+                    mix(a.b, b.b, t),
+                    mix(a.a, b.a, t),
+                )
+            }))
+        }
+        AttributeArray::I32(v) => {
+            AttributeArray::I32(each!(v, |x: &i32| *x, |a: &i32, _: &i32, _| *a))
+        }
+        AttributeArray::Bool(v) => {
+            AttributeArray::Bool(each!(v, |x: &bool| *x, |a: &bool, _: &bool, _| *a))
+        }
+        AttributeArray::Str(v) => AttributeArray::Str(each!(
+            v,
+            |x: &String| x.clone(),
+            |a: &String, _: &String, _| a.clone()
+        )),
+    }
+}
+
+/// The path content of `flat` (paths and loose points) with every path clipped
+/// to the near plane, as a fresh geometry with a `Vec3` `P` in object space.
+///
+/// Mesh vertices are left behind (the meshes are drawn as meshes). Each path
+/// gets its own run of points, so the result carries no sharing between
+/// primitives; primitive attributes follow the path they came from, and a path
+/// that is split passes its row to each piece. A loose point behind the near
+/// plane is dropped.
+fn near_clipped_paths(flat: &Geometry, clip_depth: &Mat4) -> anyhow::Result<Option<Geometry>> {
+    let Some(positions) = flat.positions(Domain::Point) else {
+        return Ok(None);
+    };
+    let positions: Positions<'_> = positions.context("scene.render: the point positions")?;
+    let count = positions.len();
+    let depth = |index: usize| {
+        let p = positions.get3(index).unwrap_or(Vec3(0.0, 0.0, 0.0));
+        point_mul(clip_depth, [p.0, p.1, p.2])[2]
+    };
+
+    let mut rows: Vec<Row> = Vec::new();
+    let mut primitives = Vec::new();
+    let mut parents = Vec::new();
+    let mut covered = vec![false; count];
+    for (parent, prim) in flat.primitives().iter().enumerate() {
+        for slot in covered
+            .iter_mut()
+            .take(prim.verts().end)
+            .skip(prim.verts().start)
+        {
+            *slot = true;
+        }
+        let Primitive::Path { verts, closed } = prim else {
+            continue;
+        };
+        if verts.end > count {
+            continue;
+        }
+        for (piece, closed) in clip_path(verts.clone(), *closed, depth) {
+            let start = rows.len();
+            rows.extend(piece);
+            primitives.push(Primitive::Path {
+                verts: start..rows.len(),
+                closed,
+            });
+            parents.push(parent);
+        }
+    }
+    for (index, &is_covered) in covered.iter().enumerate() {
+        if !is_covered && in_front(depth(index)) {
+            rows.push(Row::Original(index));
+        }
+    }
+    if rows.is_empty() {
+        return Ok(None);
+    }
+
+    let mut out = Geometry::new();
+    for (name, column) in flat.points().iter() {
+        if name.as_str() == names::P {
+            continue;
+        }
+        let kept = gather(name, column, &rows);
+        out.points_mut().insert(name.clone(), kept)?;
+    }
+    let p: Vec<Vec3> = rows
+        .iter()
+        .map(|row| match *row {
+            Row::Original(i) => positions.get3(i).unwrap_or(Vec3(0.0, 0.0, 0.0)),
+            Row::Between(i, j, t) => {
+                let (a, b) = (
+                    positions.get3(i).unwrap_or(Vec3(0.0, 0.0, 0.0)),
+                    positions.get3(j).unwrap_or(Vec3(0.0, 0.0, 0.0)),
+                );
+                Vec3(mix(a.0, b.0, t), mix(a.1, b.1, t), mix(a.2, b.2, t))
+            }
+        })
+        .collect();
+    out.points_mut().insert(names::P, AttributeArray::Vec3(p))?;
+    for primitive in primitives {
+        out.push_primitive(primitive);
+    }
+    if !parents.is_empty() {
+        for (name, column) in flat.primitive_attrs().iter() {
+            let rows: Vec<Row> = parents.iter().map(|&p| Row::Original(p)).collect();
+            if column.len() >= flat.primitives().len() {
+                out.primitive_attrs_mut()
+                    .insert(name.clone(), gather(name, column, &rows))?;
+            }
+        }
+    }
+    *out.detail_mut() = flat.detail().clone();
+    Ok(Some(out))
+}
+
 /// Project the path content of `flat` (its `P` in object space) to pixels.
 ///
-/// `None` when there is no path content, or when the object's centroid is
-/// outside the clip volume (behind the camera, nearer than `near`, or past
-/// `far`) — such an object has no depth to be drawn at.
+/// `None` when there is no path content, or when what remains after clipping
+/// to the near plane ([`near_clipped_paths`]) has a centroid outside the clip
+/// volume (past `far`) — such an object has no depth to be drawn at.
 ///
 /// **Shortcuts, both stated in `docs/specifications/procedural-geometry.md`:**
 /// the control polygon and the tangent handles are projected point by point,
@@ -411,32 +670,18 @@ fn project_paths(
     world: &Mat4,
     projector: &Projector,
 ) -> anyhow::Result<Option<PathObject>> {
-    let Some(positions) = flat.positions(Domain::Point) else {
+    let Some(flat) = near_clipped_paths(flat, &projector.view_proj.mul(world))? else {
         return Ok(None);
     };
-    let positions: Positions<'_> = positions.context("scene.render: the point positions")?;
+    let flat = &flat;
+    let positions = flat
+        .positions(Domain::Point)
+        .expect("the clipped geometry has P")?;
     let count = positions.len();
-    // Points covered by a mesh are its vertices, not sprites or path points.
-    let mut covered = vec![false; count];
-    for prim in flat.primitives() {
-        if prim.is_mesh() {
-            for slot in covered
-                .iter_mut()
-                .take(prim.verts().end)
-                .skip(prim.verts().start)
-            {
-                *slot = true;
-            }
-        }
-    }
-    let has_path = flat.primitives().iter().any(|prim| !prim.is_mesh());
-    if !has_path && covered.iter().all(|&c| c) {
-        return Ok(None);
-    }
 
     let mut extent = Extent::new();
-    for (index, is_covered) in covered.iter().enumerate() {
-        if !is_covered && let Some(p) = positions.get3(index) {
+    for index in 0..count {
+        if let Some(p) = positions.get3(index) {
             extent.add([p.0, p.1, p.2]);
         }
     }
@@ -661,4 +906,74 @@ pub(super) fn prepare(
     });
     prepared.blended = order;
     Ok(prepared)
+}
+
+#[cfg(test)]
+mod clip_tests {
+    use super::*;
+
+    /// Depths by index; `clip_path` over `0..depths.len()`.
+    fn clip(depths: &[f32], closed: bool) -> Vec<(Vec<Row>, bool)> {
+        clip_path(0..depths.len(), closed, |i| depths[i])
+    }
+
+    fn is_between(row: &Row, from: usize, to: usize, expected: f32) -> bool {
+        matches!(*row, Row::Between(a, b, t) if a == from && b == to && (t - expected).abs() < 1e-6)
+    }
+
+    #[test]
+    fn a_path_wholly_in_front_is_untouched_and_keeps_its_closure() {
+        let out = clip(&[1.0, 2.0, 3.0], true);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].1, "still closed");
+        assert!(matches!(
+            out[0].0.as_slice(),
+            [Row::Original(0), Row::Original(1), Row::Original(2)]
+        ));
+    }
+
+    #[test]
+    fn a_path_wholly_behind_vanishes() {
+        assert!(clip(&[-1.0, -2.0], false).is_empty());
+        assert!(clip(&[-1.0, -2.0, -3.0], true).is_empty());
+    }
+
+    #[test]
+    fn an_open_path_keeps_only_the_part_in_front_of_the_plane() {
+        // Depth 1 at point 0, -3 at point 1: the plane is a quarter of the
+        // way along (1 / (1 - -3)).
+        let out = clip(&[1.0, -3.0], false);
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].1);
+        assert!(matches!(out[0].0[0], Row::Original(0)));
+        assert!(is_between(&out[0].0[1], 0, 1, 0.25));
+        // The mirror image enters instead of leaving: -3 then 1 crosses
+        // three quarters of the way along.
+        let out = clip(&[-3.0, 1.0], false);
+        assert!(is_between(&out[0].0[0], 0, 1, 0.75));
+        assert!(matches!(out[0].0[1], Row::Original(1)));
+    }
+
+    #[test]
+    fn an_open_path_that_dips_behind_the_camera_and_returns_is_two_pieces() {
+        let out = clip(&[2.0, -2.0, 2.0], false);
+        assert_eq!(out.len(), 2, "one piece per run in front");
+        assert!(
+            out.iter()
+                .all(|(piece, closed)| piece.len() == 2 && !closed)
+        );
+    }
+
+    #[test]
+    fn a_closed_path_crossing_the_plane_becomes_one_closed_polygon() {
+        // A square with two corners behind: the clipped polygon is the two
+        // front corners plus the two plane crossings, closed.
+        let out = clip(&[1.0, 1.0, -1.0, -1.0], true);
+        assert_eq!(out.len(), 1);
+        let (polygon, closed) = &out[0];
+        assert!(closed);
+        assert_eq!(polygon.len(), 4);
+        assert!(is_between(&polygon[2], 1, 2, 0.5));
+        assert!(is_between(&polygon[3], 3, 0, 0.5));
+    }
 }

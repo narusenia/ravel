@@ -1267,3 +1267,143 @@ fn a_shared_triangle_edge_is_drawn_once_on_both_renderers() {
     assert_uniform_half_alpha(&cpu_frame(&scene, 16, 16), "cpu");
     assert_uniform_half_alpha(&Rig::new().frame(&scene, 16, 16), "gpu");
 }
+
+// ---------------------------------------------------------------------------
+// Paths crossing the near plane
+// ---------------------------------------------------------------------------
+
+/// The camera for these tests sits at `(0, 0, -100)` looking along `+Z` with
+/// the default 50 degree lens and `near = 1`, so a point with `z <= -99` is
+/// nearer than the near plane and `z < -100` is behind the camera. On a
+/// 200 x 200 canvas a point at distance `d` from the camera and lateral offset
+/// `x` lands at `100 + x * 100 * 2.1445 / d`, by hand
+/// (`1 / tan 25 degrees = 2.1445`).
+fn near_plane_camera() -> Camera {
+    Camera::looking_at([0.0, 0.0, -100.0], [0.0, 0.0, 0.0])
+}
+
+/// A line along the view direction at `x = 20`, from 100 behind the camera
+/// (`z = -200`) to 200 in front of it (`z = 100`), stroked 1 unit wide.
+///
+/// Its far end is at distance 200, i.e. pixel `100 + 20 * 2.1445 * 100 / 200 =
+/// 121.4`, and it runs outwards to the right from there as it nears the
+/// camera, off the right edge. Projected without clipping, its behind-camera
+/// end lands on the *other* side of the screen (the divide by a negative `w`
+/// mirrors it), so the unclipped picture has a line across `x in [79, 121]`.
+fn line_through_the_near_plane() -> Geometry {
+    let mut geometry =
+        Geometry::from_points3(vec![Vec3(20.0, 0.0, -200.0), Vec3(20.0, 0.0, 100.0)]);
+    geometry.push_primitive(Primitive::Path {
+        verts: 0..2,
+        closed: false,
+    });
+    geometry
+        .primitive_attrs_mut()
+        .insert(names::CD, AttributeArray::Color(vec![RED]))
+        .unwrap();
+    geometry
+        .primitive_attrs_mut()
+        .insert(names::STROKE_WIDTH, AttributeArray::F32(vec![1.0]))
+        .unwrap();
+    geometry
+}
+
+fn assert_only_the_visible_part_of_the_line(out: &FrameBuffer, label: &str) {
+    for x in 84..116 {
+        assert_eq!(
+            px(out, x, 100)[3],
+            0.0,
+            "{label}: ({x}, 100) is where the mirrored part would be"
+        );
+    }
+    assert!(
+        px(out, 150, 100)[3] > 0.9,
+        "{label}: the visible part runs out to the right"
+    );
+    assert!(px(out, 190, 100)[3] > 0.9, "{label}: ... to the edge");
+}
+
+#[test]
+fn an_open_path_crossing_the_near_plane_draws_only_its_visible_part() {
+    let scene = scene_of(near_plane_camera(), vec![line_through_the_near_plane()]);
+    assert_only_the_visible_part_of_the_line(&cpu_frame(&scene, 200, 200), "cpu");
+    assert_only_the_visible_part_of_the_line(&Rig::new().frame(&scene, 200, 200), "gpu");
+}
+
+/// A floor quad `y = 20` (below the camera: `+Y` is down) running from 100
+/// behind the camera to 200 in front of it, `x in [-50, 50]`. Its far edge is
+/// at distance 200: pixel row `100 + 20 * 2.1445 * 100 / 200 = 121.4`, below
+/// the horizon at row 100, and the visible polygon fills the screen below that
+/// row. Projected unclipped, the behind-camera corners land *above* the
+/// horizon and the fill covers the sky.
+fn floor_through_the_near_plane() -> Geometry {
+    let mut geometry = Geometry::from_points3(vec![
+        Vec3(-50.0, 20.0, -200.0),
+        Vec3(50.0, 20.0, -200.0),
+        Vec3(50.0, 20.0, 100.0),
+        Vec3(-50.0, 20.0, 100.0),
+    ]);
+    geometry.push_primitive(Primitive::Path {
+        verts: 0..4,
+        closed: true,
+    });
+    geometry
+        .primitive_attrs_mut()
+        .insert(names::CD, AttributeArray::Color(vec![GREEN]))
+        .unwrap();
+    geometry
+}
+
+fn assert_floor_below_the_horizon(out: &FrameBuffer, label: &str) {
+    for y in [5, 50, 100, 115] {
+        assert_eq!(
+            px(out, 100, y)[3],
+            0.0,
+            "{label}: row {y} is above the floor's far edge"
+        );
+    }
+    assert!(
+        px(out, 100, 130).a_over(0.9),
+        "{label}: just below the far edge"
+    );
+    assert!(
+        px(out, 100, 190).a_over(0.9),
+        "{label}: the near part fills the bottom"
+    );
+}
+
+trait AlphaOver {
+    fn a_over(&self, threshold: f32) -> bool;
+}
+
+impl AlphaOver for [f32; 4] {
+    fn a_over(&self, threshold: f32) -> bool {
+        self[3] > threshold
+    }
+}
+
+#[test]
+fn a_closed_path_crossing_the_near_plane_is_clipped_to_a_polygon() {
+    let scene = scene_of(near_plane_camera(), vec![floor_through_the_near_plane()]);
+    assert_floor_below_the_horizon(&cpu_frame(&scene, 200, 200), "cpu");
+    assert_floor_below_the_horizon(&Rig::new().frame(&scene, 200, 200), "gpu");
+}
+
+#[test]
+fn a_loose_point_behind_the_camera_is_not_drawn() {
+    let mut sprites = Geometry::from_points3(vec![Vec3(0.0, 0.0, -300.0), Vec3(0.0, 0.0, 100.0)]);
+    sprites
+        .points_mut()
+        .insert(names::PSCALE, AttributeArray::F32(vec![40.0, 2.0]))
+        .unwrap();
+    let scene = scene_of(near_plane_camera(), vec![sprites]);
+    // Only the point 200 away (a sprite of radius 2 * 100 * 2.1445 / 200 =
+    // 2.1 px at the centre) is drawn; the one behind the camera, whose 40-unit
+    // radius would be huge, is not.
+    let out = cpu_frame(&scene, 200, 200);
+    assert!(
+        covered(&out) > 0 && covered(&out) < 100,
+        "{}",
+        covered(&out)
+    );
+}

@@ -591,7 +591,7 @@ impl<'a> InstanceColumns<'a> {
 }
 
 /// The attribute domain an operation targets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Domain {
     Point,
     Primitive,

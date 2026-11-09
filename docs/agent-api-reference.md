@@ -2532,6 +2532,41 @@ The memo lives in the pool
 (`TexturePool::begin_upload_scope` / `memoized_upload` / `memoize_upload`),
 which holds the lease for as long as the scope does. Outside a scope
 nothing is remembered and every call uploads.
+**Resident geometry** (`gpu-resident-geometry-plan.md` unit 1).
+`ravel_gpu::BufferPool::{new, with_shared_budget}` is the `TexturePool` of
+buffers: `acquire(bytes, BufferUsage) -> PooledBuffer` /
+`release(PooledBuffer)`, keyed by `BufferKey { capacity, usage }` where
+`capacity` is the power-of-two size class (floor 256), so a column that grows
+or shrinks a little reuses its buffer; contents of a reused buffer are
+unspecified. `BufferUsage` (`STORAGE` / `UNIFORM` / `VERTEX` / `INDEX` /
+`COPY_SRC` / `COPY_DST`, plus `COLUMN`) is this crate's vocabulary, like
+`TextureUsage`. A lease that is simply *kept* is the long-lived case (a static
+mesh buffer): the pool never recycles what a holder still owns.
+`upload_buffer` / `begin_read_buffer` / `read_buffer` transfer through the
+same counters as textures (`GpuContext::transfer_stats()`). `GpuGeometry`
+(`from_geometry(ctx, &Arc<Mutex<BufferPool>>, &Geometry)`, `to_geometry()`)
+holds one storage buffer per numeric `(Domain, name)` column of the point,
+primitive and instance domains; topology (primitives, mesh indices, instance
+sources) and the `Str` / `Detail` columns stay on a CPU `Geometry`
+(`host_attribute`, `primitives`, `indices`, `sources`). It shares
+`DataTypeId::GEOMETRY` with the CPU `Geometry`, so a consumer downcasts to
+`GpuGeometry` first and falls back to `Geometry`. Element layout:
+`column_stride` / `column_wgsl_type` (`Vec3` is a 16-byte `vec3<f32>`,
+`Color` a `vec4<f32>`, `Bool` a `u32`); the buffer is larger than the data,
+so `GpuColumn::len()` is the element count. In `ravel-nodes`,
+`gpu_util::ensure_gpu_geometry(ctx, &pool, &dyn NodeData) -> GpuGeometryInput`
+(`Resident` borrows with no transfer, `Uploaded` owns buffers that return to
+the pool on drop) and `ensure_cpu_geometry` mirror `ensure_gpu` /
+`ensure_cpu`. A pass that binds a pooled buffer calls
+`GpuContext::mark_buffer_in_flight(&PooledBuffer, written)`: until the batch
+is submitted `BufferPool::acquire` skips that buffer, `upload_buffer` flushes
+before overwriting it and a readback flushes before copying a written one
+(the buffer counterpart of the texture pending-use rules). Nothing binds a
+pooled buffer to `dispatch_compute` yet, and no production site builds a
+`BufferPool`; the first consumer adds both, building it with
+`BufferPool::with_vram_allowance` over the **same** `VramAllowance` as its
+`TexturePool` (`TexturePool::with_vram_allowance`) so idle textures and idle
+buffers together stay inside the budget's headroom.
 A GPU node's per-frame work is one
 `GpuContext::dispatch_compute(&ComputeDispatch { pipeline, inputs, output,
 uniform, width, height, .. })` call: inputs are `TextureBinding`s from

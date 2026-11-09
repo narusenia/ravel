@@ -278,6 +278,12 @@ pub(crate) struct DispatchState {
     used: HashSet<usize>,
     /// Textures the pending batch writes (subset of `used`).
     written: HashSet<usize>,
+    /// Pooled buffers (by [`PooledBuffer::id`](crate::PooledBuffer::id)) the
+    /// pending batch reads or writes, and the subset it writes. The buffer
+    /// counterpart of `used` / `written`: ids are never reused, so no pointer
+    /// identity is needed.
+    buffers_used: HashSet<u64>,
+    buffers_written: HashSet<u64>,
     uniforms: HashMap<UniformKey, (wgpu::Buffer, u64)>,
     bind_groups: HashMap<BindGroupKey, BindGroupEntry>,
     tick: u64,
@@ -536,7 +542,39 @@ impl DispatchState {
         self.pending_dispatches = 0;
         self.used.clear();
         self.written.clear();
+        self.buffers_used.clear();
+        self.buffers_written.clear();
         submission
+    }
+
+    /// Record that the pending batch reads (`written == false`) or writes
+    /// buffer `id`. Whoever records a pass binding a pooled buffer calls this
+    /// through [`GpuContext::mark_buffer_in_flight`](crate::GpuContext::mark_buffer_in_flight).
+    pub(crate) fn mark_buffer_use(&mut self, id: u64, written: bool) {
+        self.buffers_used.insert(id);
+        if written {
+            self.buffers_written.insert(id);
+        }
+    }
+
+    /// `write_buffer` lands before the batch executes, so a buffer the batch
+    /// still uses has to be flushed first (see [`Self::flush_for_upload`]).
+    pub(crate) fn flush_for_buffer_upload(&mut self, queue: &wgpu::Queue, id: u64) {
+        if self.buffers_used.contains(&id) {
+            let _ = self.flush(queue);
+        }
+    }
+
+    /// Flush before reading back a buffer the batch writes.
+    pub(crate) fn flush_for_buffer_readback(&mut self, queue: &wgpu::Queue, id: u64) {
+        if self.buffers_written.contains(&id) {
+            let _ = self.flush(queue);
+        }
+    }
+
+    /// Whether the pending batch still reads or writes buffer `id`.
+    pub(crate) fn is_buffer_pending_use(&self, id: u64) -> bool {
+        self.buffers_used.contains(&id)
     }
 
     /// Flush when `texture` is about to be overwritten by `write_texture`

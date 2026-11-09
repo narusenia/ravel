@@ -10,10 +10,11 @@
 //! CPU-only processors (a readback happens only for GPU inputs).
 
 use anyhow::Context as _;
+use ravel_core::geometry::Geometry;
 use ravel_core::types::{FrameBuffer, NodeData};
 use ravel_gpu::{
-    BindingDesc, BindingKind, GpuContext, GpuFrameBuffer, PooledTexture, ShaderVisibility,
-    TextureFormat, TextureKey, TexturePool, TextureUsage,
+    BindingDesc, BindingKind, BufferPool, GpuContext, GpuFrameBuffer, GpuGeometry, PooledTexture,
+    ShaderVisibility, TextureFormat, TextureKey, TexturePool, TextureUsage,
 };
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex};
@@ -175,6 +176,82 @@ pub fn ensure_cpu(input: &dyn NodeData) -> anyhow::Result<Cow<'_, FrameBuffer>> 
         return Ok(Cow::Owned(frame.to_frame_buffer()?));
     }
     anyhow::bail!("expected FrameBuffer input")
+}
+
+/// A geometry adapted to GPU representation for one pass.
+///
+/// The geometry counterpart of [`GpuImage`]. Downstream nodes ask for the
+/// resident form and never learn whether it was already there.
+pub enum GpuGeometryInput<'a> {
+    /// Input was already GPU-resident; borrowed, **nothing is transferred**.
+    Resident(&'a GpuGeometry),
+    /// Input was a CPU geometry uploaded for this call. Its buffers return to
+    /// the pool when this value (and any clone of the geometry) drops, so
+    /// unlike [`GpuImage::Uploaded`] there is nothing to release by hand.
+    Uploaded(GpuGeometry),
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "no node reads resident geometry yet; the expectation fails the build once one does"
+    )
+)]
+impl GpuGeometryInput<'_> {
+    /// The resident geometry, however it got here.
+    pub fn geometry(&self) -> &GpuGeometry {
+        match self {
+            GpuGeometryInput::Resident(geometry) => geometry,
+            GpuGeometryInput::Uploaded(geometry) => geometry,
+        }
+    }
+}
+
+/// Adapt a geometry input (CPU or GPU representation) into resident columns.
+/// Uploads only for a CPU `Geometry`.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "no node reads resident geometry yet; the expectation fails the build once one does"
+    )
+)]
+pub fn ensure_gpu_geometry<'a>(
+    ctx: &GpuContext,
+    pool: &Arc<Mutex<BufferPool>>,
+    input: &'a dyn NodeData,
+) -> anyhow::Result<GpuGeometryInput<'a>> {
+    if let Some(resident) = input.downcast_ref::<GpuGeometry>() {
+        return Ok(GpuGeometryInput::Resident(resident));
+    }
+    let geometry = input
+        .downcast_ref::<Geometry>()
+        .context("expected Geometry input")?;
+    Ok(GpuGeometryInput::Uploaded(GpuGeometry::from_geometry(
+        ctx.clone(),
+        pool,
+        geometry,
+    )?))
+}
+
+/// Adapt a geometry input into CPU memory. Reads back (blocking) only when the
+/// input is GPU-resident.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "no node reads resident geometry yet; the expectation fails the build once one does"
+    )
+)]
+pub fn ensure_cpu_geometry(input: &dyn NodeData) -> anyhow::Result<Cow<'_, Geometry>> {
+    if let Some(geometry) = input.downcast_ref::<Geometry>() {
+        return Ok(Cow::Borrowed(geometry));
+    }
+    if let Some(resident) = input.downcast_ref::<GpuGeometry>() {
+        return Ok(Cow::Owned(resident.to_geometry()?));
+    }
+    anyhow::bail!("expected Geometry input")
 }
 
 /// Dimensions of a frame value in either representation, without any
@@ -412,5 +489,85 @@ mod shader_translation {
             translate_wgsl("blur", &with_premultiplied_helpers(&raw), ShaderTarget::Msl).is_ok(),
             "composing the helpers in must make it translatable",
         );
+    }
+}
+
+#[cfg(test)]
+mod geometry_input {
+    use super::*;
+    use ravel_core::geometry::AttributeArray;
+    use ravel_core::types::Vec2;
+
+    fn rig() -> Option<(GpuContext, Arc<Mutex<BufferPool>>)> {
+        let Some(ctx) = GpuContext::new_blocking().ok() else {
+            eprintln!("skipping: no GPU adapter available");
+            return None;
+        };
+        let pool = Arc::new(Mutex::new(BufferPool::new(ctx.clone(), 64 * 1024 * 1024)));
+        Some((ctx, pool))
+    }
+
+    fn points() -> Geometry {
+        let mut g = Geometry::from_points(vec![Vec2(1.0, 2.0), Vec2(3.0, 4.0)]);
+        g.points_mut()
+            .insert("w", AttributeArray::F32(vec![0.25, 0.5]))
+            .unwrap();
+        g
+    }
+
+    #[test]
+    fn a_cpu_geometry_uploads_once_and_a_resident_one_is_only_borrowed() {
+        let Some((ctx, pool)) = rig() else { return };
+        let cpu = points();
+
+        let before = ctx.transfer_stats();
+        let uploaded = ensure_gpu_geometry(&ctx, &pool, &cpu).unwrap();
+        let after_upload = ctx.transfer_stats();
+        assert!(matches!(uploaded, GpuGeometryInput::Uploaded(_)));
+        // `P`, `index` and `w`.
+        assert_eq!(before.delta(&after_upload).uploads, 3);
+
+        let resident = uploaded.geometry().clone();
+        let before = ctx.transfer_stats();
+        let borrowed = ensure_gpu_geometry(&ctx, &pool, &resident).unwrap();
+        assert!(matches!(borrowed, GpuGeometryInput::Resident(_)));
+        let delta = before.delta(&ctx.transfer_stats());
+        assert_eq!(
+            delta.uploads, 0,
+            "borrowing a resident input must not upload"
+        );
+        assert_eq!(delta.upload_bytes, 0);
+        assert_eq!(delta.readbacks, 0);
+    }
+
+    #[test]
+    fn ensure_cpu_reads_back_only_a_resident_input() {
+        let Some((ctx, pool)) = rig() else { return };
+        let cpu = points();
+
+        let before = ctx.transfer_stats();
+        assert!(matches!(
+            ensure_cpu_geometry(&cpu).unwrap(),
+            Cow::Borrowed(_)
+        ));
+        assert_eq!(before.delta(&ctx.transfer_stats()).readbacks, 0);
+
+        let resident = GpuGeometry::from_geometry(ctx.clone(), &pool, &cpu).unwrap();
+        let before = ctx.transfer_stats();
+        let back = ensure_cpu_geometry(&resident).unwrap();
+        assert!(matches!(back, Cow::Owned(_)));
+        assert_eq!(before.delta(&ctx.transfer_stats()).readbacks, 3);
+        assert_eq!(
+            back.points().get("w").unwrap().as_f32("w").unwrap(),
+            &[0.25, 0.5]
+        );
+    }
+
+    #[test]
+    fn something_that_is_not_a_geometry_is_an_error() {
+        let Some((ctx, pool)) = rig() else { return };
+        let frame = FrameBuffer::new_zeroed(1, 1);
+        assert!(ensure_gpu_geometry(&ctx, &pool, &frame).is_err());
+        assert!(ensure_cpu_geometry(&frame).is_err());
     }
 }

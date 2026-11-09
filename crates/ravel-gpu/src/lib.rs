@@ -11,6 +11,9 @@
 //! * [`RasterPipeline`] / [`QuadDraw`] — the instanced render pass the
 //!   rasterizer draws with, batched into the same encoder.
 //! * [`TexturePool`] — texture reuse with LRU eviction under a VRAM budget.
+//! * [`BufferPool`] — the same for storage, vertex and index buffers.
+//! * [`GpuGeometry`] — the GPU-resident counterpart of the CPU geometry
+//!   container: attribute columns as pooled storage buffers.
 //! * [`ShaderManager`] — WGSL compilation, caching, validation, hot reload.
 //! * [`translate`] — WGSL to MSL / HLSL / SPIR-V, for the backends that do not
 //!   speak WGSL.
@@ -26,12 +29,21 @@
 //! All internal image processing uses 32-bit float formats with no artificial
 //! resolution limits, matching Ravel's architecture.
 
+// Uploads and readbacks hand `bytemuck` casts straight to the GPU, which is
+// little-endian; a big-endian target would silently corrupt every column.
+#[cfg(target_endian = "big")]
+compile_error!(
+    "ravel-gpu assumes a little-endian target: texture and buffer transfers are native-endian casts"
+);
+
 pub mod binding;
+pub mod buffer_pool;
 pub mod compute;
 pub mod device;
 pub mod dispatch;
 pub mod error;
 pub mod frame;
+pub mod geometry;
 pub mod interop;
 pub mod raster;
 pub mod shader;
@@ -40,6 +52,7 @@ pub mod texture_desc;
 pub mod texture_pool;
 pub mod transfer;
 pub mod translate;
+pub mod vram_allowance;
 
 // `interop` is deliberately absent from the re-exports below: reaching the
 // backend, in either direction, should read as leaving the abstraction, so
@@ -48,6 +61,7 @@ pub mod translate;
 // concerns with two different allowed sets (`gpu-native-handle-escape`,
 // `gpu-device-sharing`).
 pub use binding::{BindingDesc, BindingKind, ShaderVisibility};
+pub use buffer_pool::{BufferKey, BufferPool, BufferUsage, PooledBuffer};
 pub use compute::{ComputePipeline, workgroup_count, workgroup_count_2d};
 pub use device::{
     AdapterInfo, DeviceType, GpuBackend, GpuContext, GpuDeviceSnapshot, GpuDeviceState,
@@ -56,12 +70,14 @@ pub use device::{
 pub use dispatch::{ComputeDispatch, DispatchSnapshot, QuadDraw, QuadRun, TextureBinding};
 pub use error::{GpuError, GpuResult};
 pub use frame::GpuFrameBuffer;
+pub use geometry::{GpuColumn, GpuGeometry, column_stride, column_wgsl_type};
 pub use raster::{BlendMode, ColorTarget, RasterPipeline};
 pub use shader::{CompiledShader, ShaderManager, validate_wgsl};
 pub use texture_desc::{TextureFormat, TextureUsage};
 pub use texture_pool::{LruBudget, PooledTexture, TextureKey, TexturePool};
 pub use transfer::{
-    PendingReadback, begin_read_texture, padded_bytes_per_row, read_texture, read_texture_shared,
-    upload_texture,
+    PendingReadback, begin_read_buffer, begin_read_texture, padded_bytes_per_row, read_buffer,
+    read_texture, read_texture_shared, upload_buffer, upload_texture,
 };
 pub use translate::{ShaderTarget, TranslatedShader, translate_wgsl};
+pub use vram_allowance::VramAllowance;

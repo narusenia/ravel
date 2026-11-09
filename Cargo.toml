@@ -135,6 +135,8 @@ tobj = { version = "4", default-features = false }
 # Already in the tree at 0.22.1 (decodes the `data:` buffers of a glTF); `alloc` is the
 # only feature the `Vec` decoder needs.
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+# Already in the tree at 2.3.2 (decodes the `%XX` escapes of a glTF buffer URI).
+percent-encoding = { version = "2", default-features = false, features = ["alloc"] }
 log = "0.4"
 sha2 = "0.10"
 notify = "8"

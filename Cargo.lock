@@ -6173,6 +6173,7 @@ dependencies = [
  "bytemuck",
  "gltf",
  "log",
+ "percent-encoding",
  "pollster 0.4.0",
  "ravel-core",
  "ravel-gpu",

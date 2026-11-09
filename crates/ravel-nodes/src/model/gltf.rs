@@ -85,7 +85,7 @@ fn buffers(
                         .decode(encoded)
                         .map_err(|error| anyhow::anyhow!("invalid base64 buffer: {error}"))?
                 }
-                None => std::fs::read(directory.join(uri))
+                None => std::fs::read(external_buffer_path(directory, uri)?)
                     .with_context(|| format!("cannot read buffer file {uri}"))?,
             },
         };
@@ -99,6 +99,26 @@ fn buffers(
         out.push(data);
     }
     Ok(out)
+}
+
+/// Where a glTF buffer URI points: a relative reference resolved beside the
+/// model, with `%XX` escapes decoded. A URI that leaves the model's directory
+/// (an absolute path, a `..` component, a scheme other than `data:`) is
+/// refused, so opening a model never reads an arbitrary file into a mesh.
+fn external_buffer_path(directory: &Path, uri: &str) -> anyhow::Result<std::path::PathBuf> {
+    use std::path::Component;
+    let decoded = percent_encoding::percent_decode_str(uri)
+        .decode_utf8()
+        .with_context(|| format!("buffer URI {uri} is not UTF-8 once decoded"))?;
+    let relative = Path::new(decoded.as_ref());
+    ensure!(
+        !decoded.contains(':')
+            && relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_) | Component::CurDir)),
+        "buffer URI {uri} points outside the model's folder"
+    );
+    Ok(directory.join(relative))
 }
 
 struct Converter {
@@ -199,5 +219,41 @@ fn transform_of(node: &gltf::Node) -> Transform3D {
         ],
         scale,
         pivot: [0.0; 3],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_buffer_uri_resolves_beside_the_model_with_escapes_decoded() {
+        let dir = Path::new("/models/ship");
+        assert_eq!(
+            external_buffer_path(dir, "mesh%20data.bin").unwrap(),
+            dir.join("mesh data.bin")
+        );
+        assert_eq!(
+            external_buffer_path(dir, "./parts/hull.bin").unwrap(),
+            dir.join("./parts/hull.bin")
+        );
+    }
+
+    #[test]
+    fn a_buffer_uri_that_leaves_the_model_folder_is_refused() {
+        let dir = Path::new("/models/ship");
+        for uri in [
+            "../secret.bin",
+            "parts/../../secret.bin",
+            "%2E%2E/secret.bin",
+            "/etc/passwd",
+            "file:///etc/passwd",
+            "C:/secret.bin",
+        ] {
+            assert!(
+                external_buffer_path(dir, uri).is_err(),
+                "{uri} was accepted"
+            );
+        }
     }
 }

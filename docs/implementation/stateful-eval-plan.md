@@ -332,3 +332,57 @@ spec の制約どおり。sim の下流に sim を繋いだ場合は評価エラ
 - 前提ハッシュは `bincode` による `parameters` の構造的な直列化（float は
   生のビット）で、`Debug` 文字列ではない。範囲は変えていない。
 - 性能: `perf-baseline.md` の「ステートレス評価パスの退行確認」。
+
+### 単位 5（SIM-5）
+
+- **束縛の表現**: `Bindings` は値の列（`values`）と、任意の `Rebind`
+  （別のフレームで値を作り直す手段）を持つ型になった。`evaluate_sub` を呼ぶ
+  プロセッサが `Bindings::rebindable(values, Arc<dyn Rebind>)` を渡す。
+  作る 4 つのうち `subnet`（`SubnetPins`）・`geometry.iterate`（`PieceAt`）・
+  `comp.network`（`LowerStack`、調整レイヤーの `source`）は `Rebind` を渡し、
+  `layer.ref` は何も束縛しないので渡さない。`Rebind::rebind` は
+  `EvalScope::process_args_at`（処理中のノードの入力とパラメータを任意の
+  フレームで解決する。`sim_inputs_at` の一般化）で入力を引き直し、最初に値を
+  作った関数をそのまま呼ぶ（規則は 1 つ）。
+- **作ったスコープへの戻り方**: `evaluate_sub` が最初に入るとき `Anchor`
+  （path / active_scopes / bindings / processing の各スタックの深さと path_id）
+  を `Bindings` に記録し、シフトされた写しも持ち回る。`bindings_at(at)` は
+  `at_anchor` で各スタックを anchor まで切り戻して（`split_off`、戻りで必ず
+  復元）`rebind` を走らせる。作ったノード・グラフ・パス・束縛がそのまま
+  見えるので、`evaluate_input_at` が辺を引くグラフも `scope_owners` のオーナーも
+  正しく、引き直しのキャッシュは `<作ったスコープ>/TimeShift(作ったノード, f)`
+  に入る（現在フレームのエントリを汚さない。作ったノードの dirty が
+  `drop_time_shift_scopes` で道連れに落とす）。再入の循環検出は切り戻した
+  `active_scopes` で行う。`evaluate_time_shifted` は `bindings_at(shifted)` を
+  読む。同じフレーム・時刻なら引き直さず、シフトなしの評価は
+  `Arc` 1 個（`Rebind`）と `Anchor` の記録が増えるだけ。
+- **前提**: `sim_premise` が上流の走査で `net.in` に届いたら、束縛を作った
+  スコープのノード（見出しと上流。`comp.network` なら自レイヤーのシェルも。リマップ・配置が
+  `LowerStack` の写像に入るため。内側のネットワークは sim 自身のスコープなので
+  入れない）を同じ規則でハッシュし、そこでも `net.in` に届く限り外へ辿る。
+  走査した各ノードは `scan_reads` で文書への読みを集める: `layer.ref`（参照先
+  レイヤーのネットワークとシェル、参照の閉包。対象が静的に決まらなければ
+  コンポの全レイヤー）、`layer.info`（コンポ単位のシェル）、`comp.info`（コンポの項目とレイヤー数、読む側レイヤー自身のシェル。兄弟レイヤーのシェル編集では落ちない）、
+  殻ノード（ID を復号。`comp.network` ならレイヤーのネットワークも）。集めた
+  読みは文書から 1 回ハッシュする（`ExternalReads::hash_from`）。何も読まない
+  sim のハッシュは従来のまま。
+- **引く時点の照合**: 外を読む `Premise` は `ExternalStamp`（文書の `Arc` と、
+  束縛を作ったスコープごとのグラフ）を持ち、高速経路（`SimCache::known`）は
+  グラフに加えてそれらが現在と同一オブジェクトであることも確かめる。
+  外を読まないトラックの経路は変わらない。
+- **無効化エポック**: 処理系の差し替えや素材の再読み込みは構造ハッシュに映らない
+  ので、`Evaluator` がノードごとの無効化エポック（`invalidate_node` と、それを
+  呼ぶ `register`）を持ち、`sim_premise` が上流で走査したノード（サブネット内の
+  ノードと、束縛を作ったスコープ側の走査を含む）のエポックをハッシュする。
+  エポックを持つノードだけが寄与するので、無関係なノードの追加で値は動かない。
+  `Premise` は作成時の時計を持ち、高速経路は時計が進んでいれば再計算する（落とす
+  のは再計算の結果が変わったときだけ）。これで「`invalidate_node` が落とすのは
+  そのノード自身のトラックだけ」という従来の制約は無くなった（`invalidate_node` は
+  引き続き自分のトラックも即座に落とす）。
+- **調整レイヤーの写像**: `LowerStack` は、ネットワーク内の時間でのフレーム差
+  `d` を、コンポ時間の同じ `d` フレームとして `source` に適用する。タイムリマップ
+  には逆写像が無いので、リマップ後のフレームからコンポ時間へ戻す方式は取れず、
+  リマップの有無で規則を変えない（リマップ下でもこの規則を固定するテストがある）。
+  `geometry.iterate` の `PieceAt` は、シフト先のフレームでピースが足りなければ空の
+  ジオメトリを渡す。シェル読みの比較はコンポ単位（別レイヤーのシェル編集でも外を
+  読む sim は落ちる。`invalidate_shell_readers` と同じ粒度）。

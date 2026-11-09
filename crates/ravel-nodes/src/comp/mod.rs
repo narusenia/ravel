@@ -56,7 +56,10 @@ pub use transform::{CompTransformGpuProcessor, CompTransformProcessor};
 
 use ravel_core::composition::compile::{NodeRole, decode_deterministic_node_id};
 use ravel_core::composition::{Composition, Layer};
-use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, PathSegment, ResolvedParams};
+use ravel_core::eval::{
+    BindingValues, Bindings, EvalContext, EvalError, EvalScope, NodeProcessor, PathSegment, Rebind,
+    ResolvedParams,
+};
 use ravel_core::graph::Node;
 use ravel_core::network as net;
 use ravel_core::types::{FrameBuffer, NodeData, PortRecord};
@@ -191,6 +194,43 @@ fn layer_network_context_remapped(
 // comp.network — layer network boundary (REQ-LAYER-006/007)
 // ===========================================================================
 
+/// The `source` binding of an adjustment layer's network, if the lower stack
+/// has anything.
+fn source_binding(source: Option<Arc<dyn NodeData>>) -> BindingValues {
+    source
+        .map(|source| (net::PORT_SOURCE.to_string(), source))
+        .into_iter()
+        .collect()
+}
+
+/// The composited lower stack an adjustment layer reads, at another frame.
+///
+/// The rule: a shift inside the layer's network moves `source` by the same
+/// number of frames **in composition time**. `at` is in the network's own time,
+/// so the frame difference from the entry context is applied to the composition
+/// frame. A time remap has no inverse, which is why the rule is a delta and not
+/// a map back from the remapped frame; it holds with or without a remap.
+struct LowerStack {
+    /// The context the shell node was processed under (composition time).
+    outer: EvalContext,
+    /// The context the layer's network was entered with (layer-local time).
+    inner: EvalContext,
+}
+
+impl Rebind for LowerStack {
+    fn rebind(
+        &self,
+        scope: &mut dyn EvalScope,
+        at: &EvalContext,
+    ) -> Result<BindingValues, EvalError> {
+        let delta = at.frame as i64 - self.inner.frame as i64;
+        let frame = (self.outer.frame as i64 + delta).max(0) as u64;
+        let outer = self.outer.at_frame(frame);
+        let args = scope.process_args_at(&outer)?;
+        Ok(source_binding(args.inputs.first().and_then(|i| i.clone())))
+    }
+}
+
 /// Evaluates the owning layer's network under layer-local time and returns
 /// the network's `frame` output. Outside the layer's display interval the
 /// network is not evaluated and a transparent frame is produced.
@@ -235,12 +275,19 @@ impl NodeProcessor for CompNetworkProcessor {
 
         let local = layer_network_context_remapped(&comp, layer, local_frame, ctx, resolution);
 
-        let mut bindings: Vec<(String, Arc<dyn NodeData>)> = Vec::new();
-        if layer.adjustment
-            && let Some(source) = inputs.first().and_then(|i| i.clone())
-        {
-            bindings.push((net::PORT_SOURCE.to_string(), source));
-        }
+        // An adjustment layer's network receives the composited lower stack.
+        let bindings = if layer.adjustment {
+            let source = inputs.first().and_then(|i| i.clone());
+            Bindings::rebindable(
+                source_binding(source),
+                Arc::new(LowerStack {
+                    outer: *ctx,
+                    inner: local,
+                }),
+            )
+        } else {
+            Bindings::default()
+        };
 
         let comp_id = comp.id;
         let value = scope.evaluate_sub(
@@ -329,5 +376,330 @@ mod tests {
         // A layer starting at comp frame 12 sees its own frame 8.5.
         let local = layer_network_context(&comp, 20 - 12, &parent, (1920, 1080));
         assert!((local.sample_frame() - 8.5).abs() < 1e-9);
+    }
+
+    // ---- an adjustment layer's `source`, read at the frame being pulled -----
+
+    use crate::net::{NetInProcessor, NetOutProcessor};
+    use crate::sim_test_util::{Accumulate, FrameBufferValue, number_of};
+    use ravel_core::composition::Document;
+    use ravel_core::eval::{Evaluator, stateful_processor};
+    use ravel_core::graph::Graph;
+    use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
+
+    const LOWER: u64 = 1;
+    const IN: u64 = 10;
+    const OUT: u64 = 11;
+    const SIM: u64 = 12;
+
+    fn edge(graph: Graph, id: u64, from: u64, to: u64) -> Graph {
+        graph
+            .add_edge(
+                EdgeId::new(id),
+                NodeId::new(from),
+                OutputPortIndex(0),
+                NodeId::new(to),
+                InputPortIndex(0),
+            )
+            .unwrap()
+    }
+
+    /// `net.in(source) -> sim -> net.out(frame)`.
+    fn adjustment_network() -> Graph {
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(IN), net::NET_IN_TYPE_KEY)
+                    .with_output(net::PORT_SOURCE, DataTypeId::FRAME_BUFFER),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(SIM), "test.sim")
+                    .with_input("a", &[DataTypeId::FRAME_BUFFER])
+                    .with_output("out", DataTypeId::FRAME_BUFFER),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(OUT), net::NET_OUT_TYPE_KEY)
+                    .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+            )
+            .unwrap();
+        edge(edge(graph, 100, IN, SIM), 101, SIM, OUT)
+    }
+
+    /// The root graph `lower -> comp.network` of a composition holding one
+    /// adjustment layer starting at comp frame `start`, an evaluator that
+    /// knows it, and the network node to pull.
+    fn adjustment_setup(start: i64, ev: Evaluator) -> (Graph, NodeId, Evaluator) {
+        adjustment_setup_remapped(start, None, ev)
+    }
+
+    /// The one adjustment layer (id 1, constant `remap`) and a sibling layer
+    /// (id 7) whose shell starts at `sibling_start` and whose network is empty.
+    fn adjustment_document(start: i64, remap: Option<f32>, sibling_start: i64) -> Document {
+        let comp_id = ravel_core::id::CompId::new(1);
+        let mut layer = Layer::new(
+            ravel_core::id::LayerId::new(1),
+            "Adjust",
+            adjustment_network(),
+        )
+        .with_time(start, 0, 300);
+        layer.adjustment = true;
+        layer.time_remap = remap.map(ravel_core::animation::channel::AnimationChannel::constant);
+        let sibling = Layer::new(ravel_core::id::LayerId::new(7), "Sibling", Graph::new())
+            .with_time(sibling_start, 0, 300);
+        Document::default().with_composition(
+            Composition::new(comp_id, "C", (1, 1), FPS, 300)
+                .add_layer(sibling)
+                .add_layer(layer),
+        )
+    }
+
+    fn adjustment_setup_remapped(
+        start: i64,
+        remap: Option<f32>,
+        ev: Evaluator,
+    ) -> (Graph, NodeId, Evaluator) {
+        let comp_id = ravel_core::id::CompId::new(1);
+        let layer_id = ravel_core::id::LayerId::new(1);
+        let document = adjustment_document(start, remap, 0);
+        let network_id = ravel_core::composition::compile::deterministic_node_id(
+            comp_id,
+            layer_id,
+            NodeRole::Network,
+        );
+        let network_node = Node::new(network_id, "comp.network")
+            .with_input("source", &[DataTypeId::FRAME_BUFFER])
+            .with_output("output", DataTypeId::FRAME_BUFFER);
+        let root = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(LOWER), "test.frame")
+                    .with_output("out", DataTypeId::FRAME_BUFFER),
+            )
+            .unwrap()
+            .add_node(network_node)
+            .unwrap();
+        let root = edge(root, 1, LOWER, network_id.raw());
+
+        let mut ev = ev;
+        ev.register(NodeId::new(LOWER), Arc::new(FrameBufferValue(10.0)));
+        ev.register(network_id, Arc::new(CompNetworkProcessor));
+        ev.register(NodeId::new(IN), Arc::new(NetInProcessor));
+        ev.register(NodeId::new(OUT), Arc::new(NetOutProcessor));
+        ev.register(
+            NodeId::new(SIM),
+            stateful_processor(Accumulate {
+                as_frame: true,
+                ..Accumulate::default()
+            }),
+        );
+        ev.set_document(Arc::new(document));
+        (root, network_id, ev)
+    }
+
+    #[test]
+    fn a_sim_reading_the_adjustment_source_gets_the_layer_under_it_at_each_step() {
+        let (root, network, mut ev) = adjustment_setup(4, Evaluator::new());
+
+        // Comp frame 9 is the layer's local frame 5, so the sim's steps 0..=5
+        // are comp frames 4..=9 and the lower layer there is 10 * frame.
+        let ctx = EvalContext::new(9, FPS, (1, 1));
+        let out = ev.evaluate(&root, network, &ctx).unwrap();
+
+        // Every step reading frame 9's stack would give 6 * 90 = 540.
+        let expected: f32 = (4..=9).map(|f| 10.0 * f as f32).sum();
+        assert_eq!(number_of(out.as_ref()), expected);
+    }
+
+    // ---- the premise includes the layers under an adjustment layer ----------
+
+    const LOWER_LAYER: u64 = 2;
+    const LOWER_VALUE: u64 = 30;
+    const LOWER_OUT: u64 = 31;
+
+    /// A layer whose network is `test.frame -> net.out(frame)`, plus whatever
+    /// `extra` nodes the test adds to it.
+    fn lower_network(extra: u64) -> Graph {
+        let graph = Graph::new()
+            .add_node(
+                Node::new(NodeId::new(LOWER_VALUE), "test.frame")
+                    .with_output("out", DataTypeId::FRAME_BUFFER),
+            )
+            .unwrap()
+            .add_node(
+                Node::new(NodeId::new(LOWER_OUT), net::NET_OUT_TYPE_KEY)
+                    .with_input(net::PORT_FRAME, &[DataTypeId::FRAME_BUFFER]),
+            )
+            .unwrap();
+        let graph = edge(graph, 300, LOWER_VALUE, LOWER_OUT);
+        if extra == 0 {
+            return graph;
+        }
+        graph
+            .add_node(
+                Node::new(NodeId::new(extra), "test.frame")
+                    .with_output("out", DataTypeId::FRAME_BUFFER),
+            )
+            .unwrap()
+    }
+
+    fn two_layer_document(lower: Graph) -> Document {
+        let comp_id = ravel_core::id::CompId::new(1);
+        let mut adjust = Layer::new(
+            ravel_core::id::LayerId::new(1),
+            "Adjust",
+            adjustment_network(),
+        )
+        .with_time(0, 0, 300);
+        adjust.adjustment = true;
+        Document::default().with_composition(
+            Composition::new(comp_id, "C", (1, 1), FPS, 300)
+                .add_layer(
+                    Layer::new(ravel_core::id::LayerId::new(LOWER_LAYER), "Lower", lower)
+                        .with_time(0, 0, 300),
+                )
+                .add_layer(adjust),
+        )
+    }
+
+    /// `lower.network -> adjust.network` in the root graph, both compiled-style
+    /// shell nodes, the adjustment layer's sim counting its restarts.
+    fn stack_setup(initials: &Accumulate) -> (Graph, NodeId, Evaluator) {
+        let comp_id = ravel_core::id::CompId::new(1);
+        let network_of = |layer: u64| {
+            ravel_core::composition::compile::deterministic_node_id(
+                comp_id,
+                ravel_core::id::LayerId::new(layer),
+                NodeRole::Network,
+            )
+        };
+        let shell_node = |id: NodeId| {
+            Node::new(id, "comp.network")
+                .with_input("source", &[DataTypeId::FRAME_BUFFER])
+                .with_output("output", DataTypeId::FRAME_BUFFER)
+        };
+        let (lower, adjust) = (network_of(LOWER_LAYER), network_of(1));
+        let root = Graph::new()
+            .add_node(shell_node(lower))
+            .unwrap()
+            .add_node(shell_node(adjust))
+            .unwrap();
+        let root = edge(root, 1, lower.raw(), adjust.raw());
+
+        let mut ev = Evaluator::new();
+        ev.register(lower, Arc::new(CompNetworkProcessor));
+        ev.register(adjust, Arc::new(CompNetworkProcessor));
+        ev.register(NodeId::new(LOWER_VALUE), Arc::new(FrameBufferValue(10.0)));
+        ev.register(NodeId::new(LOWER_OUT), Arc::new(NetOutProcessor));
+        ev.register(NodeId::new(IN), Arc::new(NetInProcessor));
+        ev.register(NodeId::new(OUT), Arc::new(NetOutProcessor));
+        ev.register(
+            NodeId::new(SIM),
+            stateful_processor(Accumulate {
+                as_frame: true,
+                ..initials.clone()
+            }),
+        );
+        ev.set_document(Arc::new(two_layer_document(lower_network(0))));
+        (root, adjust, ev)
+    }
+
+    fn adjust_starts(
+        ev: &mut Evaluator,
+        root: &Graph,
+        node: NodeId,
+        initials: &Accumulate,
+        frame: u64,
+    ) -> usize {
+        ev.evaluate(root, node, &EvalContext::new(frame, FPS, (1, 1)))
+            .unwrap();
+        initials.initials.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[test]
+    fn editing_a_layer_under_an_adjustment_layer_discards_its_sims_track() {
+        let counter = Accumulate::default();
+        let (root, adjust, mut ev) = stack_setup(&counter);
+        assert_eq!(adjust_starts(&mut ev, &root, adjust, &counter, 6), 1);
+
+        // The layer under the adjustment layer changes its network. The
+        // adjustment layer's own network is the same object.
+        ev.set_document(Arc::new(two_layer_document(lower_network(99))));
+
+        assert_eq!(
+            adjust_starts(&mut ev, &root, adjust, &counter, 8),
+            2,
+            "the track outlived an edit to a layer under the adjustment layer"
+        );
+    }
+
+    #[test]
+    fn an_edit_that_leaves_the_stack_alone_keeps_the_adjustment_sims_track() {
+        let counter = Accumulate::default();
+        let (root, adjust, mut ev) = stack_setup(&counter);
+        assert_eq!(adjust_starts(&mut ev, &root, adjust, &counter, 6), 1);
+
+        // The same document, rebuilt: every network and shell is equal.
+        ev.set_document(Arc::new(two_layer_document(lower_network(0))));
+
+        assert_eq!(adjust_starts(&mut ev, &root, adjust, &counter, 8), 1);
+    }
+
+    /// Under a time remap the shifted `source` still moves by the same frame
+    /// delta in composition time (a remap has no inverse to map back through).
+    #[test]
+    fn a_remapped_adjustment_layer_shifts_its_source_by_the_frame_delta() {
+        // The remap pins the network at its frame 5 whatever the comp frame, so
+        // the sim's steps 0..=5 are at deltas -5..=0 from the entry frame.
+        let (root, network, mut ev) = adjustment_setup_remapped(0, Some(5.0), Evaluator::new());
+
+        let ctx = EvalContext::new(9, FPS, (1, 1));
+        let out = ev.evaluate(&root, network, &ctx).unwrap();
+
+        // Comp frames 9 + (k - 5) for k in 0..=5, i.e. 4..=9.
+        let expected: f32 = (4..=9).map(|f| 10.0 * f as f32).sum();
+        assert_eq!(number_of(out.as_ref()), expected);
+    }
+
+    #[test]
+    fn editing_the_adjustment_layers_remap_discards_its_sims_track() {
+        let counter = Accumulate::default();
+        let (root, adjust, mut ev) = adjustment_setup_remapped(0, Some(4.0), Evaluator::new());
+        // Re-register the counter-carrying sim (the setup's has its own).
+        ev.register(
+            NodeId::new(SIM),
+            stateful_processor(Accumulate {
+                as_frame: true,
+                ..counter.clone()
+            }),
+        );
+        assert_eq!(adjust_starts(&mut ev, &root, adjust, &counter, 9), 1);
+
+        // The shell changes and the network does not: the rebind maps each
+        // simulated frame through the remap, so the states are different.
+        ev.set_document(Arc::new(adjustment_document(0, Some(5.0), 0)));
+
+        assert_eq!(
+            adjust_starts(&mut ev, &root, adjust, &counter, 9),
+            2,
+            "the track outlived an edit to the layer's own remap"
+        );
+    }
+
+    #[test]
+    fn editing_a_sibling_layer_keeps_the_adjustment_sims_track() {
+        let counter = Accumulate::default();
+        let (root, adjust, mut ev) = adjustment_setup_remapped(0, Some(4.0), Evaluator::new());
+        ev.register(
+            NodeId::new(SIM),
+            stateful_processor(Accumulate {
+                as_frame: true,
+                ..counter.clone()
+            }),
+        );
+        assert_eq!(adjust_starts(&mut ev, &root, adjust, &counter, 9), 1);
+
+        ev.set_document(Arc::new(adjustment_document(0, Some(4.0), 12)));
+
+        assert_eq!(adjust_starts(&mut ev, &root, adjust, &counter, 9), 1);
     }
 }

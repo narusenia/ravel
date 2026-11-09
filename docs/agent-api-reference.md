@@ -422,10 +422,14 @@ trait NodeProcessor: Send + Sync {
 trait EvalScope {                                 // implemented by Evaluator
     fn evaluate_sub(&mut self, segment: PathSegment, graph: &Graph,
         output: NodeId, ctx: &EvalContext,
-        bindings: Vec<(String, Arc<dyn NodeData>)>) -> Result<Arc<dyn NodeData>, EvalError>;
+        bindings: Bindings) -> Result<Arc<dyn NodeData>, EvalError>;
+        // Bindings = values + an optional Rebind (how to produce them at another
+        // frame). Bindings::new(vec) / Vec.into() = plain values;
+        // Bindings::rebindable(vec, Arc<dyn Rebind>) = re-pullable. Call inside process
     fn evaluate_time_shifted(&mut self, shift_node: NodeId, frame: u64, graph: &Graph,
         upstream: NodeId, ctx: &EvalContext) -> Result<Arc<dyn NodeData>, EvalError>;
-        // `upstream` at `frame` as TimeShift(shift_node, frame): own cache entries
+        // `upstream` at `frame` as TimeShift(shift_node, frame): own cache entries.
+        // The scope's bindings are read AT `frame` (bindings_at), not carried over
     fn evaluate_input_at(&mut self, node: &Node, port: usize, frame: u64,
         ctx: &EvalContext) -> Result<Option<Arc<dyn NodeData>>, EvalError>;
         // the same for "what is wired into my input `port`" (None = unwired); the
@@ -434,10 +438,26 @@ trait EvalScope {                                 // implemented by Evaluator
         stepper: &dyn SimStepper) -> Result<SimState, EvalError>;
         // the state of a stateful node at ctx.frame, filling its track; only
         // StatefulAdapter calls it. The default refuses (no sim cache)
-    fn bindings(&self) -> &[(String, Arc<dyn NodeData>)];
+    fn bindings(&self) -> &[(String, Arc<dyn NodeData>)];   // as of the entry frame
+    fn bindings_at(&mut self, at: &EvalContext) -> Result<Bindings, EvalError>;
+        // the same scope's bindings for `at`: a Rebind re-pulls them in the scope
+        // that produced them (stacks cut back to its Anchor), cached under
+        // TimeShift(producer, frame); without a Rebind the values carry over
+    fn process_args_at(&mut self, at: &EvalContext) -> Result<ProcessArgs, EvalError>;
+        // the node being processed: Arc<Node> + inputs + ResolvedParams for `at`.
+        // What a Rebind::rebind calls; default refuses
     fn document(&self) -> Option<Arc<Document>>;
     fn path(&self) -> &[PathSegment];   // current ownership path (layer.ref
                                         // finds its enclosing layer here)
+}
+
+trait Rebind: Send + Sync {                       // implemented by the scope's producer
+    fn rebind(&self, scope: &mut dyn EvalScope, at: &EvalContext)
+        -> Result<BindingValues, EvalError>;
+        // `at` is in the INNER scope's time (a layer network maps it back to comp
+        // time itself). Build the values with the same fn process used. The four
+        // producers: SubnetPins (subnet.rs), PieceAt (iterate.rs), LowerStack
+        // (comp/mod.rs, adjustment `source`); layer.ref binds nothing
 }
 
 // Stateful nodes (REQ-CORE-011, ravel-core/src/eval/sim.rs): a value that is
@@ -467,7 +487,8 @@ Evaluator
     .has_provisional_sim() / .settle_provisional()
     .set_sim_cancel(Option<CancelCheck>)  // a fill gives way between frames
     // A track is dropped when its upstream premise hash changes (checked on
-    // every pull), by invalidate_node / invalidate_all / reset, and — for a
+    // every pull; the hash also covers what the upstream reads outside its scope:
+    // a net.in's producing scope, layer.ref targets, shell readers; and per-node invalidation epochs, bumped by invalidate_node / register), by invalidate_all / reset (and the node's own track by invalidate_node), and — for a
     // deleted node or layer — by set_document. A sim downstream of a sim is
     // an EvalError::ProcessFailed.
 
@@ -2779,7 +2800,7 @@ processor runs, and **§P** means the section's `translate` also carries
 | `geometry.transform` | CPU | scale→rotate→translate around a pivot (`use_centroid` default on = bbox center, else the `pivot` Channel3); `translate` / `scale` / `pivot` are Channel3 and `rotation` is a Channel3 of Euler degrees; a `Vec2` `P` uses only the xy/Z components (the rest are inert, identity fast path included), a `Vec3` `P` uses all three with the fixed ZYX Euler order; transforms point `P` and instance placement (`P`, then the node's linear part composed EXACTLY with each instance's own through `InstanceTransform::compose`, so a non-uniform scale over a turned instance writes a `shear` column; `rot` / `scale` / `shear` are written only when already present or changed); CoW columns |
 | `geometry.from_image` §P | CPU | FrameBuffer → Geometry carrying it as one instance source: exactly one instance at `P = (0,0)` with `index = 0`, no points and no primitives. No parameters — the rectangle is the source's own pixel resolution centred on the origin, and placing or resizing a copy is the instance attributes the geometry operators already write. The frame is wrapped in whichever representation it arrived in, so a GPU-resident frame stays resident |
 | `geometry.merge` §P | CPU | concatenates A then B: points, primitives (vertex ranges re-based; meshes also re-base their index ranges and the index buffers are concatenated), instances; attribute union, a missing column filled with its absent value (`geometry::absent`) and the typed zero for unreserved names; same-name type conflict and distinct instance sources are errors; empty/unconnected side passes the other through |
-| `geometry.iterate` | CPU | per-piece loop (REQ-CORE-013): `ops::split_by_piece` on the `attribute` param (default `piece`), the body network once per piece through `EvalScope::evaluate_sub` under `PathSegment::Iteration(node, i)`, results merged with `geometry.merge`'s `merge_pair`. The body is the node's own `Node::subnet` (`net.in` outputs `geometry` + `index`, `net.out` takes `geometry`; seeded by `network::seed_iterate_node`), so the node editor dives in as for a subnet and `register_all_processors` recurses into it. More pieces than `max_iterations` (default `MAX_ITERATIONS_DEFAULT`) and a body that reaches another iteration are evaluation errors, never truncation. Dirtying the node drops every `Iteration` scope it owns (`Evaluator::drop_iteration_scopes`) |
+| `geometry.iterate` | CPU | per-piece loop (REQ-CORE-013): `ops::split_by_piece` on the `attribute` param (default `piece`), the body network once per piece through `EvalScope::evaluate_sub` under `PathSegment::Iteration(node, i)`, results merged with `geometry.merge`'s `merge_pair`. The body is the node's own `Node::subnet` (`net.in` outputs `geometry` + `index`, `net.out` takes `geometry`; seeded by `network::seed_iterate_node`), so the node editor dives in as for a subnet and `register_all_processors` recurses into it. More pieces than `max_iterations` (default `MAX_ITERATIONS_DEFAULT`) and a body that reaches another iteration are evaluation errors, never truncation. Dirtying the node drops every `Iteration` scope it owns (`Evaluator::drop_iteration_scopes`). Under a time shift the piece is re-cut from the input at the shifted frame (`PieceAt`); a piece that no longer exists there is an empty geometry |
 | `scene.add` | CPU | places one value in a `Scene` with a `Transform3D`. `object` accepts GEOMETRY / SCENE — a scene on that port is the **nesting** case, which is how a transform hierarchy is built; `scene` is the scene to add into and may be unconnected, so a chain accumulates. A frame buffer is **not** placeable: an image reaches a scene as a geometry carrying it, and the processor fails with an error pointing at `geometry.from_image`. `translate` / `rotation` / `scale` / `pivot` are Channel3, same keys as `geometry.transform`; `rotation` is Euler degrees, extrinsic ZYX. Never touches `P` — projection is `scene.render`'s |
 | `scene.merge` | CPU | union of two scenes, objects, cameras and lights alike; a missing side passes the other through |
 | `scene.camera` | CPU | source node emitting a `Scene` with exactly one `Camera` and no objects, so `scene.merge` combines cameras and objects with one node. `position` / `target` are Channel3, `projection` is a `perspective`/`orthographic` enum, `fov` / `ortho_height` / `near` / `far` are Floats (an unknown `projection` falls back to perspective rather than failing). The aspect ratio is **not** baked in here — it is read from `comp_resolution` when a projection matrix is asked for |

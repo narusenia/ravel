@@ -15,7 +15,9 @@
 //! evaluator's scope re-entry guard additionally fails cyclic pulls at
 //! runtime instead of recursing forever.
 
-use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, PathSegment, ResolvedParams};
+use ravel_core::eval::{
+    Bindings, EvalContext, EvalScope, NodeProcessor, PathSegment, ResolvedParams,
+};
 use ravel_core::graph::Node;
 use ravel_core::id::LayerId;
 use ravel_core::network as net;
@@ -116,7 +118,9 @@ impl NodeProcessor for LayerRefProcessor {
             &target.network,
             out_node.id,
             &local,
-            Vec::new(),
+            // Nothing is bound into the target's network, so a shifted pull
+            // inside it has nothing to re-pull.
+            Bindings::default(),
         )?;
         value
             .downcast_ref::<PortRecord>()

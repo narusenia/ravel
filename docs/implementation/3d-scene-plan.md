@@ -568,11 +568,18 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
   相対パス保存と再リンクもそのまま（`.ravprj` の形式変更なし）。
   `AssetKind` は拡張していない — 拡張子から `Container` と推定されるだけで、
   `mesh.import` は種別を読まない。**代償**: メディアビンの「レイヤーとして
-  追加」はモデルに `media` レイヤーを作る（透明フレームになる）
+  追加」は `media` ではなく `model_layer_template()`（`mesh.import` →
+  `scene.add`（スケール `MODEL_UNIT_SCALE` = 200。モデルはメートル単位で
+  シーン空間はピクセル尺度のため）→ `scene.merge` + 既定 `scene.camera` →
+  `scene.render`）を使う。判定は永続化された path の拡張子
+  （`MediaAssetEntry::is_model`、取り込み経路と同じ `is_model_path`）
 - **失敗の表示**: 取り込み時に `probe_path` が `model::load` で全文を読み、
   失敗は `ImportFailure`（`model load failed: …`）→
   `ProjectEvent::MediaImportSkipped` → 既存の警告通知。評価時の失敗（ファイル
   消失・オフライン）は `media` と同じく空出力 + アセットごとに 1 回の警告
+- 法線は 1 ジオメトリ内で全か無か: ある run が法線を持てば、持たない run は
+  三角形から面積加重の頂点法線を計算して `N` を `P` と同じ長さに保つ。どの run
+  も持たなければ `N` 列は無い（部分的な `N` はゼロ法線で照らすため）
 - 評価キャッシュはパス + `content_revision` で保持（上書きで再読込）
 - 非対象のまま: UV・頂点カラー・マテリアル・テクスチャ・`TRIANGLES` 以外の
   プリミティブ・percent-encoded な外部 `.bin` URI・スパース以外の拡張

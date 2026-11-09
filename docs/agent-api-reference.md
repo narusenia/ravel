@@ -2875,7 +2875,11 @@ Unknown type keys are skipped silently (plugin space).
   `add_media_layers(doc, comp, &registry, &[AssetId], start_frame)
   -> (Document, Vec<LayerId>)` (the caller-facing one: template choice,
   length, and name derived from each already-imported asset; the whole batch
-  is **one** document, so a multi-asset drop is one undo step. Importing
+  is **one** document, so a multi-asset drop is one undo step. A model asset
+  (`MediaAssetEntry::is_model`, by extension) gets
+  `templates::model_layer_template()` — `mesh.import` → `scene.add` (scale
+  `MODEL_UNIT_SCALE`) → `scene.merge` with a default `scene.camera` →
+  `scene.render` — instead of the `media` one. Importing
   places nothing — `ProjectState::add_asset_layers` is the committing
   wrapper),
   `resolve_network(doc, &path)`, `replace_network(doc, &path, graph)`,

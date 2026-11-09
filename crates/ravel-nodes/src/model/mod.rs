@@ -35,19 +35,7 @@ use ravel_core::types::Vec3;
 use std::ops::Range;
 use std::path::Path;
 
-/// File extensions [`load`] reads, lower case, without the dot.
-pub const MODEL_EXTENSIONS: [&str; 3] = ["gltf", "glb", "obj"];
-
-/// Whether `path` names a model file, by extension alone.
-pub fn is_model_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            MODEL_EXTENSIONS
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        })
-}
+pub use ravel_core::composition::{MODEL_EXTENSIONS, is_model_path};
 
 /// A glTF / OBJ vector — position or normal — in scene space.
 pub(crate) fn to_scene_space(v: [f32; 3]) -> [f32; 3] {
@@ -77,23 +65,23 @@ pub fn load(path: &Path) -> anyhow::Result<Scene> {
 }
 
 /// Collects the triangle runs of one geometry: one `P` column (and `N` when
-/// every run has normals) with a [`Primitive::Mesh`] per run.
+/// any run has normals) with a [`Primitive::Mesh`] per run.
+///
+/// Normals are all-or-nothing per geometry: when at least one run carries
+/// them, a run without gets **smooth normals computed from its triangles**
+/// (area-weighted vertex averages, so the winding decides the facing), which
+/// keeps the column the length of `P`; when none does, there is no `N`.
 #[derive(Default)]
 pub(crate) struct MeshBuilder {
     positions: Vec<Vec3>,
-    normals: Vec<Vec3>,
-    /// Every run so far supplied normals. One run without them drops the
-    /// column: a partly filled `N` would light the other runs with zeros.
-    normals_complete: bool,
+    /// Per run, its file normals, or `None` to be computed in `finish`.
+    run_normals: Vec<Option<Vec<[f32; 3]>>>,
     runs: Vec<(Range<usize>, Vec<u32>)>,
 }
 
 impl MeshBuilder {
     pub(crate) fn new() -> Self {
-        Self {
-            normals_complete: true,
-            ..Self::default()
-        }
+        Self::default()
     }
 
     /// Add one indexed triangle run. `positions` and `normals` are already in
@@ -125,12 +113,8 @@ impl MeshBuilder {
         let start = self.positions.len();
         self.positions
             .extend(positions.iter().map(|p| Vec3(p[0], p[1], p[2])));
-        match normals.filter(|n| n.len() == positions.len()) {
-            Some(normals) => self
-                .normals
-                .extend(normals.iter().map(|n| Vec3(n[0], n[1], n[2]))),
-            None => self.normals_complete = false,
-        }
+        self.run_normals
+            .push(normals.filter(|n| n.len() == positions.len()));
         self.runs.push((start..self.positions.len(), indices));
         Ok(())
     }
@@ -140,11 +124,27 @@ impl MeshBuilder {
         if self.runs.is_empty() {
             return Ok(None);
         }
+        let normals = if self.run_normals.iter().any(Option::is_some) {
+            let mut column = Vec::with_capacity(self.positions.len());
+            for ((verts, indices), given) in self.runs.iter().zip(self.run_normals) {
+                match given {
+                    Some(given) => column.extend(given.iter().map(|n| Vec3(n[0], n[1], n[2]))),
+                    None => column.extend(
+                        smooth_normals(&self.positions[verts.clone()], indices)
+                            .into_iter()
+                            .map(|n| Vec3(n[0], n[1], n[2])),
+                    ),
+                }
+            }
+            Some(column)
+        } else {
+            None
+        };
         let mut geometry = Geometry::from_points3(self.positions);
-        if self.normals_complete {
+        if let Some(normals) = normals {
             geometry
                 .points_mut()
-                .insert(names::N, AttributeArray::Vec3(self.normals))?;
+                .insert(names::N, AttributeArray::Vec3(normals))?;
         }
         for (verts, indices) in &self.runs {
             geometry.push_mesh(verts.clone(), indices);
@@ -152,6 +152,41 @@ impl MeshBuilder {
         geometry.validate()?;
         Ok(Some(geometry))
     }
+}
+
+/// Vertex normals of one run: each triangle's cross product (twice its area,
+/// so larger faces weigh more) added to its three vertices, then normalised.
+/// A vertex no face reaches, or whose faces cancel, keeps the zero
+/// vector rather than a made-up direction.
+fn smooth_normals(positions: &[Vec3], indices: &[u32]) -> Vec<[f32; 3]> {
+    let mut sums = vec![[0.0f32; 3]; positions.len()];
+    for triangle in indices.chunks_exact(3) {
+        let [a, b, c] = [0, 1, 2].map(|k| positions[triangle[k] as usize]);
+        let (u, v) = (
+            [b.0 - a.0, b.1 - a.1, b.2 - a.2],
+            [c.0 - a.0, c.1 - a.1, c.2 - a.2],
+        );
+        let n = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        for &vertex in triangle {
+            for axis in 0..3 {
+                sums[vertex as usize][axis] += n[axis];
+            }
+        }
+    }
+    sums.into_iter()
+        .map(|n| {
+            let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if length > 1e-12 {
+                [n[0] / length, n[1] / length, n[2] / length]
+            } else {
+                [0.0; 3]
+            }
+        })
+        .collect()
 }
 
 /// Every mesh of `scene` in one geometry, positions and normals baked into

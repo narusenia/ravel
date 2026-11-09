@@ -425,6 +425,51 @@ fn a_quarter_turn_about_y_survives_the_euler_singularity() {
     assert_close(p[2], [0.5, -2.0, 0.0], "C");
 }
 
+/// One mesh, two primitives over the same triangle: the first carries the file
+/// normal, the second none. The column must stay as long as `P` — a partly
+/// filled `N` would light the second run with zeros — so the second run's
+/// normals are computed from its triangle. The wedge's file normal is its own
+/// face normal, so both runs end up at `(0, 0.2425, -0.9701)`; a mesh whose
+/// primitives all lack normals gets no `N` at all.
+#[test]
+fn a_run_without_normals_gets_computed_ones_when_a_sibling_has_them() {
+    let bin = wedge_bin();
+    let with_normals = r#"{"attributes":{"POSITION":0,"NORMAL":1},"indices":2}"#;
+    let without = r#"{"attributes":{"POSITION":0},"indices":2}"#;
+    let dir = tempfile::tempdir().unwrap();
+    let load = |name: &str, primitives: &str| {
+        let json = wedge_json(
+            &format!(r#"{{"byteLength":{}}}"#, bin.len()),
+            UPRIGHT,
+            "[0]",
+        )
+        .replace(
+            r#""primitives":[{"attributes":{"POSITION":0,"NORMAL":1},"indices":2}]"#,
+            &format!(r#""primitives":[{primitives}]"#),
+        );
+        let path = write(dir.path(), name, &glb(&json, &bin));
+        model::flatten_to_geometry(&model::load(&path).unwrap()).unwrap()
+    };
+
+    let mixed = load("mixed.glb", &format!("{with_normals},{without}"));
+    assert_eq!(mixed.point_count(), 6);
+    let n = normals(&mixed);
+    assert_eq!(n.len(), 6, "N is as long as P");
+    for (vertex, normal) in n.iter().enumerate() {
+        assert_close(
+            *normal,
+            [0.0, 0.242536, -0.970143],
+            &format!("vertex {vertex}"),
+        );
+    }
+
+    let bare = load("bare.glb", without);
+    assert!(
+        bare.points().get(names::N).is_none(),
+        "no run has normals, so there is no column"
+    );
+}
+
 /// A non-uniformly scaled node must light with the inverse transpose, not
 /// the matrix itself. Scaling the wedge by `(1, 2, 1)` stretches its edges to
 /// `AB = (2, 0, 0)` and `AC = (1, 4, 0.5)`, whose cross product is

@@ -41,7 +41,7 @@ use ravel_ui::document::{NetworkPath, replace_network_renaming_pin, resolve_netw
 use ravel_ui::node_editor::FlowDirection;
 use ravel_ui::properties::expression;
 use ravel_widgets::ActiveTokens as _;
-use ravel_widgets::{Enter, Escape, Input, InputEvent, InputState};
+use ravel_widgets::{Button, Enter, Escape, Icon, Input, InputEvent, InputState};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -3416,6 +3416,111 @@ impl NodeEditorPanel {
         params
     }
 
+    /// The toolbar: the node editor's view options in one row — flow
+    /// direction, edge style, alignment, parameter values, fit.
+    ///
+    /// **Every button dispatches the Action its menu item and key dispatch**
+    /// (`command_action`), from this panel's focus handle so the nearest
+    /// `on_action` is this panel's own wherever focus was a moment ago; there
+    /// is no second path into the setters. The stateful items read their
+    /// current value from the same fields the canvas paints from, which follow
+    /// the settings and the View-menu flag, so a change made from the menu or
+    /// a key shows here on the next frame. The row wraps rather than clips: a
+    /// narrow panel moves a button to a second line instead of hiding it
+    /// (UX rule 5), and the buttons are tab stops that activate on Enter and
+    /// Space through the widget's one handler (rule 10).
+    fn build_toolbar(&self, cx: &mut Context<Self>) -> Div {
+        // Not `cx.listener`: that holds this panel mid-update, and the panel's
+        // own `on_action` handler (alignment, fit) would then update it again.
+        let dispatch = |command: CommandId| {
+            let handle = self.focus_handle.clone();
+            move |_event: &ClickEvent, window: &mut Window, cx: &mut App| {
+                handle.dispatch_action(
+                    crate::workspace::command_action(command).as_ref(),
+                    window,
+                    cx,
+                );
+            }
+        };
+        let flow_label = match self.flow_direction {
+            FlowDirection::Horizontal => "panel.node_graph_menu.flow_direction_horizontal",
+            FlowDirection::Vertical => "panel.node_graph_menu.flow_direction_vertical",
+        };
+        let edge_label = match self.edge_style {
+            EdgeStyle::Bezier => "panel.node_graph_menu.edge_style_bezier",
+            EdgeStyle::Straight => "panel.node_graph_menu.edge_style_straight",
+            EdgeStyle::Step => "panel.node_graph_menu.edge_style_step",
+        };
+        // Rule 6: with nothing drawn there is nothing to align or fit.
+        let has_nodes = self.graph.nodes().any(|n| !n.metadata.synthetic);
+        div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .flex_none()
+            .gap_1()
+            .px_1()
+            .py(px(2.0))
+            .border_b_1()
+            .border_color(cx.tokens().colors.border)
+            .child(
+                Button::new("node-editor-flow-direction")
+                    // Test hook for `VisualTestContext::debug_bounds`.
+                    .debug_selector(|| "node-editor-flow-direction".into())
+                    .compact()
+                    .ghost()
+                    .label(SharedString::from(t!(flow_label)))
+                    .tooltip(t!(CommandId::ViewToggleNodeFlowDirection.label_key()))
+                    .on_click(dispatch(CommandId::ViewToggleNodeFlowDirection)),
+            )
+            .child(
+                Button::new("node-editor-edge-style")
+                    // Test hook for `VisualTestContext::debug_bounds`.
+                    .debug_selector(|| "node-editor-edge-style".into())
+                    .compact()
+                    .ghost()
+                    .label(SharedString::from(t!(edge_label)))
+                    .tooltip(t!(CommandId::ViewCycleNodeEdgeStyle.label_key()))
+                    .on_click(dispatch(CommandId::ViewCycleNodeEdgeStyle)),
+            )
+            .child(
+                Button::new("node-editor-auto-layout")
+                    // Test hook for `VisualTestContext::debug_bounds`.
+                    .debug_selector(|| "node-editor-auto-layout".into())
+                    .disabled(!has_nodes)
+                    .compact()
+                    .ghost()
+                    .label(SharedString::from(
+                        t!(CommandId::NodeAutoLayout.label_key()),
+                    ))
+                    .on_click(dispatch(CommandId::NodeAutoLayout)),
+            )
+            .child(
+                Button::new("node-editor-param-values")
+                    // Test hook for `VisualTestContext::debug_bounds`.
+                    .debug_selector(|| "node-editor-param-values".into())
+                    .compact()
+                    .ghost()
+                    .selected(self.show_param_values)
+                    .label(SharedString::from(t!(
+                        CommandId::ViewToggleNodeParamValues.label_key()
+                    )))
+                    .on_click(dispatch(CommandId::ViewToggleNodeParamValues)),
+            )
+            .child(
+                Button::new("node-editor-fit")
+                    // Test hook for `VisualTestContext::debug_bounds`.
+                    .debug_selector(|| "node-editor-fit".into())
+                    .disabled(!has_nodes)
+                    .compact()
+                    .ghost()
+                    .icon(Icon::new(RavelIcon::ZoomFit))
+                    .tooltip(t!(CommandId::ViewFit.label_key()))
+                    .accessibility_label(t!(CommandId::ViewFit.label_key()))
+                    .on_click(dispatch(CommandId::ViewFit)),
+            )
+    }
+
     fn build_breadcrumb_bar(&self, cx: &mut Context<Self>) -> Div {
         let colors = cx.tokens().colors;
         let crumbs = self.breadcrumbs(cx);
@@ -3542,6 +3647,7 @@ impl Render for NodeEditorPanel {
         let show_param_values = self.show_param_values;
 
         let breadcrumb = self.build_breadcrumb_bar(cx);
+        let toolbar = self.build_toolbar(cx);
 
         // Hover info popover (DISC-2): always rendered, open or closed, so
         // the keyed PopoverState survives across frames. The zero-size
@@ -4282,6 +4388,7 @@ impl Render for NodeEditorPanel {
             .on_action(cx.listener(Self::on_extract_subnet))
             .on_action(cx.listener(Self::on_auto_layout))
             .child(breadcrumb)
+            .child(toolbar)
             .child(canvas_area)
             .children(palette_overlay)
             .children(rename_overlay)
@@ -7449,6 +7556,104 @@ mod tests {
                     "the downstream layer is below: {after:?}"
                 );
                 assert!(!rects_overlap(&drawn_rects(panel)));
+            })
+            .unwrap();
+    }
+
+    // ----- toolbar (NGR-9) ---------------------------------------------------
+
+    /// Every toolbar button is on screen and a click runs the panel's own
+    /// command handler — the same result as the key or the menu item, because
+    /// the click dispatches the same Action. The alignment is the one the
+    /// panel handles itself, so it is the one this window can observe.
+    #[gpui::test]
+    fn the_toolbar_shows_five_controls_and_a_click_aligns(cx: &mut TestAppContext) {
+        let (window, project, path, _blur) = setup(cx);
+        pile_up_nodes(&project, &path, 2, cx);
+        let before = window
+            .update(cx, |panel, _window, _cx| positions(panel))
+            .unwrap();
+        assert!(
+            rects_overlap(
+                &window
+                    .update(cx, |panel, _window, _cx| drawn_rects(panel))
+                    .unwrap()
+            ),
+            "the fixture starts with nodes on top of each other"
+        );
+
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        for id in [
+            "node-editor-flow-direction",
+            "node-editor-edge-style",
+            "node-editor-auto-layout",
+            "node-editor-param-values",
+            "node-editor-fit",
+        ] {
+            assert!(visual.debug_bounds(id).is_some(), "{id} is not on screen");
+        }
+
+        let align = visual
+            .debug_bounds("node-editor-auto-layout")
+            .expect("align button")
+            .center();
+        visual.simulate_click(align, gpui::Modifiers::none());
+        visual.run_until_parked();
+
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_ne!(positions(panel), before, "the click aligned the network");
+                assert!(!rects_overlap(&drawn_rects(panel)));
+            })
+            .unwrap();
+    }
+
+    /// Narrow panel: the row wraps onto a second line instead of clipping, so
+    /// every control stays on screen (UX rule 5). The test font is far wider
+    /// than the real one, so only the wrapping is asserted, not the widths.
+    #[gpui::test]
+    fn a_narrow_toolbar_wraps_instead_of_dropping_controls(cx: &mut TestAppContext) {
+        let (window, _project, _path, _blur) = setup(cx);
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.simulate_resize(size(px(160.0), px(400.0)));
+        visual.run_until_parked();
+        let ys: Vec<_> = [
+            "node-editor-flow-direction",
+            "node-editor-edge-style",
+            "node-editor-auto-layout",
+            "node-editor-param-values",
+            "node-editor-fit",
+        ]
+        .into_iter()
+        .map(|id| {
+            visual
+                .debug_bounds(id)
+                .unwrap_or_else(|| panic!("{id} vanished at a narrow width"))
+                .origin
+                .y
+        })
+        .collect();
+        assert!(
+            ys.iter().any(|y| *y > ys[0]),
+            "the buttons stayed on one row: {ys:?}"
+        );
+    }
+
+    /// The toolbar reads the same fields the canvas paints from, so a change
+    /// made elsewhere (menu command, settings) shows on its buttons.
+    #[gpui::test]
+    fn the_toolbar_follows_the_settings(cx: &mut TestAppContext) {
+        let (window, _project, _path, _blur) = setup(cx);
+        cx.update(|cx| {
+            crate::app_settings::install(crate::app_settings::GlobalSettingsFile::default(), cx)
+        });
+        cx.update(crate::panels::toggle_node_flow_direction);
+        cx.update(crate::panels::cycle_node_edge_style);
+        window
+            .update(cx, |panel, _window, _cx| {
+                assert_eq!(panel.flow_direction, FlowDirection::Vertical);
+                assert_eq!(panel.edge_style, EdgeStyle::Straight);
             })
             .unwrap();
     }

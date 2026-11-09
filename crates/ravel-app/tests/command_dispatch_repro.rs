@@ -105,6 +105,50 @@ fn the_view_toggle_flips_the_node_parameter_values_global(cx: &mut TestAppContex
     );
 }
 
+/// The View commands behind the node editor's flow-direction and edge-style
+/// toolbar buttons write the global settings through the ordinary command
+/// route; the toolbar dispatches these very actions (`NGR-5`, `NGR-9`).
+#[gpui::test]
+fn the_view_commands_write_the_node_editor_flow_and_edge_style(cx: &mut TestAppContext) {
+    use ravel_ui::node_editor::{EdgeStyle, FlowDirection};
+    let _main_window = open_workspace(cx);
+    let window = cx.add_window(|_, _| BareView);
+    // A throwaway settings file: the commands write the global layer, and
+    // without an installed `AppSettings` the write is dropped.
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        ravel_app::app_settings::install(
+            ravel_app::app_settings::read_global_settings_at(Some(
+                dir.path().join("settings.toml"),
+            )),
+            cx,
+        )
+    });
+    let settings = |cx: &mut TestAppContext| cx.update(|cx| ravel_app::app_settings::resolved(cx));
+
+    assert_eq!(
+        settings(cx).node_editor_flow_direction,
+        FlowDirection::Horizontal
+    );
+    cx.dispatch_action(window.into(), workspace::ViewToggleNodeFlowDirection);
+    assert_eq!(
+        settings(cx).node_editor_flow_direction,
+        FlowDirection::Vertical
+    );
+    cx.dispatch_action(window.into(), workspace::ViewToggleNodeFlowDirection);
+    assert_eq!(
+        settings(cx).node_editor_flow_direction,
+        FlowDirection::Horizontal
+    );
+
+    assert_eq!(settings(cx).node_editor_edge_style, EdgeStyle::Bezier);
+    cx.dispatch_action(window.into(), workspace::ViewCycleNodeEdgeStyle);
+    assert_eq!(settings(cx).node_editor_edge_style, EdgeStyle::Straight);
+    cx.dispatch_action(window.into(), workspace::ViewCycleNodeEdgeStyle);
+    cx.dispatch_action(window.into(), workspace::ViewCycleNodeEdgeStyle);
+    assert_eq!(settings(cx).node_editor_edge_style, EdgeStyle::Bezier);
+}
+
 /// The View command steps the viewer's preview resolution factor through the
 /// real action route — the one the `Alt+R` chord and the menu row use
 /// (REQ-UI-004).

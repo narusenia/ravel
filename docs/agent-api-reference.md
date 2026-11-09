@@ -3599,6 +3599,14 @@ the CLI builds no `DiskCache` yet (`CACHE-11`).
   `toggle_node_flow_direction` (behind `CommandId::ViewToggleNodeFlowDirection`)
   are the only writers. `painting::paint_port_label` draws the name tag a
   vertical node shows on port hover and at a dragged wire's snapped target.
+- Toolbar (`NGR-9`): `NodeEditorPanel::build_toolbar` renders flow direction,
+  edge style, align, parameter values and fit. Each button's `on_click` is a
+  plain closure (not `cx.listener`, which would hold the panel mid-update)
+  that calls `focus_handle.dispatch_action(command_action(cmd))`, so the
+  Action takes the same route a key or menu item does.
+  `CommandId::ViewCycleNodeEdgeStyle` (`EdgeStyle::cycled`, written by
+  `panels::cycle_node_edge_style`) exists for it; the context menu still sets a
+  style directly through `set_edge_style`.
 - Auto layout: `node_editor/layout.rs::auto_layout(&graph, &targets, &sizes,
   LayoutAxis) -> HashMap<NodeId, (f32, f32)>` (`NGR-1`) — a pure function that
   returns new positions and never touches the `Graph`. **Fewer than two usable

@@ -713,6 +713,18 @@ pub(crate) fn set_node_flow_direction(flow: ravel_ui::node_editor::FlowDirection
     );
 }
 
+/// Step the node editor's edge style to the next one (the View menu command).
+pub(crate) fn cycle_node_edge_style(cx: &mut App) {
+    let next = crate::app_settings::resolved(cx)
+        .node_editor_edge_style
+        .cycled();
+    crate::app_settings::update(
+        crate::app_settings::SettingsScope::Global,
+        |layer| layer.node_editor.edge_style = Some(next),
+        cx,
+    );
+}
+
 /// Flip horizontal and top-down flow (the View menu command).
 pub(crate) fn toggle_node_flow_direction(cx: &mut App) {
     use ravel_ui::node_editor::FlowDirection;

@@ -23,6 +23,18 @@ pub enum EdgeStyle {
     Step,
 }
 
+impl EdgeStyle {
+    /// The next style in the order the menu lists them, wrapping around — what
+    /// the cycle command steps through.
+    pub fn cycled(self) -> Self {
+        match self {
+            Self::Bezier => Self::Straight,
+            Self::Straight => Self::Step,
+            Self::Step => Self::Bezier,
+        }
+    }
+}
+
 /// Which way the graph flows across a node: ports on the left and right
 /// edges, or inputs on the top edge and outputs on the bottom.
 ///

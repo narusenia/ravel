@@ -50,6 +50,7 @@ render_queue = "Render Queue"
 attribute_spreadsheet = "Attribute Spreadsheet"
 node_param_values = "Show Parameter Values"
 node_flow_direction = "Toggle Node Flow Direction"
+node_edge_style = "Cycle Node Edge Style"
 cycle_preview_resolution = "Cycle Preview Resolution"
 fit = "Fit View"
 

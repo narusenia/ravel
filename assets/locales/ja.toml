@@ -48,6 +48,7 @@ render_queue = "レンダーキュー"
 attribute_spreadsheet = "アトリビュートスプレッドシート"
 node_param_values = "パラメータ値を表示"
 node_flow_direction = "ノードの流れ方向を切り替え"
+node_edge_style = "ノードのエッジスタイルを切り替え"
 cycle_preview_resolution = "プレビュー解像度を切り替え"
 fit = "全体表示"
 

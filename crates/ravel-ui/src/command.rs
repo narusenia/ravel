@@ -108,6 +108,11 @@ pub enum CommandId {
     /// outputs at the bottom). A global setting, so like its neighbour it
     /// applies whichever panel has focus; no default key.
     ViewToggleNodeFlowDirection,
+    /// Step the Node Graph editor's edge style to the next one (Bezier,
+    /// Straight, Step). A cycle rather than three "set to X" commands, like
+    /// [`CommandId::ViewCyclePreviewResolution`]; the context menu still sets a
+    /// style directly. A global setting, no default key.
+    ViewCycleNodeEdgeStyle,
     /// Step the viewer's preview resolution factor to the next one
     /// (`done/viewer-preview-resolution-plan.md`, REQ-UI-004). One cycling command
     /// rather than three "set to X" commands, because the factors are one
@@ -405,6 +410,10 @@ const COMMAND_TABLE: &[(CommandId, &str)] = &[
         "view.toggle_node_flow_direction",
     ),
     (
+        CommandId::ViewCycleNodeEdgeStyle,
+        "view.cycle_node_edge_style",
+    ),
+    (
         CommandId::ViewCyclePreviewResolution,
         "view.cycle_preview_resolution",
     ),
@@ -538,6 +547,7 @@ impl CommandId {
             CommandId::ViewToggleAttributeSpreadsheet => "menu.view.attribute_spreadsheet",
             CommandId::ViewToggleNodeParamValues => "menu.view.node_param_values",
             CommandId::ViewToggleNodeFlowDirection => "menu.view.node_flow_direction",
+            CommandId::ViewCycleNodeEdgeStyle => "menu.view.node_edge_style",
             CommandId::ViewCyclePreviewResolution => "menu.view.cycle_preview_resolution",
             CommandId::ViewerChannelRgb => "menu.viewer.channel_rgb",
             CommandId::ViewerChannelRed => "menu.viewer.channel_red",

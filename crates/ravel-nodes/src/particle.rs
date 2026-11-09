@@ -1698,6 +1698,44 @@ pub(crate) mod tests {
         assert!(last.iter().all(|v| *v == Vec2(0.0, 0.0)));
     }
 
+    #[test]
+    fn size_and_color_follow_the_life_of_a_particle_through_field_apply() {
+        use ravel_core::geometry::{ExpressionField, FieldApply, apply_field};
+        let params = [("rate", float(90.0)), ("life", float(10.0))];
+        let (graph, mut ev) = with_forces(&params, None, Vec::new());
+        let out = geometry_at(&mut ev, &graph, 12);
+        let particles = out.downcast_ref::<Geometry>().unwrap();
+
+        // `pscale = 4 * (1 - age / life)`: the particle shrinks as it ages.
+        let shrink = ExpressionField::new("4 * (1 - @age / @life)", 0.0);
+        let sized = apply_field(
+            particles,
+            &FieldApply::new(Domain::Point, names::PSCALE),
+            &shrink,
+            &ctx(12),
+        )
+        .unwrap();
+
+        let age = column(&*out, names::AGE).as_f32(names::AGE).unwrap();
+        let life = column(&*out, names::LIFE).as_f32(names::LIFE).unwrap();
+        let pscale = sized
+            .points()
+            .get(names::PSCALE)
+            .unwrap()
+            .as_f32(names::PSCALE)
+            .unwrap();
+        assert!(
+            age.len() > 10 && age.iter().any(|a| *a > 5.0),
+            "ages must vary"
+        );
+        for ((age, life), size) in age.iter().zip(life).zip(pscale) {
+            assert!(
+                (size - 4.0 * (1.0 - age / life)).abs() < 1e-4,
+                "{age} {life} {size}"
+            );
+        }
+    }
+
     // ---- the simulation cache ------------------------------------------------
 
     /// A run that exercises everything the state carries: a path emitter with

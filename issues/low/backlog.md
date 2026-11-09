@@ -65,6 +65,22 @@ f32 出力では約 24 回で仮数を使い切り、文書化された要件 1e
 → `AI-2c` で書き込みを `edit` に寄せるとき、`set_params` を使う他の箇所も
 未知のキーを `Err` にするか、意図して無視する箇所を名指しする。
 
+---
+
+**LOW-CORE-08 | perf | 負荷下で取った 2 つの計測値を静かな機械で取り直す**
+`docs/implementation/perf-baseline.md`（ステートレス評価パスの退行確認）、
+`crates/ravel-nodes/src/field/gpu.rs` の `GPU_MIN_ELEMENTS`
+どちらも並行ビルド中（loadavg ≒ 10）に取った値で、方向は正しいが絶対値は
+信用できない。
+
+1. **sim 導入後のステートレス評価パス**（#639）。退行なしと判断したが、
+   ばらつきが差より大きい
+2. **`field.apply` を GPU へ回す要素数の閾値** `1 << 16`（GPU-2）。CPU と
+   GPU の交差が 5 万前後という測定から決めた
+
+→ loadavg を確認してから `perf-baseline.md` の手順で取り直し、表と定数を
+更新する。閾値がずれていたら定数だけ直す（規則は変えない）。
+
 ## ravel-gpu / ravel-nodes
 
 **LOW-GPU-02 | bug | `merge.wgsl` の最終 mix が直線アルファで動作する**

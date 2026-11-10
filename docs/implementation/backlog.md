@@ -12,7 +12,7 @@
   持たない）ので、ロードマップがクラスタ単位で順序を決め、個票は `issues/` に
   置く。計画書が引き受けた issue だけ、該当単位の説明に ID が出る。
 
-最終更新: 2026-10-07
+最終更新: 2026-11-10
 
 ## 凡例
 
@@ -30,7 +30,6 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| PART-1 | `particle.simulate` の骨格 | `particle-plan.md` |
 | BLUR-4 | `comp.motion_blur` と殻フィールド（BLUR-3 完了で着手可能） | `motion-blur-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
 | VEC-4 | look-at・フロー場のゴールデン検証と文書（単位 1〜3・5〜8 が揃った） | `vector-field-plan.md` |
@@ -58,7 +57,6 @@
 | AUDIO-6 | 解析ノード（RMS / ピーク。**FFT クレート追加は禁止**） | `audio-plan.md` |
 | 3D-5 | 基本プリミティブ（box / sphere / cylinder / plane） | `3d-scene-plan.md` |
 | 3D-8 | 押し出しとベベル（`TYPE-2/4/5` で輪郭の形が確定、`PATH-0b` ✅） | `3d-scene-plan.md` |
-| 3D-9 | モデル読み込み（glTF / OBJ） | `3d-scene-plan.md` |
 | FRAC-2 | `geometry.cell_fracture`（2D） | `geometry-fracture-plan.md` |
 | FRAC-3 | `geometry.cell_fracture_3d`（`3D-1a` / `3D-1b` ✅ で依存が解けた） | `geometry-fracture-plan.md` |
 
@@ -1248,11 +1246,11 @@ CPU / GPU 両方）。グリフが穴を持つ最初の図形だったので、`
 
 | ID | 状態 | 単位 | 依存 |
 |---|---|---|---|
-| PART-1 | 🟡 | `particle.simulate` の骨格 | SIM-3 |
-| PART-2 | ⬜ | エミッタジオメトリからの発生 | PART-1 |
-| PART-3 | ⬜ | フィールドフォース | PART-1, MOD-3 |
-| PART-4 | ⬜ | スクラブ耐性と他ノードへの流用 | PART-2, PART-3 |
-| PART-5 | ⬜ | 文書更新 | PART-4, SIM-5 |
+| PART-1 | ✅ #645 | `particle.simulate` の骨格 | SIM-3 |
+| PART-2 | ✅ #645 | エミッタジオメトリからの発生 | PART-1 |
+| PART-3 | ✅ #645 | フィールドフォース | PART-1, MOD-3 |
+| PART-4 | ✅ #645 | スクラブ耐性と他ノードへの流用 | PART-2, PART-3 |
+| PART-5 | ✅ #645 | 文書更新 | PART-4, SIM-5 |
 | PART-6 | ⬜ | GPU シミュレーション（**実施と決定**。VRAM はチェックポイント方式で決着） | PART-5, GPU-1, GPU-5 |
 
 **PART-6 は「実施」と決定した**（2026-07-29）。ただし測定
@@ -1354,7 +1352,7 @@ CPU フィールド評価は 10 万で 1.17 ms しかないので、GPU-2 が効
 | 3D-6 | ⬜ | 3D 複製（`scatter.*` の 3D 対応） | 3D-2, 3D-5 |
 | 3D-7 | ✅ #642 | ライティング | 3D-4 |
 | 3D-8 | 🟡 | 押し出しとベベル | 3D-4, TYPE-*, PATH-0b |
-| 3D-9 | 🟡 | モデル読み込み（glTF / OBJ） | 3D-4 |
+| 3D-9 | ✅ #643 | モデル読み込み（glTF / OBJ） | 3D-4 |
 | 3D-10 | ⬜ | レジストリ / ロケール / 文書 | 3D-1〜9 |
 
 **3D-1a / 3D-1b は早く入れるほど安い**。`as_vec2` 呼び出しが 58 箇所 /

@@ -1,6 +1,6 @@
 # パーティクル実装計画（REQ-MOGRAPH-002）
 
-> **Status**: Planned — 2026-07-27
+> **Status**: 単位 1〜5 は #645 でマージ — 2026-11-10。単位 6（GPU シミュレーション）は `GPU-5` 待ち
 
 対象要件: REQ-MOGRAPH-002（優先度 Should）。関連: REQ-CORE-010（属性）、
 REQ-CORE-011（ステートフル評価）、REQ-CORE-012（フィールド）、

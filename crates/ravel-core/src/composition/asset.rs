@@ -403,7 +403,28 @@ pub const MEDIA_ASSET_PARAM_KEY: &str = "asset_id";
 /// `"video"` is the pre-normalization alias
 /// (`Document::normalize_node_type_aliases`): a loaded document only holds
 /// `"media"`, but a document assembled in memory can still carry the old key.
-pub const MEDIA_TYPE_KEYS: [&str; 2] = ["media", "video"];
+/// `"mesh.import"` reads a model file from the same table, so the asset
+/// queries, the watermark scan and the identifier rule have to see it too.
+/// Keep `"media"` first: tests index `[0]` for "the media node".
+pub const MEDIA_TYPE_KEYS: [&str; 3] = ["media", "video", "mesh.import"];
+
+/// File extensions of the model formats `mesh.import` reads (lower case,
+/// without the dot).
+pub const MODEL_EXTENSIONS: [&str; 3] = ["gltf", "glb", "obj"];
+
+/// Whether `path` names a model file, by extension alone. The one rule the
+/// import path and "add as layer" share, so a model is never told apart by two
+/// different checks; no `AssetKind` carries it because that would change the
+/// persisted form.
+pub fn is_model_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            MODEL_EXTENSIONS
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+        })
+}
 
 /// The display name a freshly imported file starts out with: its file stem.
 ///
@@ -587,6 +608,15 @@ impl MediaAssetEntry {
     /// inequality.
     pub fn bump_content_revision(&mut self) {
         self.content_revision = self.content_revision.wrapping_add(1);
+    }
+
+    /// Whether the file is a model (glTF / GLB / OBJ), by the extension of the
+    /// persisted path — which survives going offline, unlike `resolved`.
+    pub fn is_model(&self) -> bool {
+        match &self.path {
+            AssetPath::Absolute(path) => is_model_path(path),
+            AssetPath::Relative(rel) | AssetPath::Variable(rel) => is_model_path(Path::new(rel)),
+        }
     }
 
     /// Whether this asset currently has no location on disk.

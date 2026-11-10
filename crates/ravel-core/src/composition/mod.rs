@@ -49,7 +49,8 @@ pub struct ShellBindCycleNote {
 
 pub use asset::{
     AssetKind, AssetMetadata, AssetPath, AudioStreamMetadata, ColorSpaceSource,
-    MEDIA_ASSET_PARAM_KEY, MEDIA_TYPE_KEYS, MediaAssetEntry, expand_variables, name_from_path,
+    MEDIA_ASSET_PARAM_KEY, MEDIA_TYPE_KEYS, MODEL_EXTENSIONS, MediaAssetEntry, expand_variables,
+    is_model_path, name_from_path,
 };
 
 use crate::animation::channel::{AnimationChannel, ChannelSource};

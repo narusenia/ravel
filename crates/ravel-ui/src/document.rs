@@ -500,10 +500,21 @@ pub fn add_media_layers(
         } else {
             "media"
         };
-        let Some(template) =
-            ravel_core::composition::templates::builtin_layer_template(template_key)
-        else {
-            continue;
+        // A model is the one asset the `media` template cannot show (it would
+        // decode nothing and render transparent), so it gets its own network.
+        // The rule is the extension, the same `is_model_path` the import path
+        // uses — nothing persisted says "model".
+        let model_template;
+        let template = if entry.is_model() {
+            model_template = ravel_core::composition::templates::model_layer_template();
+            &model_template
+        } else {
+            let Some(template) =
+                ravel_core::composition::templates::builtin_layer_template(template_key)
+            else {
+                continue;
+            };
+            template
         };
         let out_frame = entry
             .metadata
@@ -1092,6 +1103,56 @@ mod tests {
             Some(clip),
             "the picture and the sound name one asset"
         );
+    }
+
+    /// Dropping a model on the timeline must show it: the layer's network is
+    /// `mesh.import` (bound to the asset) → … → `scene.render` → `net.out`, not a
+    /// `media` node, which would decode nothing and render transparent. The
+    /// rule is the file extension, and a clip beside it still gets `media`.
+    #[test]
+    fn a_model_asset_becomes_a_scene_render_layer_and_a_clip_stays_media() {
+        let (doc, comp) = doc_with_layers(0);
+        let model = AssetId::next();
+        let clip = AssetId::next();
+        let doc = doc
+            .with_media_asset(model, "/assets/ship.GLB")
+            .with_media_asset(clip, "/assets/clip.mov");
+        let (doc, created) = add_media_layers(&doc, comp, &registry(), &[model, clip], 0);
+        assert_eq!(created.len(), 2);
+
+        let composition = root_composition(&doc).unwrap();
+        let ship = composition.get_layer(created[0]).unwrap();
+        let types: Vec<&str> = ship.network.nodes().map(|n| n.type_key.as_str()).collect();
+        for expected in ["mesh.import", "scene.add", "scene.camera", "scene.render"] {
+            assert!(types.contains(&expected), "{expected} in {types:?}");
+        }
+        assert!(!types.contains(&"media"), "no media node for a model");
+        assert!(ship.has_frame_output());
+        let import = ship
+            .network
+            .nodes()
+            .find(|n| n.type_key == "mesh.import")
+            .unwrap();
+        assert_eq!(
+            ravel_core::composition::node_asset_reference(import),
+            Some(model),
+            "the import node is bound to the asset"
+        );
+        // The render node feeds the frame output.
+        let render = ship
+            .network
+            .nodes()
+            .find(|n| n.type_key == "scene.render")
+            .unwrap();
+        let out = ravel_core::network::find_out_node(&ship.network).unwrap();
+        assert!(
+            ship.network
+                .edges()
+                .any(|e| e.source == render.id && e.target == out.id)
+        );
+
+        let clip_layer = composition.get_layer(created[1]).unwrap();
+        assert!(clip_layer.network.nodes().any(|n| n.type_key == "media"));
     }
 
     /// Silent media leaves the shell without audio: nothing scans the network

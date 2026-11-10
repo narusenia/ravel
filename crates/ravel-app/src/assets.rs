@@ -238,6 +238,8 @@ pub enum RavelIcon {
     /// Node header/menu: `geometry.iterate`.
     NodeGeometryIterate,
     NodeGeometryFromImage,
+    /// Node header/menu: `mesh.import`.
+    NodeMeshImport,
     /// Node header/menu: `scene.add`.
     NodeSceneAdd,
     /// Node header/menu: `scene.merge`.
@@ -545,6 +547,7 @@ impl RavelIcon {
             "geometry.null" => Self::NodeGeometryNull,
             "geometry.iterate" => Self::NodeGeometryIterate,
             "geometry.from_image" => Self::NodeGeometryFromImage,
+            "mesh.import" => Self::NodeMeshImport,
             "scene.add" => Self::NodeSceneAdd,
             "scene.merge" => Self::NodeSceneMerge,
             "scene.camera" => Self::NodeSceneCamera,
@@ -749,6 +752,7 @@ impl RavelIcon {
             Self::NodeGeometryNull => "icons/circle-dashed.svg",
             Self::NodeGeometryIterate => "icons/repeat.svg",
             Self::NodeGeometryFromImage => "icons/image.svg",
+            Self::NodeMeshImport => "icons/boxes.svg",
             Self::NodeSceneAdd => "icons/box.svg",
             Self::NodeSceneMerge => "icons/group.svg",
             Self::NodeSceneCamera => "icons/video.svg",

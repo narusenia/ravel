@@ -19,31 +19,44 @@
 //! columns) is carried onto the instance domain, where fields and styles read
 //! it like any instance column; `index` is the instance's own `0..n`.
 //!
-//! A `Vec3` `P` is an explicit error (3D placement is `InstanceColumns3`'s,
-//! not this node's yet), and so are more than [`MAX_POINT_INSTANCES`] points —
-//! a cap with an error, not a silent truncation.
+//! A `Vec3` `P` makes 3D instances: `orient` comes from the point (identity
+//! when absent), `scale3` is the point's `scale3` (`(1, 1, 1)` when absent)
+//! times `pscale`, and `rot` / `scale` ride along unchanged for
+//! `InstanceColumns3` to compose. More than [`MAX_POINT_INSTANCES`] points is
+//! an error — a cap, not a silent truncation.
 
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
-use ravel_core::geometry::{AttributeArray, Domain, Geometry, names};
+use ravel_core::geometry::rotation::Quat;
+use ravel_core::geometry::{AttributeArray, Domain, Geometry, Positions, names};
 use ravel_core::graph::Node;
-use ravel_core::types::{NodeData, Vec2};
+use ravel_core::types::{NodeData, Vec2, Vec3};
 
-use super::{attach_instance_sources, populate_instances, source_inputs};
+use super::{attach_instance_sources, populate_instances, populate_instances3, source_inputs};
 
 /// Most instances one `scatter.points` makes. `particle.simulate` stops at
 /// 100 000 by default; ten times that is headroom, and the rasterizer is the
 /// limit past it.
 pub const MAX_POINT_INSTANCES: usize = 1_000_000;
 
-/// Point attributes the instance writes itself, which are not carried over.
+/// Point attributes a planar instance writes itself, which are not carried over.
 const PLACEMENT: [&str; 5] = [
     names::P,
     names::INDEX,
     names::ROT,
     names::SCALE,
+    names::SOURCE_INDEX,
+];
+
+/// The 3D counterpart of [`PLACEMENT`]. `rot` and `scale` are carried as-is:
+/// `InstanceColumns3` composes them with `orient` / `scale3`.
+const PLACEMENT3: [&str; 5] = [
+    names::P,
+    names::INDEX,
+    names::ORIENT,
+    names::SCALE3,
     names::SOURCE_INDEX,
 ];
 
@@ -75,7 +88,7 @@ impl NodeProcessor for PointsProcessor {
         let Some(positions) = target.positions(Domain::Point) else {
             return Ok(Arc::new(geometry));
         };
-        let positions = positions?.require_planar("scatter.points")?;
+        let positions = positions?;
         let count = positions.len();
         anyhow::ensure!(
             count <= MAX_POINT_INSTANCES,
@@ -83,26 +96,53 @@ impl NodeProcessor for PointsProcessor {
         );
 
         let column = |name: &str| target.points().get(name).filter(|c| c.len() == count);
-        let rotations = match column(names::ROT) {
-            Some(rot) => rot.as_f32(names::ROT)?.to_vec(),
-            None => vec![0.0; count],
-        };
-        let mut scales = match column(names::SCALE) {
-            Some(scale) => scale.as_vec2(names::SCALE)?.to_vec(),
-            None => vec![Vec2(1.0, 1.0); count],
-        };
-        if let Some(pscale) = column(names::PSCALE) {
-            for (scale, size) in scales.iter_mut().zip(pscale.as_f32(names::PSCALE)?) {
-                *scale = Vec2(scale.0 * size, scale.1 * size);
+        let pscale = column(names::PSCALE)
+            .map(|c| c.as_f32(names::PSCALE))
+            .transpose()?;
+        let written: &[&str] = match positions {
+            Positions::D2(positions) => {
+                let rotations = match column(names::ROT) {
+                    Some(rot) => rot.as_f32(names::ROT)?.to_vec(),
+                    None => vec![0.0; count],
+                };
+                let mut scales = match column(names::SCALE) {
+                    Some(scale) => scale.as_vec2(names::SCALE)?.to_vec(),
+                    None => vec![Vec2(1.0, 1.0); count],
+                };
+                for (scale, size) in scales.iter_mut().zip(pscale.unwrap_or_default()) {
+                    *scale = Vec2(scale.0 * size, scale.1 * size);
+                }
+                populate_instances(&mut geometry, positions.to_vec(), rotations);
+                geometry
+                    .instances_mut()
+                    .insert(names::SCALE, AttributeArray::Vec2(scales))?;
+                &PLACEMENT
             }
-        }
-
-        populate_instances(&mut geometry, positions.to_vec(), rotations);
-        geometry
-            .instances_mut()
-            .insert(names::SCALE, AttributeArray::Vec2(scales))?;
+            Positions::D3(positions) => {
+                let orients = match column(names::ORIENT) {
+                    Some(orient) => orient
+                        .as_vec4(names::ORIENT)?
+                        .iter()
+                        .map(|q| Quat::from_vec4(*q).normalized())
+                        .collect(),
+                    None => vec![Quat::IDENTITY; count],
+                };
+                let mut scales = match column(names::SCALE3) {
+                    Some(scale) => scale.as_vec3(names::SCALE3)?.to_vec(),
+                    None => vec![Vec3(1.0, 1.0, 1.0); count],
+                };
+                for (scale, size) in scales.iter_mut().zip(pscale.unwrap_or_default()) {
+                    *scale = Vec3(scale.0 * size, scale.1 * size, scale.2 * size);
+                }
+                populate_instances3(&mut geometry, positions.to_vec(), orients);
+                geometry
+                    .instances_mut()
+                    .insert(names::SCALE3, AttributeArray::Vec3(scales))?;
+                &PLACEMENT3
+            }
+        };
         for (name, column) in target.points().iter() {
-            if !PLACEMENT.contains(&name.as_str()) {
+            if !written.contains(&name.as_str()) {
                 geometry
                     .instances_mut()
                     .insert(name.clone(), (**column).clone())?;
@@ -121,7 +161,7 @@ mod tests {
     use ravel_core::id::{DataTypeId, EdgeId, InputPortIndex, NodeId, OutputPortIndex};
     use ravel_core::registry::NodeRegistry;
     use ravel_core::registry::builtin::register_builtins;
-    use ravel_core::types::{Color, FrameRate};
+    use ravel_core::types::{Color, FrameRate, Vec3};
 
     struct Stub(Arc<dyn NodeData>);
 
@@ -264,10 +304,48 @@ mod tests {
     }
 
     #[test]
-    fn a_three_dimensional_target_is_an_explicit_error() {
-        let points = Geometry::from_points3(vec![ravel_core::types::Vec3(1.0, 2.0, 3.0)]);
-        let error = run(points, vec![marker()], &[]).err().expect("must fail");
-        assert!(format!("{error:?}").contains("scatter.points"), "{error:?}");
+    fn a_three_dimensional_target_places_instances_in_3d() {
+        let mut points = Geometry::from_points3(vec![Vec3(1.0, 2.0, 3.0), Vec3(4.0, 5.0, 6.0)]);
+        let quarter = Quat::from_axis_angle(Vec3(1.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2);
+        points
+            .points_mut()
+            .insert(
+                names::ORIENT,
+                AttributeArray::Vec4(vec![quarter.to_vec4(), Quat::IDENTITY.to_vec4()]),
+            )
+            .unwrap();
+        points
+            .points_mut()
+            .insert(names::PSCALE, AttributeArray::F32(vec![2.0, 1.0]))
+            .unwrap();
+        points
+            .points_mut()
+            .insert(names::ROT, AttributeArray::F32(vec![0.5, 0.0]))
+            .unwrap();
+        let out = run(points, vec![marker()], &[]).unwrap();
+        let geometry = instances(&out);
+        let instances = geometry.instances();
+        assert_eq!(
+            **instances.get(names::P).unwrap(),
+            AttributeArray::Vec3(vec![Vec3(1.0, 2.0, 3.0), Vec3(4.0, 5.0, 6.0)])
+        );
+        assert_eq!(
+            **instances.get(names::SCALE3).unwrap(),
+            AttributeArray::Vec3(vec![Vec3(2.0, 2.0, 2.0), Vec3(1.0, 1.0, 1.0)])
+        );
+        let orient = instances
+            .get(names::ORIENT)
+            .unwrap()
+            .as_vec4(names::ORIENT)
+            .unwrap();
+        let expected = quarter.normalized().to_vec4();
+        assert!((orient[0].0 - expected.0).abs() < 1e-6 && (orient[0].3 - expected.3).abs() < 1e-6);
+        // `rot` rides along for `InstanceColumns3` to compose, it is not consumed.
+        assert_eq!(
+            **instances.get(names::ROT).unwrap(),
+            AttributeArray::F32(vec![0.5, 0.0])
+        );
+        assert!(instances.get(names::PSCALE).is_some());
     }
 
     #[test]

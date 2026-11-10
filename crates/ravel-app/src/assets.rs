@@ -238,6 +238,14 @@ pub enum RavelIcon {
     /// Node header/menu: `geometry.iterate`.
     NodeGeometryIterate,
     NodeGeometryFromImage,
+    /// Node header/menu: `mesh.box`.
+    NodeMeshBox,
+    /// Node header/menu: `mesh.sphere`.
+    NodeMeshSphere,
+    /// Node header/menu: `mesh.cylinder`.
+    NodeMeshCylinder,
+    /// Node header/menu: `mesh.plane`.
+    NodeMeshPlane,
     /// Node header/menu: `mesh.import`.
     NodeMeshImport,
     /// Node header/menu: `scene.add`.
@@ -551,6 +559,10 @@ impl RavelIcon {
             "geometry.null" => Self::NodeGeometryNull,
             "geometry.iterate" => Self::NodeGeometryIterate,
             "geometry.from_image" => Self::NodeGeometryFromImage,
+            "mesh.box" => Self::NodeMeshBox,
+            "mesh.sphere" => Self::NodeMeshSphere,
+            "mesh.cylinder" => Self::NodeMeshCylinder,
+            "mesh.plane" => Self::NodeMeshPlane,
             "mesh.import" => Self::NodeMeshImport,
             "scene.add" => Self::NodeSceneAdd,
             "scene.merge" => Self::NodeSceneMerge,
@@ -758,6 +770,10 @@ impl RavelIcon {
             Self::NodeGeometryNull => "icons/circle-dashed.svg",
             Self::NodeGeometryIterate => "icons/repeat.svg",
             Self::NodeGeometryFromImage => "icons/image.svg",
+            Self::NodeMeshBox => "icons/boxes.svg",
+            Self::NodeMeshSphere => "icons/circle-dot.svg",
+            Self::NodeMeshCylinder => "icons/layers.svg",
+            Self::NodeMeshPlane => "icons/square-square.svg",
             Self::NodeMeshImport => "icons/boxes.svg",
             Self::NodeSceneAdd => "icons/box.svg",
             Self::NodeSceneMerge => "icons/group.svg",

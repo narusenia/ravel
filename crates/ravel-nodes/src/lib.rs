@@ -30,6 +30,7 @@ pub mod layer_ref;
 pub mod math;
 pub mod media;
 pub mod merge;
+pub mod mesh_primitives;
 pub mod model;
 pub mod net;
 pub mod particle;
@@ -397,6 +398,12 @@ pub fn processor_for_node_with_fields(
         "shape.grid" => Some(Arc::new(shape::GridProcessor::from_node(node))),
         "shape.custom_path" => Some(Arc::new(shape::CustomPathProcessor::from_node(node))),
         // Scatter / instance duplication
+        "mesh.box" => Some(Arc::new(mesh_primitives::BoxProcessor::from_node(node))),
+        "mesh.sphere" => Some(Arc::new(mesh_primitives::SphereProcessor::from_node(node))),
+        "mesh.cylinder" => Some(Arc::new(mesh_primitives::CylinderProcessor::from_node(
+            node,
+        ))),
+        "mesh.plane" => Some(Arc::new(mesh_primitives::PlaneProcessor::from_node(node))),
         "scatter.grid" => Some(Arc::new(scatter::GridProcessor::from_node(node))),
         "scatter.circular" => Some(Arc::new(scatter::CircularProcessor::from_node(node))),
         "scatter.path_array" => Some(Arc::new(scatter::PathArrayProcessor::from_node(node))),
@@ -1683,6 +1690,32 @@ mod tests {
             )
             .unwrap();
         assert!(out.downcast_ref::<ravel_gpu::GpuFrameBuffer>().is_some());
+    }
+
+    /// Every `mesh.*` template has an arm in `processor_for_node`; the match is
+    /// on strings, so a forgotten arm compiles and the node never evaluates.
+    #[test]
+    fn processor_factory_wires_every_mesh_primitive() {
+        let gpu = GpuContext::new_blocking().expect("GPU required");
+        let pool = shared_texture_pool(&gpu);
+        let frames = MediaFrameCache::standalone();
+        let mut shaders = ShaderManager::new(gpu.clone());
+        for type_key in ["mesh.box", "mesh.sphere", "mesh.cylinder", "mesh.plane"] {
+            let node = Node::new(NodeId::new(1), type_key);
+            let processor = processor_for_node(&node, &gpu, &mut shaders, &pool, &frames)
+                .unwrap_or_else(|| panic!("{type_key} has no processor"));
+            let out = processor
+                .process(
+                    &node,
+                    &ctx(),
+                    &[],
+                    &ravel_core::eval::ResolvedParams::default(),
+                    &mut Evaluator::new(),
+                )
+                .unwrap();
+            let geometry = out.downcast_ref::<Geometry>().expect("a geometry");
+            assert!(geometry.has_mesh(), "{type_key}");
+        }
     }
 
     #[test]

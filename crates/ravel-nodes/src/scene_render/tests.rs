@@ -1723,3 +1723,108 @@ fn a_scaled_object_flattens_its_curves_to_the_same_pixel_tolerance() {
         "gpu",
     );
 }
+
+/// The primitives' `uv` is what this sampler reads: a `mesh.plane` textured
+/// with the 2 x 2 quad shows red, green / blue, white at its top-left,
+/// top-right, bottom-left and bottom-right, the same as a hand-built quad with
+/// `NATURAL_UV`.
+#[test]
+fn a_mesh_plane_shows_a_texture_the_right_way_up() {
+    let mut params = ResolvedParams::default();
+    params.set("size", ravel_core::eval::ResolvedValue::Vec2([16.0, 16.0]));
+    params.set(
+        "center",
+        ravel_core::eval::ResolvedValue::Vec3([16.0, 16.0, 0.0]),
+    );
+    let plane = crate::mesh_primitives::PlaneProcessor::from_node(&node())
+        .process(&node(), &ctx(32, 32), &[], &params, &mut Evaluator::new())
+        .unwrap();
+    let plane = plane.downcast_ref::<Geometry>().unwrap().clone();
+    let scene = scene_of(pixel_camera(32, 32), vec![plane]);
+    let mut prepared = prepare_default(&scene, 32, 32);
+    prepared.meshes[0].texture = Some(Arc::new(quad_texture()));
+    let out = cpu::render(&prepared).unwrap();
+    assert_quadrants(&out, [RED, GREEN, BLUE, Color::WHITE], 1e-5);
+}
+
+/// A 3 x 3 x 3 grid of `mesh.box` through `scene.render` (CPU reference),
+/// looking down +Z with an orthographic camera at one pixel per unit.
+///
+/// Hand-worked: the grid is centred on `(16, 16)` with spacing 10, so box
+/// columns sit at x = 6, 16, 26 (likewise y) and each box is 6 wide, covering
+/// pixels 3..9, 13..19 and 23..29. Three layers overlap exactly in the view,
+/// so 9 x 6 x 6 = 324 pixels are covered, not 27 x 36 — and the nearest layer
+/// (z = -10, the first in the grid) is the one that shows. Each layer carries
+/// its own colour on the instance (red nearest, then green, then blue), so a
+/// wrong depth order would come out blue.
+#[test]
+fn a_3d_grid_of_boxes_renders_with_the_nearest_layer_in_front() {
+    let eval_ctx = ctx(32, 32);
+    let box_node = node();
+    let mut box_params = ResolvedParams::default();
+    box_params.set(
+        "size",
+        ravel_core::eval::ResolvedValue::Vec3([6.0, 6.0, 6.0]),
+    );
+    let cube = crate::mesh_primitives::BoxProcessor::from_node(&box_node)
+        .process(
+            &box_node,
+            &eval_ctx,
+            &[],
+            &box_params,
+            &mut Evaluator::new(),
+        )
+        .unwrap();
+
+    let mut grid_params = ResolvedParams::default();
+    for key in ["count_x", "count_y", "count_z"] {
+        grid_params.set(key, ravel_core::eval::ResolvedValue::Int(3));
+    }
+    grid_params.set(
+        "spacing",
+        ravel_core::eval::ResolvedValue::Vec2([10.0, 10.0]),
+    );
+    grid_params.set("spacing_z", ravel_core::eval::ResolvedValue::Float(10.0));
+    grid_params.set(
+        "center",
+        ravel_core::eval::ResolvedValue::Vec2([16.0, 16.0]),
+    );
+    let grid = crate::scatter::GridProcessor::from_node(&box_node)
+        .process(
+            &box_node,
+            &eval_ctx,
+            &[Some(cube)],
+            &grid_params,
+            &mut Evaluator::new(),
+        )
+        .unwrap();
+    let mut grid = grid.downcast_ref::<Geometry>().unwrap().clone();
+    // x fastest, then y, then z: instances 0..9 are the nearest layer.
+    let layer_colour = |i: usize| match i / 9 {
+        0 => RED,
+        1 => GREEN,
+        _ => BLUE,
+    };
+    grid.instances_mut()
+        .insert(
+            names::CD,
+            AttributeArray::Color((0..27).map(layer_colour).collect()),
+        )
+        .unwrap();
+
+    let scene = scene_of(pixel_camera(32, 32), vec![grid]);
+    let prepared = prepare_default(&scene, 32, 32);
+    let out = cpu::render(&prepared).unwrap();
+
+    assert_eq!(covered(&out), 9 * 6 * 6);
+    // Inside a box: the nearest layer's colour. In the gap between boxes: nothing.
+    assert_color(px(&out, 6, 6), RED, 1e-5, "first box");
+    assert_color(px(&out, 16, 16), RED, 1e-5, "centre box");
+    assert_color(px(&out, 26, 26), RED, 1e-5, "last box");
+    assert_eq!(
+        px(&out, 11, 6)[3],
+        0.0,
+        "the gap between two boxes is empty"
+    );
+    assert_eq!(px(&out, 2, 6)[3], 0.0, "left of the first box");
+}

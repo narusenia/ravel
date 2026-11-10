@@ -9,9 +9,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use super::attribute::{AttrName, AttributeArray, AttributeSet, AttributeType, GeometryError};
+use super::rotation::Quat;
 use super::{names, ops};
 use crate::id::DataTypeId;
-use crate::types::{GeometricData, NodeData, Rect, Transform2D, Vec2, Vec3};
+use crate::types::{GeometricData, NodeData, Rect, Transform2D, Vec2, Vec3, Vec4};
 
 /// A primitive built from a contiguous run of point indices.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -590,6 +591,154 @@ impl<'a> InstanceColumns<'a> {
     }
 }
 
+/// The placement of one instance in 3D: where it sits, how it is turned, and
+/// how it is scaled (REQ-3D-009).
+///
+/// `p' = offset + rotation · (scale ⊙ p)` — scaled about the source origin,
+/// turned, then moved, the same order [`InstanceTransform`] uses in 2D. There
+/// is no shear: a 3D instance does not read the `shear` column.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InstancePlacement3 {
+    pub offset: Vec3,
+    /// A unit quaternion.
+    pub rotation: Quat,
+    pub scale: Vec3,
+}
+
+impl InstancePlacement3 {
+    /// The placement that changes nothing.
+    pub const IDENTITY: Self = Self {
+        offset: Vec3(0.0, 0.0, 0.0),
+        rotation: Quat::IDENTITY,
+        scale: Vec3(1.0, 1.0, 1.0),
+    };
+
+    /// A point placed.
+    pub fn apply(&self, p: Vec3) -> Vec3 {
+        let v = self.apply_vector(p);
+        Vec3(
+            self.offset.0 + v.0,
+            self.offset.1 + v.1,
+            self.offset.2 + v.2,
+        )
+    }
+
+    /// A *difference* placed (a normal-free direction such as a tangent):
+    /// scaled and turned, not moved.
+    pub fn apply_vector(&self, v: Vec3) -> Vec3 {
+        self.rotation.rotate(Vec3(
+            v.0 * self.scale.0,
+            v.1 * self.scale.1,
+            v.2 * self.scale.2,
+        ))
+    }
+
+    /// A surface normal placed: the inverse-transpose of the linear part
+    /// `R · S`, which is `R · S⁻¹`, renormalised.
+    ///
+    /// Written with the cofactors of `S` (`n ⊙ (sy·sz, sx·sz, sx·sy)`) rather
+    /// than a division, so a scale of zero on an axis flattens the normal onto
+    /// that axis instead of producing infinity. The cofactor form is
+    /// `det(S) · S⁻¹`, so it is multiplied by the sign of the determinant: a
+    /// mirror (an odd number of negative scales) keeps the normal pointing out
+    /// of the solid it was pointing out of, and [`Self::mirrors`] says the
+    /// triangles' winding has to be flipped to agree with it. A normal that
+    /// flattens to nothing (two zero scales) falls back to the turned input.
+    pub fn apply_normal(&self, n: Vec3) -> Vec3 {
+        let (sx, sy, sz) = (self.scale.0, self.scale.1, self.scale.2);
+        let sign = if self.mirrors() { -1.0 } else { 1.0 };
+        let cofactor = Vec3(
+            n.0 * sy * sz * sign,
+            n.1 * sx * sz * sign,
+            n.2 * sx * sy * sign,
+        );
+        let unit = |v: Vec3| {
+            let length = (v.0 * v.0 + v.1 * v.1 + v.2 * v.2).sqrt();
+            (length > 1e-20).then(|| Vec3(v.0 / length, v.1 / length, v.2 / length))
+        };
+        unit(self.rotation.rotate(cofactor))
+            .or_else(|| unit(self.rotation.rotate(n)))
+            .unwrap_or(n)
+    }
+
+    /// Whether the linear part reverses handedness (an odd number of negative
+    /// scales), so a mesh it places needs its winding flipped.
+    pub fn mirrors(&self) -> bool {
+        self.scale.0 * self.scale.1 * self.scale.2 < 0.0
+    }
+}
+
+/// The instance columns a 3D placement is read from (REQ-3D-009).
+///
+/// **Which column wins** — decided here, once, for every 3D consumer:
+///
+/// * The two dimensions are told apart by `P`: an instance domain whose `P` is
+///   `Vec3` is placed in 3D and reads this type; one whose `P` is `Vec2` is
+///   placed by [`InstanceColumns`] and never looks at `orient` / `scale3`, so
+///   the 2D path cannot change.
+/// * In 3D the rotation is `orient · Rz(rot)` and the scale is
+///   `scale3 ⊙ (scale.x, scale.y, 1)`: **the 2D columns compose with the 3D
+///   ones rather than losing to them.** An absent column is the identity, so
+///   there is no case where both exist but one is dead. The reason it is not
+///   "`orient` overrides `rot`" is that a field modulating `rot` (the 2D
+///   spelling, a single float a user can already drive) would silently stop
+///   doing anything on the 3D copies the moment a scatter wrote `orient`.
+///   `rot` is the turn about Z applied to the source *before* `orient`,
+///   which is the 2D meaning of `rot` inside the placement's own frame.
+/// * `orient` is normalized on read, so a field that wrote an unnormalized
+///   quaternion still places a rotation (and the zero quaternion is the
+///   identity, never `NaN`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InstanceColumns3<'a> {
+    planar: InstanceColumns<'a>,
+    orient: Option<&'a [Vec4]>,
+    scale3: Option<&'a [Vec3]>,
+}
+
+impl<'a> InstanceColumns3<'a> {
+    /// Reads the columns, failing on one that is present with the wrong type.
+    pub fn of(instances: &'a AttributeSet) -> Result<Self, GeometryError> {
+        Ok(Self {
+            planar: InstanceColumns::of(instances)?,
+            orient: instances
+                .get(names::ORIENT)
+                .map(|column| column.as_vec4(names::ORIENT))
+                .transpose()?,
+            scale3: instances
+                .get(names::SCALE3)
+                .map(|column| column.as_vec3(names::SCALE3))
+                .transpose()?,
+        })
+    }
+
+    /// The placement of instance `index`, sitting at `offset`.
+    pub fn placement(&self, index: usize, offset: Vec3) -> InstancePlacement3 {
+        let turn = self
+            .planar
+            .rot
+            .and_then(|v| v.get(index).copied())
+            .unwrap_or(0.0);
+        let orient = self
+            .orient
+            .and_then(|v| v.get(index).copied())
+            .map_or(Quat::IDENTITY, |q| Quat::from_vec4(q).normalized());
+        let scale3 = self
+            .scale3
+            .and_then(|v| v.get(index).copied())
+            .unwrap_or(Vec3(1.0, 1.0, 1.0));
+        let scale2 = self
+            .planar
+            .scale
+            .and_then(|v| v.get(index).copied())
+            .unwrap_or(Vec2(1.0, 1.0));
+        InstancePlacement3 {
+            offset,
+            rotation: orient * Quat::from_axis_angle(Vec3(0.0, 0.0, 1.0), turn),
+            scale: Vec3(scale3.0 * scale2.0, scale3.1 * scale2.1, scale3.2),
+        }
+    }
+}
+
 /// The attribute domain an operation targets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Domain {
@@ -803,6 +952,24 @@ impl Geometry {
         let start = self.indices.len();
         Arc::make_mut(&mut self.indices).extend_from_slice(extra);
         start
+    }
+
+    /// Reverses the winding of every triangle of mesh primitive `primitive`
+    /// (swaps the second and third index of each). A no-op for a path or an
+    /// out-of-range run. For a placement that mirrors the mesh: the normals
+    /// keep pointing out of the solid, so the order of the corners has to turn
+    /// around to still agree with them.
+    pub fn flip_mesh_winding(&mut self, primitive: usize) {
+        let Some(Primitive::Mesh { indices, .. }) = self.primitives.get(primitive) else {
+            return;
+        };
+        let run = indices.clone();
+        if run.end > self.indices.len() {
+            return;
+        }
+        for triangle in Arc::make_mut(&mut self.indices)[run].chunks_exact_mut(3) {
+            triangle.swap(1, 2);
+        }
     }
 
     /// The triangle indices of one mesh primitive, or `None` for a path or an
@@ -2010,5 +2177,151 @@ mod tests {
         assert_eq!(some.placement(0, Vec2(0.0, 0.0)).shear, 0.75);
         // Out of range reads as the default rather than panicking.
         assert_eq!(some.placement(3, Vec2(0.0, 0.0)).shear, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod placement3_tests {
+    use super::*;
+    use crate::types::Vec4;
+    use std::f32::consts::FRAC_PI_2;
+
+    fn near(a: Vec3, b: Vec3) {
+        assert!(
+            (a.0 - b.0).abs() < 1e-5 && (a.1 - b.1).abs() < 1e-5 && (a.2 - b.2).abs() < 1e-5,
+            "{a:?} != {b:?}"
+        );
+    }
+
+    /// A quarter turn about `axis` as an `orient` element `(x, y, z, w)`.
+    fn quarter(axis: [f32; 3]) -> Vec4 {
+        let h = FRAC_PI_2 / 2.0;
+        Vec4(
+            axis[0] * h.sin(),
+            axis[1] * h.sin(),
+            axis[2] * h.sin(),
+            h.cos(),
+        )
+    }
+
+    fn instances(columns: Vec<(&str, AttributeArray)>) -> AttributeSet {
+        let mut set = AttributeSet::new();
+        for (name, column) in columns {
+            set.insert(name, column).unwrap();
+        }
+        set
+    }
+
+    /// Hand-worked: scale `(2, 1, 1)`, quarter turn about Z (x → y), then move.
+    #[test]
+    fn a_placement_scales_then_turns_then_moves() {
+        let set = instances(vec![
+            (
+                "orient",
+                AttributeArray::Vec4(vec![quarter([0.0, 0.0, 1.0])]),
+            ),
+            ("scale3", AttributeArray::Vec3(vec![Vec3(2.0, 1.0, 1.0)])),
+        ]);
+        let placement = InstanceColumns3::of(&set)
+            .unwrap()
+            .placement(0, Vec3(10.0, 0.0, 5.0));
+        near(placement.apply(Vec3(1.0, 0.0, 0.0)), Vec3(10.0, 2.0, 5.0));
+        // A difference is not moved.
+        near(
+            placement.apply_vector(Vec3(1.0, 0.0, 0.0)),
+            Vec3(0.0, 2.0, 0.0),
+        );
+    }
+
+    /// The precedence rule: the 2D columns compose with the 3D ones.
+    /// `rot` (a quarter turn about Z) is applied to the source first, then
+    /// `orient` (a quarter turn about X): `(1, 0, 0) → (0, 1, 0) → (0, 0, 1)`.
+    /// The opposite order would give `(0, 1, 0)`.
+    #[test]
+    fn rot_turns_the_source_before_orient_does() {
+        let set = instances(vec![
+            ("rot", AttributeArray::F32(vec![FRAC_PI_2])),
+            (
+                "orient",
+                AttributeArray::Vec4(vec![quarter([1.0, 0.0, 0.0])]),
+            ),
+        ]);
+        let placement = InstanceColumns3::of(&set)
+            .unwrap()
+            .placement(0, Vec3(0.0, 0.0, 0.0));
+        near(placement.apply(Vec3(1.0, 0.0, 0.0)), Vec3(0.0, 0.0, 1.0));
+    }
+
+    /// `rot` alone is a turn about Z, the 2D meaning, and `scale` alone widens
+    /// to `(x, y, 1)`; both together with `scale3` multiply per axis.
+    #[test]
+    fn the_2d_columns_still_mean_what_they_meant() {
+        let rot_only = instances(vec![("rot", AttributeArray::F32(vec![FRAC_PI_2]))]);
+        let placement = InstanceColumns3::of(&rot_only)
+            .unwrap()
+            .placement(0, Vec3(0.0, 0.0, 0.0));
+        near(placement.apply(Vec3(1.0, 0.0, 0.0)), Vec3(0.0, 1.0, 0.0));
+
+        let scaled = instances(vec![
+            ("scale", AttributeArray::Vec2(vec![Vec2(5.0, 6.0)])),
+            ("scale3", AttributeArray::Vec3(vec![Vec3(2.0, 3.0, 4.0)])),
+        ]);
+        let placement = InstanceColumns3::of(&scaled)
+            .unwrap()
+            .placement(0, Vec3(0.0, 0.0, 0.0));
+        near(placement.apply(Vec3(1.0, 1.0, 1.0)), Vec3(10.0, 18.0, 4.0));
+    }
+
+    /// An absent column, a row past a short column, an unnormalized `orient`
+    /// and the zero quaternion all place sensibly rather than producing `NaN`.
+    #[test]
+    fn missing_and_degenerate_columns_fall_back_to_the_identity() {
+        let empty = AttributeSet::new();
+        let columns = InstanceColumns3::of(&empty).unwrap();
+        assert_eq!(
+            columns.placement(7, Vec3(1.0, 2.0, 3.0)),
+            InstancePlacement3 {
+                offset: Vec3(1.0, 2.0, 3.0),
+                ..InstancePlacement3::IDENTITY
+            }
+        );
+
+        let big = quarter([0.0, 0.0, 1.0]);
+        let set = instances(vec![(
+            "orient",
+            AttributeArray::Vec4(vec![
+                Vec4(big.0 * 3.0, big.1 * 3.0, big.2 * 3.0, big.3 * 3.0),
+                Vec4(0.0, 0.0, 0.0, 0.0),
+            ]),
+        )]);
+        let columns = InstanceColumns3::of(&set).unwrap();
+        near(
+            columns
+                .placement(0, Vec3(0.0, 0.0, 0.0))
+                .apply(Vec3(1.0, 0.0, 0.0)),
+            Vec3(0.0, 1.0, 0.0),
+        );
+        near(
+            columns
+                .placement(1, Vec3(0.0, 0.0, 0.0))
+                .apply(Vec3(1.0, 0.0, 0.0)),
+            Vec3(1.0, 0.0, 0.0),
+        );
+        // Past the end of the column: identity, not a panic.
+        near(
+            columns
+                .placement(5, Vec3(0.0, 0.0, 0.0))
+                .apply(Vec3(1.0, 0.0, 0.0)),
+            Vec3(1.0, 0.0, 0.0),
+        );
+    }
+
+    #[test]
+    fn a_column_of_the_wrong_type_is_an_error() {
+        let set = instances(vec![(
+            "orient",
+            AttributeArray::Vec3(vec![Vec3(0.0, 0.0, 0.0)]),
+        )]);
+        assert!(InstanceColumns3::of(&set).is_err());
     }
 }

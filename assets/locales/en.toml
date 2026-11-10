@@ -1685,13 +1685,87 @@ pivot = "Origin of the rotation and scale while use_centroid is off."
 [node."shape.custom_path".group]
 transform = "Transform"
 
+[node."mesh.box"]
+label = "Box"
+description = "Creates a box mesh with normals and UVs. Each face is its own set of vertices so edges stay sharp."
+[node."mesh.box".params]
+center = "Center of the box."
+size = "Width, height and depth."
+segments_x = "Divisions along X."
+segments_y = "Divisions along Y."
+segments_z = "Divisions along Z."
+translate = "Moves the output after this node has built it."
+rotation = "Euler angles in degrees applied to the output; 2D rotation is about Z."
+scale = "Scale factor per axis applied to the output."
+use_centroid = "Rotate and scale about the output's bounding-box center instead of the pivot."
+pivot = "Origin of the rotation and scale while use_centroid is off."
+[node."mesh.box".group]
+shape = "Shape"
+transform = "Transform"
+
+[node."mesh.sphere"]
+label = "Sphere"
+description = "Creates a UV sphere mesh about the Y axis with normals and UVs."
+[node."mesh.sphere".params]
+center = "Center of the sphere."
+radius = "Radius."
+segments = "Divisions around the Y axis (at least 3)."
+rings = "Divisions from pole to pole (at least 2)."
+translate = "Moves the output after this node has built it."
+rotation = "Euler angles in degrees applied to the output; 2D rotation is about Z."
+scale = "Scale factor per axis applied to the output."
+use_centroid = "Rotate and scale about the output's bounding-box center instead of the pivot."
+pivot = "Origin of the rotation and scale while use_centroid is off."
+[node."mesh.sphere".group]
+shape = "Shape"
+transform = "Transform"
+
+[node."mesh.cylinder"]
+label = "Cylinder"
+description = "Creates a cylinder mesh about the Y axis with normals and UVs."
+[node."mesh.cylinder".params]
+center = "Center of the cylinder."
+radius = "Radius."
+height = "Height along Y."
+segments = "Divisions around the axis (at least 3)."
+height_segments = "Divisions along the height."
+caps = "Close both ends with a disc."
+translate = "Moves the output after this node has built it."
+rotation = "Euler angles in degrees applied to the output; 2D rotation is about Z."
+scale = "Scale factor per axis applied to the output."
+use_centroid = "Rotate and scale about the output's bounding-box center instead of the pivot."
+pivot = "Origin of the rotation and scale while use_centroid is off."
+[node."mesh.cylinder".group]
+shape = "Shape"
+divisions = "Divisions"
+transform = "Transform"
+
+[node."mesh.plane"]
+label = "Plane"
+description = "Creates a rectangular mesh in the XY plane, facing the camera, with normals and UVs."
+[node."mesh.plane".params]
+center = "Center of the plane."
+size = "Width and height."
+segments_x = "Divisions along X."
+segments_y = "Divisions along Y."
+translate = "Moves the output after this node has built it."
+rotation = "Euler angles in degrees applied to the output; 2D rotation is about Z."
+scale = "Scale factor per axis applied to the output."
+use_centroid = "Rotate and scale about the output's bounding-box center instead of the pivot."
+pivot = "Origin of the rotation and scale while use_centroid is off."
+[node."mesh.plane".group]
+shape = "Shape"
+transform = "Transform"
+
 [node."scatter.grid"]
 label = "Grid"
 description = "Instances the source geometry on a regular grid."
 [node."scatter.grid".params]
 count_x = "Number of instances along X."
 count_y = "Number of instances along Y."
+count_z = "Number of instances along Z. Above 1 the grid is placed in 3D."
 spacing = "Distance between grid points in pixels."
+spacing_z = "Distance between grid points along Z."
 center = "Center of the grid in pixels."
 center_input = "Re-centre each source geometry on its anchor before instancing."
 piece_mode = "What is dealt out: whole (one connected wire is one source) or instances (each wire is split into its own instances, so a text stamps one character per point)."
@@ -1715,6 +1789,7 @@ count = "Number of instances."
 radius = "Circle radius in pixels."
 center = "Center of the circle in pixels."
 align_rotation = "Rotate each instance to face outward from the center."
+axis = "Axis the ring turns about: z is the flat ring in the XY plane, x and y stand it up in 3D."
 center_input = "Re-centre each source geometry on its anchor before instancing."
 piece_mode = "What is dealt out: whole (one connected wire is one source) or instances (each wire is split into its own instances, so a text stamps one character per point)."
 source_mode = "How sources are assigned to points when several are connected: sequential or random."
@@ -1752,6 +1827,7 @@ description = "Scatters instances of the source geometry randomly over an area."
 [node."scatter.scatter".params]
 count = "Number of instances."
 area = "Size of the scatter area in pixels."
+area_z = "Depth of the scatter area along Z. Above 0 the copies are scattered through a volume in 3D."
 center = "Center of the area in pixels."
 seed = "Random seed for placement."
 center_input = "Re-centre each source geometry on its anchor before instancing."

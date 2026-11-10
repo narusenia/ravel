@@ -7,20 +7,34 @@
 //! new [`Geometry`] whose instance domain carries `index`, `P`, `rot`, and
 //! `scale` for every copy.  The source geometry is set as `instance_source`
 //! so the rasterizer stamps it at each instance position.
+//!
+//! # 3D (REQ-3D-009)
+//!
+//! A node places in 3D — `P` is `Vec3`, with `orient` (a quaternion) and
+//! `scale3` in place of `rot` / `scale` — when **a 3D source is connected**
+//! (a mesh, or a `Vec3` `P`) or when the node is asked for a third dimension:
+//! `scatter.grid` with `count_z > 1`, `scatter.circular` with an `axis` other
+//! than `z`, `scatter.scatter` with `area_z > 0`, `scatter.path_array` along a
+//! `Vec3` path. Otherwise the output is the planar one, column for column.
+//! Which of `rot` / `orient` and `scale` / `scale3` a 3D consumer reads is
+//! `InstanceColumns3`'s rule (they compose), written down in
+//! `docs/specifications/procedural-geometry.md`. Every node refuses more than
+//! [`MAX_INSTANCES`] copies.
 
-use std::f32::consts::PI;
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use ravel_core::eval::{EvalContext, EvalScope, NodeProcessor, ResolvedParams};
 use ravel_core::geometry::ops::{attach_piece_attributes, instance_pieces};
+use ravel_core::geometry::rotation::Quat;
 use ravel_core::geometry::{
-    AttributeArray, AttributeSet, Domain, Geometry, InstanceSource, Primitive, bounds_center,
-    element_hash as hash, names,
+    AttributeArray, AttributeSet, Domain, Geometry, InstanceSource, Positions, Primitive,
+    bounds_center, element_hash as hash, names,
 };
 use ravel_core::graph::Node;
 use ravel_core::registry::{PIECE_MODE_INSTANCES, PIECE_MODE_PARAM, PIECE_MODE_WHOLE};
-use ravel_core::types::{NodeData, Vec2};
+use ravel_core::types::{NodeData, Vec2, Vec3};
 
 mod points;
 pub use points::PointsProcessor;
@@ -56,6 +70,63 @@ fn populate_instances(geo: &mut Geometry, positions: Vec<Vec2>, rotations: Vec<f
         .expect("same length");
 }
 
+/// Most instances one `scatter.*` node will place. The count is a product of
+/// user-typed integers (a 1000 x 1000 x 1000 grid is a billion rows), so a slip
+/// of a digit becomes an evaluation error here instead of an allocation that
+/// takes the process with it. A 1000 x 1000 grid, the largest the 2D template
+/// has always allowed, is exactly at the limit and still evaluates.
+pub const MAX_INSTANCES: u64 = 1_000_000;
+
+/// Refuses a placement of more than [`MAX_INSTANCES`] copies. `count` is the
+/// product the node computed from its parameters, saturated so an overflowing
+/// one is still an error.
+fn check_instance_budget(node: &str, count: u64) -> anyhow::Result<()> {
+    if count > MAX_INSTANCES {
+        anyhow::bail!("{node} would place {count} instances; the limit is {MAX_INSTANCES}");
+    }
+    Ok(())
+}
+
+/// Whether `source` lives in 3D: it has a mesh, or its `P` is `Vec3` in the
+/// point or instance domain. A 3D source makes the duplicating node place in
+/// 3D too (`Vec3` `P` with `orient` / `scale3`), because instances placed in
+/// the plane could not carry it anywhere a 3D camera sees.
+fn is_spatial(source: &Geometry) -> bool {
+    source.has_mesh()
+        || [Domain::Point, Domain::Instance]
+            .into_iter()
+            .any(|domain| matches!(source.positions(domain), Some(Ok(Positions::D3(_)))))
+}
+
+fn any_spatial(sources: &[&Geometry]) -> bool {
+    sources.iter().copied().any(is_spatial)
+}
+
+/// The 3D counterpart of [`populate_instances`]: `P` is `Vec3`, the pose is an
+/// `orient` quaternion and the scale a `scale3`. No `rot` / `scale` columns are
+/// written — an absent column is the identity, and the placement rule composes
+/// them with these if a later node adds them (`InstanceColumns3`).
+fn populate_instances3(geo: &mut Geometry, positions: Vec<Vec3>, orients: Vec<Quat>) {
+    let n = positions.len();
+    let indices: Vec<i32> = (0..n as i32).collect();
+    let orient = orients.into_iter().map(Quat::to_vec4).collect();
+    let scale3 = vec![Vec3(1.0, 1.0, 1.0); n];
+
+    let instances = geo.instances_mut();
+    instances
+        .insert(names::INDEX, AttributeArray::I32(indices))
+        .expect("first column");
+    instances
+        .insert(names::P, AttributeArray::Vec3(positions))
+        .expect("same length as index");
+    instances
+        .insert(names::ORIENT, AttributeArray::Vec4(orient))
+        .expect("same length");
+    instances
+        .insert(names::SCALE3, AttributeArray::Vec3(scale3))
+        .expect("same length");
+}
+
 /// Connected source geometries in the variadic group beginning at `start`.
 fn source_inputs(inputs: &[Option<Arc<dyn NodeData>>], start: usize) -> Vec<&Geometry> {
     inputs
@@ -69,18 +140,17 @@ fn source_inputs(inputs: &[Option<Arc<dyn NodeData>>], start: usize) -> Vec<&Geo
 /// at the origin when centering is enabled. Missing anchors fall back to the
 /// source bounds; sources without point or instance positions stay unchanged.
 ///
-/// Centering is planar-only: `anchor` is a `Vec2` detail attribute, so a 3D
-/// source has no place to record where its recentred origin went. A `Vec3`
-/// source is an explicit error rather than a silent xy-only shift; 3D
-/// duplication arrives with the `orient` / `scale3` standard attributes.
+/// A planar source recentres on its `Vec2` `anchor` detail, or its bounds. A 3D
+/// source has no `anchor` to read — the attribute is `Vec2`, with no place to
+/// record where a recentred origin went — so it recentres on the **bounds
+/// centre in all three axes** and writes no anchor, which is what keeps a
+/// box offset from the origin from landing off-grid.
 fn instance_source(source: &Geometry, center_input: bool) -> anyhow::Result<Arc<Geometry>> {
     if !center_input {
         return Ok(Arc::new(source.clone()));
     }
-    for domain in [Domain::Point, Domain::Instance] {
-        if let Some(positions) = source.positions(domain) {
-            positions?.require_planar("scatter.* with center_input")?;
-        }
+    if is_spatial(source) {
+        return instance_source3(source);
     }
 
     let anchor = match source.detail().get(names::ANCHOR) {
@@ -107,6 +177,39 @@ fn instance_source(source: &Geometry, center_input: bool) -> anyhow::Result<Arc<
     centered
         .detail_mut()
         .insert(names::ANCHOR, AttributeArray::Vec2(vec![Vec2(0.0, 0.0)]))?;
+    Ok(Arc::new(centered))
+}
+
+/// [`instance_source`] for a source in 3D: shifts every `P` column, whatever
+/// its dimension, by the bounds centre.
+fn instance_source3(source: &Geometry) -> anyhow::Result<Arc<Geometry>> {
+    let Some(center) = bounds_center(source) else {
+        return Ok(Arc::new(source.clone()));
+    };
+    fn translate_positions(attributes: &mut AttributeSet, center: Vec3) -> anyhow::Result<()> {
+        if attributes.get(names::P).is_none() {
+            return Ok(());
+        }
+        match attributes.make_mut(names::P)? {
+            AttributeArray::Vec3(values) => {
+                for position in values {
+                    position.0 -= center.0;
+                    position.1 -= center.1;
+                    position.2 -= center.2;
+                }
+            }
+            column => {
+                for position in column.as_vec2_mut(names::P)? {
+                    position.0 -= center.0;
+                    position.1 -= center.1;
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut centered = source.clone();
+    translate_positions(centered.points_mut(), center)?;
+    translate_positions(centered.instances_mut(), center)?;
     Ok(Arc::new(centered))
 }
 
@@ -239,31 +342,59 @@ impl NodeProcessor for GridProcessor {
 
         let count_x = params.i32_or("count_x", 5);
         let count_y = params.i32_or("count_y", 5);
+        let count_z = params.i32_or("count_z", 1);
         let [spacing_x, spacing_y] = params.vec2_or("spacing", [20.0, 20.0]);
+        let spacing_z = params.f32_or("spacing_z", 20.0);
         let [center_x, center_y] = params.vec2_or("center", [0.0, 0.0]);
 
         let nx = count_x.max(1) as usize;
         let ny = count_y.max(1) as usize;
+        let nz = count_z.max(1) as usize;
+        check_instance_budget(
+            "scatter.grid",
+            (nx as u64)
+                .saturating_mul(ny as u64)
+                .saturating_mul(nz as u64),
+        )?;
         let total_w = (nx as f32 - 1.0) * spacing_x;
         let total_h = (ny as f32 - 1.0) * spacing_y;
         let origin_x = center_x - total_w / 2.0;
         let origin_y = center_y - total_h / 2.0;
 
-        let n = nx * ny;
-        let mut positions = Vec::with_capacity(n);
-        let rotations = vec![0.0; n];
-
-        for iy in 0..ny {
-            for ix in 0..nx {
-                positions.push(Vec2(
-                    origin_x + ix as f32 * spacing_x,
-                    origin_y + iy as f32 * spacing_y,
-                ));
-            }
-        }
-
         let mut geo = Geometry::new();
-        populate_instances(&mut geo, positions, rotations);
+        // A third axis, or a 3D source, takes the grid into 3D; otherwise
+        // this is the 2D grid it always was, down to the columns it writes.
+        if nz > 1 || any_spatial(&sources) {
+            let origin_z = -(nz as f32 - 1.0) * spacing_z / 2.0;
+            let mut positions = Vec::with_capacity(nx * ny * nz);
+            for iz in 0..nz {
+                for iy in 0..ny {
+                    for ix in 0..nx {
+                        positions.push(Vec3(
+                            origin_x + ix as f32 * spacing_x,
+                            origin_y + iy as f32 * spacing_y,
+                            origin_z + iz as f32 * spacing_z,
+                        ));
+                    }
+                }
+            }
+            let orients = vec![Quat::IDENTITY; positions.len()];
+            populate_instances3(&mut geo, positions, orients);
+        } else {
+            let n = nx * ny;
+            let mut positions = Vec::with_capacity(n);
+            let rotations = vec![0.0; n];
+
+            for iy in 0..ny {
+                for ix in 0..nx {
+                    positions.push(Vec2(
+                        origin_x + ix as f32 * spacing_x,
+                        origin_y + iy as f32 * spacing_y,
+                    ));
+                }
+            }
+            populate_instances(&mut geo, positions, rotations);
+        }
         attach_instance_sources(&mut geo, &sources, params)?;
         Ok(Arc::new(geo))
     }
@@ -296,24 +427,83 @@ impl NodeProcessor for CircularProcessor {
         let radius = params.f32_or("radius", 50.0);
         let [center_x, center_y] = params.vec2_or("center", [0.0, 0.0]);
         let align_rotation = params.bool_or("align_rotation", true);
+        let axis = CircleAxis::parse(params.str_or("axis", "z"));
 
         let n = count.max(1) as usize;
-        let mut positions = Vec::with_capacity(n);
-        let mut rotations = Vec::with_capacity(n);
-
-        for i in 0..n {
-            let angle = 2.0 * PI * i as f32 / n as f32;
-            positions.push(Vec2(
-                center_x + radius * angle.cos(),
-                center_y + radius * angle.sin(),
-            ));
-            rotations.push(if align_rotation { angle } else { 0.0 });
-        }
+        check_instance_budget("scatter.circular", n as u64)?;
 
         let mut geo = Geometry::new();
-        populate_instances(&mut geo, positions, rotations);
+        if axis != CircleAxis::Z || any_spatial(&sources) {
+            let (axis_vector, base, base_turn) = axis.frame();
+            let mut positions = Vec::with_capacity(n);
+            let mut orients = Vec::with_capacity(n);
+            for i in 0..n {
+                let angle = TAU * i as f32 / n as f32;
+                let turn = Quat::from_axis_angle(axis_vector, angle);
+                let at = turn.rotate(Vec3(base.0 * radius, base.1 * radius, base.2 * radius));
+                positions.push(Vec3(center_x + at.0, center_y + at.1, at.2));
+                orients.push(if align_rotation {
+                    turn * base_turn
+                } else {
+                    Quat::IDENTITY
+                });
+            }
+            populate_instances3(&mut geo, positions, orients);
+        } else {
+            let mut positions = Vec::with_capacity(n);
+            let mut rotations = Vec::with_capacity(n);
+
+            for i in 0..n {
+                let angle = 2.0 * PI * i as f32 / n as f32;
+                positions.push(Vec2(
+                    center_x + radius * angle.cos(),
+                    center_y + radius * angle.sin(),
+                ));
+                rotations.push(if align_rotation { angle } else { 0.0 });
+            }
+            populate_instances(&mut geo, positions, rotations);
+        }
         attach_instance_sources(&mut geo, &sources, params)?;
         Ok(Arc::new(geo))
+    }
+}
+
+/// The axis `scatter.circular` turns about, which picks the plane of the ring.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CircleAxis {
+    X,
+    Y,
+    /// The 2D ring, in the XY plane: the default and what a graph saved before
+    /// the parameter existed falls back to.
+    Z,
+}
+
+impl CircleAxis {
+    /// An unknown name is the default rather than an error: the parameter is a
+    /// dropdown, so a stale spelling can only come from an older file.
+    fn parse(name: &str) -> Self {
+        match name {
+            "x" => Self::X,
+            "y" => Self::Y,
+            _ => Self::Z,
+        }
+    }
+
+    /// The unit axis, the radial direction the first copy sits at (angle 0),
+    /// and the turn that carries a copy's local +X onto that direction — so
+    /// `align_rotation` faces +X outward on every axis, as `rot = angle` does in
+    /// 2D. `Z` and `Y` rings start on +X; an `X` ring cannot (+X is its axis) and
+    /// starts on +Y.
+    fn frame(self) -> (Vec3, Vec3, Quat) {
+        match self {
+            Self::Z => (Vec3(0.0, 0.0, 1.0), Vec3(1.0, 0.0, 0.0), Quat::IDENTITY),
+            Self::Y => (Vec3(0.0, 1.0, 0.0), Vec3(1.0, 0.0, 0.0), Quat::IDENTITY),
+            Self::X => (
+                Vec3(1.0, 0.0, 0.0),
+                Vec3(0.0, 1.0, 0.0),
+                Quat::from_axis_angle(Vec3(0.0, 0.0, 1.0), FRAC_PI_2),
+            ),
+        }
     }
 }
 
@@ -330,9 +520,11 @@ impl PathArrayProcessor {
 }
 
 /// One straight segment of a path polyline with its global arc-length span.
+/// Held in 3D; a planar path has `z = 0`, which adds an exact zero to every
+/// length and leaves the 2D result bit-identical.
 struct PathSegment {
-    a: Vec2,
-    b: Vec2,
+    a: Vec3,
+    b: Vec3,
     cum_start: f32,
     cum_end: f32,
 }
@@ -354,27 +546,27 @@ impl NodeProcessor for PathArrayProcessor {
 
         let sources = source_inputs(inputs, 1);
 
-        // Placement along the path is an arc-length walk, which is planar-only
-        // for the same reason `attribute.path_sample` is.
-        let path_points = path_geo
-            .positions(Domain::Point)
-            .context("path geometry missing P")??
-            .require_planar("scatter.path_array")?;
         // A mesh has no arc length to walk. Skipping it would quietly place
         // the copies along whatever paths happened to share the geometry, or
         // along the fallback polyline through every point when there are
         // none, so the input is refused instead.
         path_geo.require_paths("scatter.path_array")?;
+        let positions = path_geo
+            .positions(Domain::Point)
+            .context("path geometry missing P")??;
+        // A path in 3D, or any 3D source, places the copies in 3D.
+        let spatial = matches!(positions, Positions::D3(_)) || any_spatial(&sources);
+        let points: Vec<Vec3> = positions.iter3().collect();
 
-        let segments = collect_path_segments(path_geo, path_points);
+        let segments = collect_path_segments(path_geo, &points);
         let total_len = segments.last().map_or(0.0, |s| s.cum_end);
         if segments.is_empty() || total_len < 1e-9 {
             return Ok(Arc::new(Geometry::new()));
         }
 
         let n = params.i32_or("count", 10).max(1) as usize;
-        let mut positions = Vec::with_capacity(n);
-        let mut rotations = Vec::with_capacity(n);
+        check_instance_budget("scatter.path_array", n as u64)?;
+        let mut placed = Vec::with_capacity(n);
 
         for i in 0..n {
             let t = if n > 1 {
@@ -395,37 +587,74 @@ impl NodeProcessor for PathArrayProcessor {
                 0.0
             };
 
-            let pos = Vec2(
-                seg.a.0 + (seg.b.0 - seg.a.0) * seg_t,
-                seg.a.1 + (seg.b.1 - seg.a.1) * seg_t,
-            );
-            let rot = (seg.b.1 - seg.a.1).atan2(seg.b.0 - seg.a.0);
-
-            positions.push(pos);
-            rotations.push(rot);
+            placed.push((
+                Vec3(
+                    seg.a.0 + (seg.b.0 - seg.a.0) * seg_t,
+                    seg.a.1 + (seg.b.1 - seg.a.1) * seg_t,
+                    seg.a.2 + (seg.b.2 - seg.a.2) * seg_t,
+                ),
+                Vec3(seg.b.0 - seg.a.0, seg.b.1 - seg.a.1, seg.b.2 - seg.a.2),
+            ));
         }
 
         let mut geo = Geometry::new();
-        populate_instances(&mut geo, positions, rotations);
+        if spatial {
+            let (positions, orients) = placed
+                .into_iter()
+                .map(|(position, tangent)| (position, facing(tangent)))
+                .unzip();
+            populate_instances3(&mut geo, positions, orients);
+        } else {
+            let (positions, rotations) = placed
+                .into_iter()
+                .map(|(position, tangent)| {
+                    (Vec2(position.0, position.1), tangent.1.atan2(tangent.0))
+                })
+                .unzip();
+            populate_instances(&mut geo, positions, rotations);
+        }
         attach_instance_sources(&mut geo, &sources, params)?;
         Ok(Arc::new(geo))
     }
+}
+
+/// The turn that carries +X onto `tangent`, by the shortest arc — what
+/// `rot = atan2(y, x)` is in 2D, so a planar tangent gives the same turn about
+/// Z. A tangent pointing exactly backwards has no shortest arc; it turns half
+/// a revolution about Z, the planar answer. A zero-length one is no turn.
+fn facing(tangent: Vec3) -> Quat {
+    let length = (tangent.0 * tangent.0 + tangent.1 * tangent.1 + tangent.2 * tangent.2).sqrt();
+    if length < 1e-12 {
+        return Quat::IDENTITY;
+    }
+    let to = Vec3(tangent.0 / length, tangent.1 / length, tangent.2 / length);
+    // cross(+X, to) = (0, -to.z, to.y); dot(+X, to) = to.x.
+    let axis = Vec3(0.0, -to.2, to.1);
+    if (axis.1 * axis.1 + axis.2 * axis.2) < 1e-12 {
+        return if to.0 >= 0.0 {
+            Quat::IDENTITY
+        } else {
+            Quat::from_axis_angle(Vec3(0.0, 0.0, 1.0), PI)
+        };
+    }
+    let angle = to.0.clamp(-1.0, 1.0).acos();
+    Quat::from_axis_angle(axis, angle)
 }
 
 /// Flattens path primitives into a global segment list with cumulative arc
 /// lengths.  Closed primitives contribute their closing segment.  A geometry
 /// with no primitives falls back to treating the whole P column as one open
 /// polyline.
-fn collect_path_segments(geo: &Geometry, points: &[Vec2]) -> Vec<PathSegment> {
+fn collect_path_segments(geo: &Geometry, points: &[Vec3]) -> Vec<PathSegment> {
     let mut segments = Vec::new();
     let mut cum = 0.0f32;
 
-    let mut push_polyline = |verts: &[Vec2], closed: bool, segments: &mut Vec<PathSegment>| {
+    let mut push_polyline = |verts: &[Vec3], closed: bool, segments: &mut Vec<PathSegment>| {
         if verts.len() < 2 {
             return;
         }
-        let mut push = |a: Vec2, b: Vec2, segments: &mut Vec<PathSegment>| {
-            let len = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+        let mut push = |a: Vec3, b: Vec3, segments: &mut Vec<PathSegment>| {
+            let len = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2) + (b.2 - a.2).powi(2)).sqrt();
             segments.push(PathSegment {
                 a,
                 b,
@@ -486,34 +715,62 @@ impl NodeProcessor for ScatterProcessor {
 
         let count = params.i32_or("count", 20);
         let [area_x, area_y] = params.vec2_or("area", [200.0, 200.0]);
+        let area_z = params.f32_or("area_z", 0.0);
         let [center_x, center_y] = params.vec2_or("center", [0.0, 0.0]);
         let seed = params.i32_or("seed", 0) as u32;
 
         let n = count.max(0) as usize;
-        let mut positions = Vec::with_capacity(n);
-        let mut rotations = Vec::with_capacity(n);
+        check_instance_budget("scatter.scatter", n as u64)?;
 
         let half_x = area_x / 2.0;
         let half_y = area_y / 2.0;
 
-        for i in 0..n {
-            let h = hash(seed, i as u32);
-            let rx = hash_to_f32(h);
-            let ry = hash_to_f32(hash(h, 1));
-            let rr = hash_to_f32(hash(h, 2));
-
-            positions.push(Vec2(
-                center_x + (rx * 2.0 - 1.0) * half_x,
-                center_y + (ry * 2.0 - 1.0) * half_y,
-            ));
-            rotations.push(rr * 2.0 * PI);
-        }
-
         let mut geo = Geometry::new();
-        populate_instances(&mut geo, positions, rotations);
+        // A depth to the area, or a 3D source, scatters through a volume.
+        if area_z > 0.0 || any_spatial(&sources) {
+            let half_z = area_z.max(0.0) / 2.0;
+            let mut positions = Vec::with_capacity(n);
+            let mut orients = Vec::with_capacity(n);
+            for i in 0..n {
+                let h = hash(seed, i as u32);
+                let unit = |channel: u32| hash_to_f32(hash(h, channel));
+                positions.push(Vec3(
+                    center_x + (hash_to_f32(h) * 2.0 - 1.0) * half_x,
+                    center_y + (unit(1) * 2.0 - 1.0) * half_y,
+                    (unit(3) * 2.0 - 1.0) * half_z,
+                ));
+                orients.push(random_rotation(unit(4), unit(5), unit(6)));
+            }
+            populate_instances3(&mut geo, positions, orients);
+        } else {
+            let mut positions = Vec::with_capacity(n);
+            let mut rotations = Vec::with_capacity(n);
+            for i in 0..n {
+                let h = hash(seed, i as u32);
+                let rx = hash_to_f32(h);
+                let ry = hash_to_f32(hash(h, 1));
+                let rr = hash_to_f32(hash(h, 2));
+
+                positions.push(Vec2(
+                    center_x + (rx * 2.0 - 1.0) * half_x,
+                    center_y + (ry * 2.0 - 1.0) * half_y,
+                ));
+                rotations.push(rr * 2.0 * PI);
+            }
+            populate_instances(&mut geo, positions, rotations);
+        }
         attach_instance_sources(&mut geo, &sources, params)?;
         Ok(Arc::new(geo))
     }
+}
+
+/// A uniformly distributed rotation from three uniform `[0, 1)` numbers
+/// (Shoemake's method), so a scatter in 3D turns each copy to any attitude
+/// with equal likelihood rather than only about Z.
+fn random_rotation(u1: f32, u2: f32, u3: f32) -> Quat {
+    let (a, b) = (TAU * u2, TAU * u3);
+    let (r1, r2) = ((1.0 - u1).sqrt(), u1.sqrt());
+    Quat(r1 * a.sin(), r1 * a.cos(), r2 * b.sin(), r2 * b.cos())
 }
 
 fn hash_to_f32(h: u32) -> f32 {
@@ -649,28 +906,81 @@ mod tests {
         chain.join(": ")
     }
 
-    /// Walking a path by arc length is planar, the same way
-    /// `attribute.path_sample` is.
+    /// A path in 3D is walked by 3D arc length, and each copy turns +X onto
+    /// the local tangent (the 2D `rot = atan2` generalised).
     #[test]
-    fn path_array_rejects_a_three_dimensional_path() {
-        let mut path = Geometry::from_points3(vec![
-            Vec3(0.0, 0.0, 0.0),
-            Vec3(10.0, 0.0, 10.0),
-            Vec3(10.0, 10.0, 10.0),
-        ]);
+    fn path_array_walks_a_three_dimensional_path() {
+        let mut path = Geometry::from_points3(vec![Vec3(0.0, 0.0, 0.0), Vec3(3.0, 4.0, 12.0)]);
         path.push_primitive(Primitive::Path {
-            verts: 0..3,
+            verts: 0..2,
             closed: false,
         });
-        let node = make_node("scatter.path_array", &[("count", ParameterValue::Int(3))]);
-        let error = run_err(
+        let node = make_node(
+            "scatter.path_array",
+            &[
+                ("count", ParameterValue::Int(3)),
+                ("center_input", ParameterValue::Bool(false)),
+            ],
+        );
+        let out = run(
             &node,
             Arc::new(PathArrayProcessor::from_node(&node)),
             &[Arc::new(path)],
         );
-        assert!(
-            error.contains("scatter.path_array requires 2D positions") && error.contains("Vec3"),
-            "the message has to name the operation and the dimension: {error}"
+        // Length 13; the middle copy is at half of it.
+        let p = positions3(&out);
+        assert_eq!(p[0], Vec3(0.0, 0.0, 0.0));
+        near3(p[1], Vec3(1.5, 2.0, 6.0));
+        near3(p[2], Vec3(3.0, 4.0, 12.0));
+        let tangent = Vec3(3.0 / 13.0, 4.0 / 13.0, 12.0 / 13.0);
+        for placement in placements3(&out) {
+            near3(placement.apply_vector(Vec3(1.0, 0.0, 0.0)), tangent);
+        }
+        assert!(out.instances().get(names::ROT).is_none());
+    }
+
+    /// The shortest-arc turn the path array writes: along +X is no turn, along
+    /// −X is a half turn about Z (the planar answer, since a straight reversal
+    /// has no unique arc), and a vertical tangent stands the copy up.
+    #[test]
+    fn facing_turns_plus_x_onto_the_tangent() {
+        let x = Vec3(1.0, 0.0, 0.0);
+        near3(facing(Vec3(5.0, 0.0, 0.0)).rotate(x), x);
+        near3(facing(Vec3(-2.0, 0.0, 0.0)).rotate(x), Vec3(-1.0, 0.0, 0.0));
+        near3(facing(Vec3(0.0, 0.0, 3.0)).rotate(x), Vec3(0.0, 0.0, 1.0));
+        near3(facing(Vec3(0.0, -2.0, 0.0)).rotate(x), Vec3(0.0, -1.0, 0.0));
+        assert_eq!(facing(Vec3(0.0, 0.0, 0.0)), Quat::IDENTITY);
+    }
+
+    /// A planar path under a 3D source is placed in 3D too (`z = 0`), and the
+    /// turn about Z is the 2D `rot`.
+    #[test]
+    fn path_array_with_a_mesh_source_places_in_3d_along_a_planar_path() {
+        let node = make_node(
+            "scatter.path_array",
+            &[
+                ("count", ParameterValue::Int(2)),
+                ("center_input", ParameterValue::Bool(false)),
+            ],
+        );
+        let mut path = Geometry::from_points(vec![Vec2(0.0, 0.0), Vec2(0.0, 10.0)]);
+        path.push_primitive(Primitive::Path {
+            verts: 0..2,
+            closed: false,
+        });
+        let out = run(
+            &node,
+            Arc::new(PathArrayProcessor::from_node(&node)),
+            &[Arc::new(path), Arc::new(tetra())],
+        );
+        assert_eq!(
+            positions3(&out),
+            [Vec3(0.0, 0.0, 0.0), Vec3(0.0, 10.0, 0.0)]
+        );
+        // Heading +Y: a quarter turn about Z.
+        near3(
+            placements3(&out)[0].apply_vector(Vec3(1.0, 0.0, 0.0)),
+            Vec3(0.0, 1.0, 0.0),
         );
     }
 
@@ -695,22 +1005,33 @@ mod tests {
         );
     }
 
-    /// `center_input` moves the source onto its anchor, and `anchor` is a
-    /// `Vec2` detail attribute — so a 3D source says so instead of being
-    /// shifted in xy only.
+    /// A 3D source recentres on its bounds centre in all three axes (its
+    /// `Vec2` `anchor` has no z to carry), and no anchor is written.
     #[test]
-    fn center_input_rejects_a_three_dimensional_source() {
+    fn center_input_recentres_a_three_dimensional_source_in_all_axes() {
         let source = Geometry::from_points3(vec![Vec3(2.0, 4.0, 6.0), Vec3(4.0, 8.0, 12.0)]);
-        let error = instance_source(&source, true).unwrap_err().to_string();
-        assert!(
-            error.contains("scatter.* with center_input requires 2D positions")
-                && error.contains("Vec3"),
-            "the message has to name the operation and the dimension: {error}"
+        let centered = instance_source(&source, true).unwrap();
+        assert_eq!(
+            centered.positions(Domain::Point).unwrap().unwrap().get3(0),
+            Some(Vec3(-1.0, -2.0, -3.0))
         );
+        assert_eq!(
+            centered.positions(Domain::Point).unwrap().unwrap().get3(1),
+            Some(Vec3(1.0, 2.0, 3.0))
+        );
+        assert!(centered.detail().get(names::ANCHOR).is_none());
 
         // Without centering the source is stamped as-is, dimension and all.
         let passthrough = instance_source(&source, false).unwrap();
         assert_eq!(passthrough.point_count(), 2);
+        assert_eq!(
+            passthrough
+                .positions(Domain::Point)
+                .unwrap()
+                .unwrap()
+                .get3(0),
+            Some(Vec3(2.0, 4.0, 6.0))
+        );
     }
 
     fn make_node(type_key: &str, params: &[(&str, ParameterValue)]) -> Node {
@@ -1836,6 +2157,587 @@ mod tests {
                 geo.instances().get(names::SCALE).is_some(),
                 "{name} missing scale"
             );
+        }
+    }
+
+    // ----- 3D duplication (REQ-3D-009) --------------------------------------
+
+    use ravel_core::geometry::{
+        AttributeField, CombineMode, ComponentMask, FieldApply, InstanceColumns3,
+        InstancePlacement3, apply_field,
+    };
+
+    fn near3(a: Vec3, b: Vec3) {
+        assert!(
+            (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4 && (a.2 - b.2).abs() < 1e-4,
+            "{a:?} != {b:?}"
+        );
+    }
+
+    fn positions3(geometry: &Geometry) -> Vec<Vec3> {
+        geometry
+            .instances()
+            .get(names::P)
+            .unwrap()
+            .as_vec3(names::P)
+            .unwrap()
+            .to_vec()
+    }
+
+    fn placements3(geometry: &Geometry) -> Vec<InstancePlacement3> {
+        let columns = InstanceColumns3::of(geometry.instances()).unwrap();
+        positions3(geometry)
+            .into_iter()
+            .enumerate()
+            .map(|(index, offset)| columns.placement(index, offset))
+            .collect()
+    }
+
+    /// A one-triangle mesh away from the origin: a 3D source.
+    fn tetra() -> Geometry {
+        let mut geo = Geometry::from_points3(vec![
+            Vec3(10.0, 0.0, 0.0),
+            Vec3(12.0, 0.0, 0.0),
+            Vec3(10.0, 2.0, 0.0),
+        ]);
+        geo.push_mesh(0..3, &[0, 1, 2]);
+        geo
+    }
+
+    fn params_for(
+        type_key: &str,
+        params: &[(&str, ParameterValue)],
+    ) -> (Node, Arc<dyn NodeProcessor>) {
+        let node = make_node(type_key, params);
+        let processor: Arc<dyn NodeProcessor> = match type_key {
+            "scatter.grid" => Arc::new(GridProcessor),
+            "scatter.circular" => Arc::new(CircularProcessor),
+            "scatter.path_array" => Arc::new(PathArrayProcessor),
+            _ => Arc::new(ScatterProcessor),
+        };
+        (node, processor)
+    }
+
+    fn place(
+        type_key: &str,
+        params: &[(&str, ParameterValue)],
+        inputs: &[Arc<dyn NodeData>],
+    ) -> Geometry {
+        let (node, processor) = params_for(type_key, params);
+        run(&node, processor, inputs)
+    }
+
+    fn int(n: i32) -> ParameterValue {
+        ParameterValue::Int(n)
+    }
+
+    fn float(v: f32) -> ParameterValue {
+        ParameterValue::Float(v)
+    }
+
+    fn text(v: &str) -> ParameterValue {
+        ParameterValue::String(v.into())
+    }
+
+    /// A third axis multiplies the count, x fastest then y then z, centred on
+    /// z = 0, and the copies carry `P` (Vec3), an identity `orient` and a unit
+    /// `scale3` — and none of the 2D `rot` / `scale` columns.
+    #[test]
+    fn a_three_axis_grid_places_the_product_of_the_counts() {
+        let out = place(
+            "scatter.grid",
+            &[
+                ("count_x", int(3)),
+                ("count_y", int(4)),
+                ("count_z", int(5)),
+                ("spacing", ParameterValue::vec2(10.0, 20.0)),
+                ("spacing_z", float(30.0)),
+            ],
+            &[],
+        );
+        let p = positions3(&out);
+        assert_eq!(p.len(), 60);
+        assert_eq!(out.instance_count(), 60);
+        // x fastest, then y, then z; centred about the origin on every axis.
+        assert_eq!(p[0], Vec3(-10.0, -30.0, -60.0));
+        assert_eq!(p[1], Vec3(0.0, -30.0, -60.0));
+        assert_eq!(p[3], Vec3(-10.0, -10.0, -60.0));
+        assert_eq!(p[12], Vec3(-10.0, -30.0, -30.0));
+        assert_eq!(p[59], Vec3(10.0, 30.0, 60.0));
+        for placement in placements3(&out) {
+            assert_eq!(placement.rotation, Quat::IDENTITY);
+            assert_eq!(placement.scale, Vec3(1.0, 1.0, 1.0));
+        }
+        assert!(out.instances().get(names::ROT).is_none());
+        assert!(out.instances().get(names::SCALE).is_none());
+        out.validate().unwrap();
+    }
+
+    /// A 3D source takes even a one-deep grid into 3D, and is recentred on its
+    /// 3D bounds so it lands on the grid points instead of beside them.
+    #[test]
+    fn a_three_dimensional_source_makes_the_grid_three_dimensional() {
+        let out = place(
+            "scatter.grid",
+            &[("count_x", int(2)), ("count_y", int(1))],
+            &[Arc::new(tetra())],
+        );
+        assert_eq!(positions3(&out).len(), 2);
+        assert!(out.instances().get(names::ORIENT).is_some());
+        let stamped = source_geometry(&out, 0);
+        // The tetra's bounds centre was (11, 1, 0).
+        assert_eq!(
+            stamped.positions(Domain::Point).unwrap().unwrap().get3(0),
+            Some(Vec3(-1.0, -1.0, 0.0))
+        );
+    }
+
+    /// A ring about each axis lies in the plane perpendicular to it, and with
+    /// `align_rotation` every copy's local +X points outward — on every axis,
+    /// as `rot = angle` does in 2D.
+    #[test]
+    fn a_circle_about_each_axis_lies_in_its_plane_facing_outward() {
+        for (axis, normal) in [
+            ("z", Vec3(0.0, 0.0, 1.0)),
+            ("y", Vec3(0.0, 1.0, 0.0)),
+            ("x", Vec3(1.0, 0.0, 0.0)),
+        ] {
+            let out = place(
+                "scatter.circular",
+                &[
+                    ("count", int(8)),
+                    ("radius", float(10.0)),
+                    ("axis", text(axis)),
+                    ("center", ParameterValue::vec2(0.0, 0.0)),
+                ],
+                // A 3D source, so the z ring is placed in 3D as well.
+                &[Arc::new(tetra())],
+            );
+            for (placement, point) in placements3(&out).iter().zip(positions3(&out)) {
+                let along = point.0 * normal.0 + point.1 * normal.1 + point.2 * normal.2;
+                assert!(along.abs() < 1e-4, "{axis}: {point:?} leaves its plane");
+                let length = (point.0 * point.0 + point.1 * point.1 + point.2 * point.2).sqrt();
+                assert!((length - 10.0).abs() < 1e-4, "{axis}: radius {length}");
+                near3(
+                    placement.apply_vector(Vec3(1.0, 0.0, 0.0)),
+                    Vec3(point.0 / 10.0, point.1 / 10.0, point.2 / 10.0),
+                );
+            }
+        }
+        // Hand-worked: the y ring turns +X toward −Z (right-handed about +Y), and
+        // the quarter point of a z ring is +Y.
+        let y = place(
+            "scatter.circular",
+            &[
+                ("count", int(4)),
+                ("radius", float(10.0)),
+                ("axis", text("y")),
+            ],
+            &[],
+        );
+        near3(positions3(&y)[1], Vec3(0.0, 0.0, -10.0));
+        let z = place(
+            "scatter.circular",
+            &[
+                ("count", int(4)),
+                ("radius", float(10.0)),
+                ("axis", text("z")),
+            ],
+            &[Arc::new(tetra())],
+        );
+        near3(positions3(&z)[1], Vec3(0.0, 10.0, 0.0));
+
+        let unaligned = place(
+            "scatter.circular",
+            &[
+                ("count", int(4)),
+                ("axis", text("y")),
+                ("align_rotation", ParameterValue::Bool(false)),
+            ],
+            &[],
+        );
+        assert!(
+            placements3(&unaligned)
+                .iter()
+                .all(|p| p.rotation == Quat::IDENTITY)
+        );
+    }
+
+    /// The z ring is the 2D ring placed in 3D.
+    #[test]
+    fn a_z_ring_with_a_mesh_source_matches_the_2d_ring() {
+        let flat = place(
+            "scatter.circular",
+            &[("count", int(6)), ("radius", float(25.0))],
+            &[],
+        );
+        let spatial = place(
+            "scatter.circular",
+            &[("count", int(6)), ("radius", float(25.0))],
+            &[Arc::new(tetra())],
+        );
+        for (a, b) in positions(&flat, true).iter().zip(positions3(&spatial)) {
+            near3(Vec3(a.0, a.1, 0.0), b);
+        }
+    }
+
+    /// A scatter with depth fills the volume, keeps the planar stream's x / y
+    /// for the same seed, is deterministic, and turns each copy by a unit
+    /// quaternion.
+    #[test]
+    fn a_scatter_with_depth_fills_a_volume_deterministically() {
+        let params = [
+            ("count", int(300)),
+            ("area", ParameterValue::vec2(200.0, 100.0)),
+            ("area_z", float(80.0)),
+            ("seed", int(7)),
+        ];
+        let a = place("scatter.scatter", &params, &[]);
+        let b = place("scatter.scatter", &params, &[]);
+        assert_eq!(positions3(&a), positions3(&b));
+
+        let p = positions3(&a);
+        assert_eq!(p.len(), 300);
+        let (min_z, max_z) = p.iter().fold((f32::MAX, f32::MIN), |(lo, hi), v| {
+            (lo.min(v.2), hi.max(v.2))
+        });
+        assert!(
+            min_z >= -40.0 && max_z <= 40.0,
+            "z out of range: {min_z}..{max_z}"
+        );
+        assert!(
+            min_z < -30.0 && max_z > 30.0,
+            "z does not fill: {min_z}..{max_z}"
+        );
+        assert!(p.iter().all(|v| v.0.abs() <= 100.0 && v.1.abs() <= 50.0));
+
+        let flat = place(
+            "scatter.scatter",
+            &[
+                ("count", int(300)),
+                ("area", ParameterValue::vec2(200.0, 100.0)),
+                ("seed", int(7)),
+            ],
+            &[],
+        );
+        for (volume, plane) in p.iter().zip(positions(&flat, true)) {
+            assert_eq!((volume.0, volume.1), (plane.0, plane.1));
+        }
+        let orient = a
+            .instances()
+            .get(names::ORIENT)
+            .unwrap()
+            .as_vec4(names::ORIENT)
+            .unwrap();
+        for q in orient {
+            let length = (q.0 * q.0 + q.1 * q.1 + q.2 * q.2 + q.3 * q.3).sqrt();
+            assert!((length - 1.0).abs() < 1e-4);
+        }
+        // The attitudes are not all one: the copies are turned about more than Z.
+        assert!(orient.iter().any(|q| q.0.abs() > 0.2) && orient.iter().any(|q| q.1.abs() > 0.2));
+    }
+
+    /// The columns modulate per instance: position (z only), attitude (`rot`,
+    /// which composes with `orient`), scale and colour, each by its own field.
+    #[test]
+    fn fields_modulate_position_attitude_scale_and_colour_per_instance() {
+        let ctx = ctx();
+        let grid = place(
+            "scatter.grid",
+            &[
+                ("count_x", int(3)),
+                ("count_y", int(1)),
+                ("count_z", int(2)),
+                ("spacing", ParameterValue::vec2(10.0, 10.0)),
+                ("spacing_z", float(0.0)),
+            ],
+            &[],
+        );
+        let index = AttributeField::new(names::INDEX);
+        let modulate = |geometry: &Geometry, target: &str, combine, components: &str| {
+            let spec = FieldApply {
+                combine,
+                components: ComponentMask::parse(components),
+                ..FieldApply::new(Domain::Instance, target)
+            };
+            apply_field(geometry, &spec, &index, &ctx).unwrap()
+        };
+        let g = modulate(&grid, names::P, CombineMode::Add, "z");
+        let g = modulate(&g, names::ROT, CombineMode::Set, "");
+        let g = modulate(&g, names::SCALE3, CombineMode::Add, "");
+        let g = modulate(&g, names::CD, CombineMode::Set, "rgb");
+
+        let before = positions3(&grid);
+        let after = positions3(&g);
+        let rot = g
+            .instances()
+            .get(names::ROT)
+            .unwrap()
+            .as_f32(names::ROT)
+            .unwrap();
+        let cd = g
+            .instances()
+            .get(names::CD)
+            .unwrap()
+            .as_color(names::CD)
+            .unwrap();
+        let placements = placements3(&g);
+        for i in 0..6 {
+            // z moved by `index`, x / y untouched.
+            assert_eq!((after[i].0, after[i].1), (before[i].0, before[i].1));
+            assert_eq!(after[i].2, before[i].2 + i as f32);
+            // `rot` is index radians about Z, composed with the identity `orient`,
+            // and `scale3` (1) plus index stretches the same vector.
+            assert_eq!(rot[i], i as f32);
+            let stretch = 1.0 + i as f32;
+            assert_eq!(placements[i].scale, Vec3(stretch, stretch, stretch));
+            near3(
+                placements[i].apply_vector(Vec3(1.0, 0.0, 0.0)),
+                Vec3(stretch * (i as f32).cos(), stretch * (i as f32).sin(), 0.0),
+            );
+            assert_eq!(cd[i].r, i as f32);
+        }
+        g.validate().unwrap();
+    }
+
+    /// A count that is a product of typed integers is refused before anything
+    /// is allocated, on all four nodes — and the largest 2D grid the template
+    /// ever allowed is still fine.
+    #[test]
+    fn too_many_copies_is_an_evaluation_error() {
+        let refused =
+            |type_key: &str, params: &[(&str, ParameterValue)], inputs: &[Arc<dyn NodeData>]| {
+                let (node, processor) = params_for(type_key, params);
+                run_err(&node, processor, inputs)
+            };
+        let error = refused(
+            "scatter.grid",
+            &[
+                ("count_x", int(1000)),
+                ("count_y", int(1000)),
+                ("count_z", int(2)),
+            ],
+            &[],
+        );
+        assert!(
+            error.contains("scatter.grid") && error.contains("2000000"),
+            "{error}"
+        );
+        let error = refused("scatter.circular", &[("count", int(1_000_001))], &[]);
+        assert!(error.contains("scatter.circular"), "{error}");
+        let error = refused("scatter.scatter", &[("count", int(1_000_001))], &[]);
+        assert!(error.contains("scatter.scatter"), "{error}");
+        let error = refused(
+            "scatter.path_array",
+            &[("count", int(1_000_001))],
+            &[arc_geo(line_path())],
+        );
+        assert!(error.contains("scatter.path_array"), "{error}");
+
+        // Exactly the limit passes: 1000 x 1000 x 1.
+        let edge = place(
+            "scatter.grid",
+            &[("count_x", int(1000)), ("count_y", int(1000))],
+            &[],
+        );
+        assert_eq!(edge.instance_count(), 1_000_000);
+    }
+
+    /// The 2D output is what it was: `Vec2` `P`, `rot` and `scale` columns,
+    /// **no** 3D columns, and the same numbers the original formulas give, for
+    /// a plain 2D source or none. (Written against the formulas the nodes used
+    /// before 3D, not read back from the new branches.)
+    #[test]
+    fn the_planar_path_is_unchanged() {
+        let assert_planar = |geo: &Geometry| {
+            assert!(matches!(
+                geo.instances().get(names::P).unwrap().as_ref(),
+                AttributeArray::Vec2(_)
+            ));
+            assert!(geo.instances().get(names::ROT).is_some());
+            assert!(geo.instances().get(names::SCALE).is_some());
+            assert!(geo.instances().get(names::ORIENT).is_none());
+            assert!(geo.instances().get(names::SCALE3).is_none());
+        };
+
+        let grid = place(
+            "scatter.grid",
+            &[
+                ("count_x", int(3)),
+                ("count_y", int(2)),
+                ("spacing", ParameterValue::vec2(7.0, 5.0)),
+                ("center", ParameterValue::vec2(1.0, 2.0)),
+            ],
+            &[arc_geo(small_square())],
+        );
+        assert_planar(&grid);
+        let mut expected = Vec::new();
+        for iy in 0..2 {
+            for ix in 0..3 {
+                expected.push(Vec2(
+                    1.0 - (3.0 - 1.0) * 7.0 / 2.0 + ix as f32 * 7.0,
+                    2.0 - (2.0 - 1.0) * 5.0 / 2.0 + iy as f32 * 5.0,
+                ));
+            }
+        }
+        assert_eq!(positions(&grid, true), expected.as_slice());
+
+        let ring = place(
+            "scatter.circular",
+            &[
+                ("count", int(5)),
+                ("radius", float(30.0)),
+                ("center", ParameterValue::vec2(4.0, -6.0)),
+            ],
+            &[arc_geo(small_square())],
+        );
+        assert_planar(&ring);
+        let angles: Vec<f32> = (0..5).map(|i| 2.0 * PI * i as f32 / 5.0).collect();
+        let expected: Vec<Vec2> = angles
+            .iter()
+            .map(|a| Vec2(4.0 + 30.0 * a.cos(), -6.0 + 30.0 * a.sin()))
+            .collect();
+        assert_eq!(positions(&ring, true), expected.as_slice());
+        assert_eq!(
+            ring.instances()
+                .get(names::ROT)
+                .unwrap()
+                .as_f32(names::ROT)
+                .unwrap(),
+            angles.as_slice()
+        );
+
+        let scattered = place(
+            "scatter.scatter",
+            &[("count", int(10)), ("seed", int(3))],
+            &[arc_geo(small_square())],
+        );
+        assert_planar(&scattered);
+        for (i, (p, r)) in positions(&scattered, true)
+            .iter()
+            .zip(
+                scattered
+                    .instances()
+                    .get(names::ROT)
+                    .unwrap()
+                    .as_f32(names::ROT)
+                    .unwrap(),
+            )
+            .enumerate()
+        {
+            let h = hash(3, i as u32);
+            let (rx, ry, rr) = (
+                hash_to_f32(h),
+                hash_to_f32(hash(h, 1)),
+                hash_to_f32(hash(h, 2)),
+            );
+            assert_eq!(*p, Vec2((rx * 2.0 - 1.0) * 100.0, (ry * 2.0 - 1.0) * 100.0));
+            assert_eq!(*r, rr * 2.0 * PI);
+        }
+
+        let along = place(
+            "scatter.path_array",
+            &[("count", int(5))],
+            &[arc_geo(line_path()), arc_geo(small_square())],
+        );
+        assert_planar(&along);
+        let xs: Vec<f32> = positions(&along, true).iter().map(|p| p.0).collect();
+        assert_eq!(xs, [0.0, 25.0, 50.0, 75.0, 100.0]);
+        assert!(positions(&along, true).iter().all(|p| p.1 == 0.0));
+    }
+
+    /// 3D instances flatten: 27 boxes of 24 vertices and 12 triangles each,
+    /// with every instance's placement baked in.
+    #[test]
+    fn a_3d_grid_of_boxes_expands_to_one_flat_mesh() {
+        let cube = crate::mesh_primitives::BoxProcessor::from_node(&make_node("mesh.box", &[]));
+        let mut params = ResolvedParams::default();
+        params.set(
+            "size",
+            ravel_core::eval::ResolvedValue::Vec3([6.0, 6.0, 6.0]),
+        );
+        let cube = cube
+            .process(
+                &make_node("mesh.box", &[]),
+                &ctx(),
+                &[],
+                &params,
+                &mut ravel_core::eval::Evaluator::new(),
+            )
+            .unwrap();
+        let grid = place(
+            "scatter.grid",
+            &[
+                ("count_x", int(3)),
+                ("count_y", int(3)),
+                ("count_z", int(3)),
+                ("spacing", ParameterValue::vec2(10.0, 10.0)),
+                ("spacing_z", float(10.0)),
+            ],
+            &[cube],
+        );
+        let flat = ravel_core::geometry::expand_instances(&grid).unwrap();
+        assert_eq!(flat.point_count(), 27 * 24);
+        assert_eq!(flat.indices().len(), 27 * 12 * 3);
+        assert_eq!(flat.primitives().len(), 27);
+        flat.validate().unwrap();
+        // The first box sits at the grid's first point, (-10, -10, -10), and
+        // its extent is the box's own 6 around it.
+        let p = positions3_of(&flat);
+        let first = &p[..24];
+        let low = first.iter().fold(f32::MAX, |m, v| m.min(v.0));
+        let high = first.iter().fold(f32::MIN, |m, v| m.max(v.0));
+        assert_eq!((low, high), (-13.0, -7.0));
+    }
+
+    fn positions3_of(geometry: &Geometry) -> Vec<Vec3> {
+        geometry
+            .points()
+            .get(names::P)
+            .unwrap()
+            .as_vec3(names::P)
+            .unwrap()
+            .to_vec()
+    }
+
+    /// A ring of boxes turned to face outward: the box's +X face normal is
+    /// carried by each copy's quarter turns about Z, `(1,0,0) → (0,1,0) →
+    /// (−1,0,0) → (0,−1,0)`.
+    #[test]
+    fn a_rotated_instance_carries_its_normals_with_it() {
+        let node = make_node("mesh.box", &[]);
+        let cube = crate::mesh_primitives::BoxProcessor::from_node(&node)
+            .process(
+                &node,
+                &ctx(),
+                &[],
+                &ResolvedParams::default(),
+                &mut ravel_core::eval::Evaluator::new(),
+            )
+            .unwrap();
+        let ring = place(
+            "scatter.circular",
+            &[("count", int(4)), ("radius", float(100.0))],
+            &[cube],
+        );
+        let flat = ravel_core::geometry::expand_instances(&ring).unwrap();
+        let normals = flat
+            .points()
+            .get(names::N)
+            .unwrap()
+            .as_vec3(names::N)
+            .unwrap();
+        // The +X face is the third face of a box: points 8..12 of its 24.
+        for (copy, expected) in [
+            Vec3(1.0, 0.0, 0.0),
+            Vec3(0.0, 1.0, 0.0),
+            Vec3(-1.0, 0.0, 0.0),
+            Vec3(0.0, -1.0, 0.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            near3(normals[copy * 24 + 8], expected);
         }
     }
 }

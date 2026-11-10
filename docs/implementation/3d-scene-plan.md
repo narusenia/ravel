@@ -413,6 +413,27 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
 - 球の極（縮退する三角形）の扱いが定義どおりであるテスト
 - フィールドで変調できる結合テスト
 
+**実装メモ（単位 5）**
+
+- 実装は `ravel-nodes/src/mesh_primitives.rs` 1 ファイル（`MeshBuilder` が
+  `P` / `N` / `uv` と三角形列を貯め、`tri` が法線ヒントと突き合わせて巻きを決める）。
+  規約（軸・巻き・極・分割数の下限・頂点数の上限）は仕様書
+  「基本プリミティブ」に書いた。ここには置かない
+- テンプレートは `mesh_primitive`（出力と `center`）+ `mesh_segments`（分割数）の
+  2 つの小関数で組む。`center` だけが `ParamRole::Position`。`size` / `radius` は
+  スカラーまたは全幅なので `Size` の役割（中心からのオフセット）には当たらない
+- **トランスフォームセクションを宣言する**。当初は `geometry.transform` が `N` を
+  回さなかったので外していたが、単位 6 の追補で `geometry.transform` が `N` を逆転置で
+  回し、ミラーの巻きを反転するようになったため、`center`（掴める点）の上に
+  `with_transform_section()` を付けた。外していた理由はそれだけだった
+- アイコンは新規 SVG を足さず既存を割り当てた（box → `boxes`、sphere →
+  `circle-dot`、cylinder → `layers`、plane → `square-square`）
+- ゴールデン画像は追加していない。数値（頂点数・面数・法線の向きと長さ・巻き・
+  極の頂点位置・`uv` の向き）と、`scene.render` の CPU 経路で `mesh.plane` に
+  2 x 2 のテクスチャを貼って四隅の色を読むテストで固定した。変異テスト（巻きの
+  補正・面中心の符号・裏面の `u` 反転・`v` 反転・極の法線・扇の欠落・下限の丸め）
+  は全て落ちることを確認した
+
 ### 単位 6: 3D 複製（REQ-3D-009）
 
 - `scatter.grid` に 3 軸目の分割数を追加
@@ -434,6 +455,40 @@ Vec2 か Vec3 であることだけを課す。明示エラーは
 - フィールドで位置・姿勢・スケール・色を per-instance 変調できるテスト
 - **2D の既存挙動が変わらないテスト**（`P` が Vec2 のときの回帰）
 - 上限超過が評価エラーになるテスト
+
+**実装メモ（単位 6）**
+
+- **優先関係はここで決めた**: 次元は `P` で分かれ（Vec2 → 2D の `InstanceColumns`、
+  Vec3 → 3D の `InstanceColumns3`）、3D では **`rot` / `scale` が `orient` / `scale3` に
+  負けず合成される**（回転 = `orient · Rz(rot)`、スケール = `scale3 ⊙ (scale, 1)`）。
+  上書きにしなかった理由は、`scatter.*` が `orient` を書いた途端に `rot` のフィールド
+  変調が無効になるのを避けるため。規則と式は仕様書「3D 複製」。2D 経路は
+  `InstanceColumns` のまま 1 行も触っていない
+- 3D 配置になる条件は**ソースが決める**（Mesh か Vec3 の `P`）か、ノードが 3 次元目を
+  求める（`count_z > 1` / `axis` ≠ `z` / `area_z > 0` / Vec3 のパス）。2D の出力は列も
+  数値も同じ（`the_planar_path_is_unchanged` が元の式で固定）。**既存パラメータの型は
+  変えていない**（`spacing` / `center` / `area` は Vec2 のまま、`count_z` /
+  `spacing_z` / `axis` / `area_z` を末尾に追加）ので `.ravprj` の移行は不要。z の位置は
+  トランスフォームセクションの `translate` が動かす
+- **既存テスト 2 件を置き換えた**: `center_input_rejects_a_three_dimensional_source` と
+  `path_array_rejects_a_three_dimensional_path` は単位 1a 時点の「3D は明示エラー」を
+  固定していて、この単位が解く対象そのものだった（計画の「`scatter.path_array` /
+  `scatter.scatter` を 3D ジオメトリ上で動かす」）。挙動を弱めたのではなく仕様が変わった
+  ので、新しい挙動の肯定テスト（3 軸の bbox 中心 / 3D の弧長と接線）に書き換えた。
+  メッシュのパスを拒む `path_array_rejects_a_mesh_path` は残している
+- `MAX_INSTANCES`（100 万）。2D の最大（1000 x 1000）が上限ちょうどで通る
+- **追補 1: 3D 配置の展開**。`expand_instances` が Vec3 の `P` を持つインスタンスを
+  `InstanceColumns3` の規則で展開する（Vec2 のソースは z = 0 へ昇格、`N` は逆転置で
+  回して正規化、ミラーは巻きを反転）。展開はコア（`ops.rs`）に閉じ、`scene.render` は
+  既に `expand_instances` を通っていたので**レンダラ側の変更は無い**（並行する
+  ライティングの変更と衝突しない）。接線を持つソースは明示エラー。27 個の
+  `mesh.box` が `scene.render`（CPU 参照）で手計算どおりの被覆と前後関係になる
+  テストで固定した
+- **追補 2: `geometry.transform` が `N` と 3D インスタンスを扱う**。`N` は逆転置、
+  ミラーは巻き反転。Vec3 のインスタンスは `orient` / `scale3` へ合成する（厳密になる
+  のは一様スケールか回っていないインスタンス。非一様 × 回転は明示エラー）。
+  「変換してから展開」と「展開してから変換」が一致することを不変条件として
+  テストに置いた。規則は仕様書「3D 配置の展開と法線」「変換と法線」
 
 ### 単位 7: ライティング（REQ-3D-006）✅ 実装済み
 

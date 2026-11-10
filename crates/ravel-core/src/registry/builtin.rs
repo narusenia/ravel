@@ -38,6 +38,10 @@ pub const PARTICLE_MAX_POINTS_DEFAULT: i32 = 100_000;
 pub const TRANSFORM_SECTION_NODES: &[&str] = &[
     "geometry.from_image",
     "geometry.merge",
+    "mesh.box",
+    "mesh.cylinder",
+    "mesh.plane",
+    "mesh.sphere",
     "scatter.circular",
     "scatter.grid",
     "scatter.path_array",
@@ -248,6 +252,10 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(shape_line());
     reg.register(shape_grid());
     reg.register(shape_custom_path());
+    reg.register(mesh_box());
+    reg.register(mesh_sphere());
+    reg.register(mesh_cylinder());
+    reg.register(mesh_plane());
     reg.register(scatter_grid());
     reg.register(scatter_circular());
     reg.register(scatter_path_array());
@@ -2949,6 +2957,98 @@ fn shape_star() -> NodeTemplate {
         .with_transform_section()
 }
 
+/// What every `mesh.*` primitive declares: a geometry output and a 3D
+/// `center` the Viewer can grab (X and Y; the canvas is two-dimensional).
+///
+/// Each template ends with the transform section (`geometry.transform` turns
+/// `N` by the inverse-transpose and flips the winding of a mirror, so a
+/// rotated or scaled primitive keeps correct normals). `center` stays the
+/// grabbable point; the section is the extra move.
+fn mesh_primitive(type_key: &str, label: &str) -> NodeTemplate {
+    NodeTemplate::new(type_key, label, NodeCategory::Geometry)
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::GEOMETRY,
+        })
+        .with_param(channel3_parameter("center", 0.0, 0.0, 0.0))
+        .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
+        .with_param_role("center", ParamRole::Position)
+}
+
+/// An `Int` division count, at least 1, the way the 3D primitives spell them.
+fn mesh_segments(template: NodeTemplate, key: &str, default: i32, min: f32) -> NodeTemplate {
+    template
+        .with_param(Parameter {
+            key: key.into(),
+            value: ParameterValue::Int(default),
+        })
+        .with_param_range(key, min..=1000.0, min..=64.0)
+}
+
+/// `mesh.box`: an axis-aligned box of `size`, divided per axis.
+fn mesh_box() -> NodeTemplate {
+    let template = mesh_primitive("mesh.box", "Box")
+        .with_param(channel3_parameter("size", 100.0, 100.0, 100.0))
+        .with_param_range("size", 0.0..=1e5, 0.0..=1000.0);
+    let template = mesh_segments(template, "segments_x", 1, 1.0);
+    let template = mesh_segments(template, "segments_y", 1, 1.0);
+    mesh_segments(template, "segments_z", 1, 1.0)
+        .with_param_group(
+            "shape",
+            ["center", "size", "segments_x", "segments_y", "segments_z"],
+        )
+        .with_transform_section()
+}
+
+/// `mesh.sphere`: a UV sphere about the Y axis.
+fn mesh_sphere() -> NodeTemplate {
+    let template = mesh_primitive("mesh.sphere", "Sphere")
+        .with_param(Parameter {
+            key: "radius".into(),
+            value: ParameterValue::Float(50.0),
+        })
+        .with_param_range("radius", 0.0..=1e5, 0.0..=500.0);
+    let template = mesh_segments(template, "segments", 32, 3.0);
+    mesh_segments(template, "rings", 16, 2.0)
+        .with_param_group("shape", ["center", "radius", "segments", "rings"])
+        .with_transform_section()
+}
+
+/// `mesh.cylinder`: a cylinder about the Y axis, optionally capped.
+fn mesh_cylinder() -> NodeTemplate {
+    let template = mesh_primitive("mesh.cylinder", "Cylinder")
+        .with_param(Parameter {
+            key: "radius".into(),
+            value: ParameterValue::Float(50.0),
+        })
+        .with_param(Parameter {
+            key: "height".into(),
+            value: ParameterValue::Float(100.0),
+        })
+        .with_param(Parameter {
+            key: "caps".into(),
+            value: ParameterValue::Bool(true),
+        })
+        .with_param_range("radius", 0.0..=1e5, 0.0..=500.0)
+        .with_param_range("height", 0.0..=1e5, 0.0..=1000.0);
+    let template = mesh_segments(template, "segments", 32, 3.0);
+    mesh_segments(template, "height_segments", 1, 1.0)
+        .with_param_group("shape", ["center", "radius", "height"])
+        .with_param_group("divisions", ["segments", "height_segments", "caps"])
+        .with_transform_section()
+}
+
+/// `mesh.plane`: a rectangle in the XY plane facing the camera.
+fn mesh_plane() -> NodeTemplate {
+    let template = mesh_primitive("mesh.plane", "Plane")
+        .with_param(channel2_parameter("size", 100.0, 100.0))
+        .with_param_range("size", 0.0..=1e5, 0.0..=1000.0);
+    let template = mesh_segments(template, "segments_x", 1, 1.0);
+    mesh_segments(template, "segments_y", 1, 1.0)
+        .with_param_group("shape", ["center", "size", "segments_x", "segments_y"])
+        .with_transform_section()
+}
+
 fn scatter_grid() -> NodeTemplate {
     NodeTemplate::new("scatter.grid", "Grid", NodeCategory::Geometry)
         .with_variadic_input_group(InputPort {
@@ -2969,7 +3069,17 @@ fn scatter_grid() -> NodeTemplate {
             key: "count_y".into(),
             value: ParameterValue::Int(5),
         })
+        // A third axis, additive: 1 keeps the grid planar, and a graph saved
+        // without these still evaluates as the 2D grid it was.
+        .with_param(Parameter {
+            key: "count_z".into(),
+            value: ParameterValue::Int(1),
+        })
         .with_param(channel2_parameter("spacing", 20.0, 20.0))
+        .with_param(Parameter {
+            key: "spacing_z".into(),
+            value: ParameterValue::Float(20.0),
+        })
         .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
             key: "center_input".into(),
@@ -2993,13 +3103,25 @@ fn scatter_grid() -> NodeTemplate {
         // float channels, so folding them would change what the value means.
         .with_param_range("count_x", 1.0..=1000.0, 1.0..=50.0)
         .with_param_range("count_y", 1.0..=1000.0, 1.0..=50.0)
+        .with_param_range("count_z", 1.0..=1000.0, 1.0..=50.0)
         .with_param_range("spacing", -1e5..=1e5, 0.0..=200.0)
+        .with_param_range("spacing_z", -1e5..=1e5, 0.0..=200.0)
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_role("center", ParamRole::Position)
         // Where the points are, then how the connected geometries are handed
         // out to them — the same split on all three scatter nodes.
-        .with_param_group("layout", ["count_x", "count_y", "spacing", "center"])
+        .with_param_group(
+            "layout",
+            [
+                "count_x",
+                "count_y",
+                "count_z",
+                "spacing",
+                "spacing_z",
+                "center",
+            ],
+        )
         .with_param_group(
             "source",
             ["center_input", "piece_mode", "source_mode", "source_seed"],
@@ -3033,6 +3155,12 @@ fn scatter_circular() -> NodeTemplate {
             key: "align_rotation".into(),
             value: ParameterValue::Bool(true),
         })
+        // Which axis the ring turns about; `z` is the 2D ring in the XY plane.
+        .with_param(Parameter {
+            key: "axis".into(),
+            value: ParameterValue::String("z".into()),
+        })
+        .with_param_options("axis", ["z", "x", "y"])
         .with_param(Parameter {
             key: "center_input".into(),
             value: ParameterValue::Bool(true),
@@ -3056,7 +3184,10 @@ fn scatter_circular() -> NodeTemplate {
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_role("center", ParamRole::Position)
-        .with_param_group("layout", ["count", "radius", "center", "align_rotation"])
+        .with_param_group(
+            "layout",
+            ["count", "radius", "center", "axis", "align_rotation"],
+        )
         .with_param_group(
             "source",
             ["center_input", "piece_mode", "source_mode", "source_seed"],
@@ -3237,6 +3368,11 @@ fn scatter_scatter() -> NodeTemplate {
             value: ParameterValue::Int(20),
         })
         .with_param(channel2_parameter("area", 200.0, 200.0))
+        // Depth of the area; 0 keeps the scatter planar.
+        .with_param(Parameter {
+            key: "area_z".into(),
+            value: ParameterValue::Float(0.0),
+        })
         .with_param(channel2_parameter("center", 0.0, 0.0))
         .with_param(Parameter {
             key: "seed".into(),
@@ -3262,13 +3398,14 @@ fn scatter_scatter() -> NodeTemplate {
         .with_param_options(PIECE_MODE_PARAM, [PIECE_MODE_WHOLE, PIECE_MODE_INSTANCES])
         .with_param_range("count", 0.0..=100000.0, 0.0..=500.0)
         .with_param_range("area", 0.0..=1e5, 0.0..=2000.0)
+        .with_param_range("area_z", 0.0..=1e5, 0.0..=2000.0)
         .with_param_range("center", -1e5..=1e5, -2000.0..=2000.0)
         .with_param_range("seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
         .with_param_role("center", ParamRole::Position)
         // `seed` places the points; `source_seed` picks which geometry lands
         // on each. Two seeds, two groups.
-        .with_param_group("layout", ["count", "area", "center", "seed"])
+        .with_param_group("layout", ["count", "area", "area_z", "center", "seed"])
         .with_param_group(
             "source",
             ["center_input", "piece_mode", "source_mode", "source_seed"],
@@ -3748,14 +3885,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 138);
+        assert_eq!(reg.all_templates().count(), 142);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 43);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 47);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);

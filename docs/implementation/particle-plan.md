@@ -340,7 +340,8 @@ per-point 属性:
   作る経路が無く**、計画の「追加実装は不要な想定」は通らなかったので、ここで
   `scatter.points`（copy-to-points）を足した（`scatter/points.rs`）。`P` / `rot` /
   `scale` は粒から取り、`pscale` は一様スケールとして掛け、他の属性はインスタンス
-  ドメインへ引き継ぐ。`Vec3` の `P` は評価エラー（3D の配置は 3D 複製の担当）。
+  ドメインへ引き継ぐ。`Vec3` の `P` は当初評価エラーとし、3D 複製（3D-6）の
+  マージ時に `orient` / `scale3` を書く 3D の配置へ置き換えた。
   ゴールデン `tests/particle_scatter_golden.rs` は「粒ごとにシェイプが立つ」を検証する。
 - **寿命・サイズ・色**は専用 UI 無し。`age` / `life` を `field.attribute` /
   `@age` / `@life` 式で読み `field.apply` で書く（テストは `pscale = 4(1 − age/life)`）。

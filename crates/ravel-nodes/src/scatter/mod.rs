@@ -36,6 +36,9 @@ use ravel_core::graph::Node;
 use ravel_core::registry::{PIECE_MODE_INSTANCES, PIECE_MODE_PARAM, PIECE_MODE_WHOLE};
 use ravel_core::types::{NodeData, Vec2, Vec3};
 
+mod points;
+pub use points::PointsProcessor;
+
 /// What `center_input` means on a node that does not carry the parameter.
 ///
 /// It has to be the value the registry template declares, because that is
@@ -801,6 +804,7 @@ mod tests {
             "scatter.grid",
             "scatter.circular",
             "scatter.path_array",
+            "scatter.points",
             "scatter.scatter",
         ] {
             let declared = registry

@@ -22,6 +22,11 @@ pub const MAX_BLUR_RADIUS: f32 = 64.0;
 /// Default `max_iterations` of `geometry.iterate`.
 pub const MAX_ITERATIONS_DEFAULT: i32 = 256;
 
+/// Default `max_points` of `particle.simulate`: the ceiling the node holds
+/// when the parameter is not on the node. Declared once so the template and
+/// the processor's fallback cannot drift (the `center_input` lesson).
+pub const PARTICLE_MAX_POINTS_DEFAULT: i32 = 100_000;
+
 /// Built-in types whose template declares the transform section
 /// ([`NodeTemplate::with_transform_section`]).
 ///
@@ -40,6 +45,7 @@ pub const TRANSFORM_SECTION_NODES: &[&str] = &[
     "scatter.circular",
     "scatter.grid",
     "scatter.path_array",
+    "scatter.points",
     "scatter.scatter",
     "shape.custom_path",
     "shape.ellipse",
@@ -195,6 +201,9 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(geometry_null());
     reg.register(geometry_from_image());
     reg.register(geometry_iterate());
+    reg.register(particle_simulate());
+    reg.register(scatter_points());
+    reg.register(mesh_import());
     reg.register(scene_add());
     reg.register(scene_merge());
     reg.register(scene_camera());
@@ -1965,6 +1974,23 @@ fn scene_output() -> OutputPort {
     }
 }
 
+/// `mesh.import`: a glTF / GLB / OBJ model from the media asset table.
+///
+/// `asset_id` is the reference a `media` node holds — the decimal
+/// [`AssetId`](crate::id::AssetId) — so the file resolves through the same
+/// project-relative machinery as footage and the same asset queries see it.
+/// Two outputs: the file's node hierarchy as a `scene`, and every mesh baked
+/// into one `geometry` in scene space for the geometry and field nodes.
+fn mesh_import() -> NodeTemplate {
+    NodeTemplate::new("mesh.import", "Import Model", NodeCategory::Geometry)
+        .with_output(scene_output())
+        .with_output(OutputPort {
+            name: "geometry".into(),
+            data_type: DataTypeId::GEOMETRY,
+        })
+        .with_param(string_parameter("asset_id", ""))
+}
+
 /// `scene.add`: place one value in a scene with a 3D transform.
 ///
 /// The `object` port accepts a geometry or another **scene** — the nesting
@@ -3218,6 +3244,113 @@ fn scatter_path_array() -> NodeTemplate {
         .with_param_role("translate", ParamRole::Position)
 }
 
+/// `particle.simulate`: frame-sequential point particles (REQ-MOGRAPH-002).
+///
+/// The one stateful geometry node. The emitter is any geometry (`emit_from`
+/// picks its path, points or instances; `auto` takes the first that exists);
+/// an unconnected emitter emits from the origin. Lengths are in composition
+/// pixels, time in frames except `rate` and the velocities, which are per
+/// second so a change of frame rate does not change the motion.
+///
+/// The `force` group takes fields: each answers an acceleration (px/s²), a
+/// scalar one along `force_direction`, a `Vec2` one as it is.
+///
+/// No transform section: the particles are placed by the emitter they leave.
+fn particle_simulate() -> NodeTemplate {
+    NodeTemplate::new(
+        "particle.simulate",
+        "Particle Simulate",
+        NodeCategory::Geometry,
+    )
+    .with_input(geometry_input("emitter"))
+    .with_variadic_input_group(field_input("force"))
+    .with_output(geometry_output())
+    .with_param(float_parameter("rate", 60.0))
+    .with_param(float_parameter("life", 60.0))
+    .with_param(float_parameter("life_variance", 0.0))
+    .with_param(int_parameter("max_points", PARTICLE_MAX_POINTS_DEFAULT))
+    .with_param(int_parameter("seed", 0))
+    .with_param(string_parameter("emit_from", "auto"))
+    .with_param_options("emit_from", ["auto", "points", "path", "instances"])
+    .with_param(float_parameter("jitter", 0.0))
+    .with_param(string_parameter("velocity_mode", "fixed"))
+    .with_param_options("velocity_mode", ["fixed", "random", "normal"])
+    .with_param(channel2_parameter("initial_velocity", 0.0, 0.0))
+    .with_param(float_parameter("initial_spread", 0.0))
+    .with_param(channel2_parameter("force_direction", 0.0, 1.0))
+    .with_param(float_parameter("drag", 0.0))
+    .with_param_range("rate", 0.0..=1e7, 0.0..=1000.0)
+    .with_param_range("life", 0.0..=1e6, 1.0..=300.0)
+    .with_param_range("life_variance", 0.0..=1e6, 0.0..=100.0)
+    .with_param_range("max_points", 0.0..=1e7, 0.0..=100_000.0)
+    .with_param_range("seed", 0.0..=1e9, 0.0..=1000.0)
+    .with_param_range("jitter", 0.0..=1e6, 0.0..=100.0)
+    .with_param_range("initial_velocity", -1e6..=1e6, -500.0..=500.0)
+    .with_param_range("initial_spread", 0.0..=1e6, 0.0..=200.0)
+    .with_param_range("force_direction", -1e6..=1e6, -1.0..=1.0)
+    .with_param_range("drag", 0.0..=1e3, 0.0..=5.0)
+    .with_param_group(
+        "emission",
+        ["rate", "life", "life_variance", "max_points", "seed"],
+    )
+    .with_param_group("emitter", ["emit_from", "jitter"])
+    .with_param_group(
+        "motion",
+        ["velocity_mode", "initial_velocity", "initial_spread"],
+    )
+    .with_param_group("forces", ["force_direction", "drag"])
+}
+
+/// `scatter.points`: one instance of the source shape on every point of the
+/// `points` input (copy-to-points). Placement comes from the point's `P`,
+/// `rot`, `scale` and `pscale`; its other attributes ride onto the instance.
+fn scatter_points() -> NodeTemplate {
+    NodeTemplate::new("scatter.points", "Scatter Points", NodeCategory::Geometry)
+        .with_input(InputPort {
+            name: "points".into(),
+            accepted_types: vec![DataTypeId::GEOMETRY],
+            is_param: false,
+            is_variadic: false,
+        })
+        .with_variadic_input_group(InputPort {
+            name: "instance_source".into(),
+            accepted_types: vec![DataTypeId::GEOMETRY],
+            is_param: false,
+            is_variadic: false,
+        })
+        .with_output(OutputPort {
+            name: "output".into(),
+            data_type: DataTypeId::GEOMETRY,
+        })
+        .with_param(Parameter {
+            key: "center_input".into(),
+            value: ParameterValue::Bool(true),
+        })
+        .with_param(Parameter {
+            key: "source_mode".into(),
+            value: ParameterValue::String("sequential".into()),
+        })
+        .with_param_options("source_mode", ["sequential", "random"])
+        .with_param(Parameter {
+            key: "source_seed".into(),
+            value: ParameterValue::Int(0),
+        })
+        .with_param(Parameter {
+            key: PIECE_MODE_PARAM.into(),
+            value: ParameterValue::String(PIECE_MODE_WHOLE.into()),
+        })
+        .with_param_options(PIECE_MODE_PARAM, [PIECE_MODE_WHOLE, PIECE_MODE_INSTANCES])
+        .with_param_range("source_seed", 0.0..=1e9, 0.0..=1000.0)
+        .with_param_group(
+            "source",
+            ["center_input", "piece_mode", "source_mode", "source_seed"],
+        )
+        // Placed by the points it stamps on, like `scatter.path_array`: the
+        // section's `translate` is the node's one position.
+        .with_transform_section()
+        .with_param_role("translate", ParamRole::Position)
+}
+
 fn scatter_scatter() -> NodeTemplate {
     NodeTemplate::new("scatter.scatter", "Scatter", NodeCategory::Geometry)
         .with_variadic_input_group(InputPort {
@@ -3752,14 +3885,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 139);
+        assert_eq!(reg.all_templates().count(), 142);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 44);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 47);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
@@ -4091,6 +4224,7 @@ mod tests {
             "scatter.grid",
             "scatter.circular",
             "scatter.path_array",
+            "scatter.points",
             "scatter.scatter",
         ] {
             let template = registry.get(type_key).unwrap();
@@ -4127,7 +4261,7 @@ mod tests {
             let variadic_start = template.inputs.len();
             assert_eq!(
                 variadic_start,
-                usize::from(type_key == "scatter.path_array")
+                usize::from(type_key == "scatter.path_array" || type_key == "scatter.points")
             );
             let node = template.create_node(crate::id::NodeId::new(99));
             assert_eq!(node.inputs.len(), variadic_start + 1);
@@ -4784,7 +4918,10 @@ mod tests {
         // Operators. They pass a geometry through and change what it carries,
         // not where it is, so the placement belongs to whatever produced it;
         // wiring a `geometry.transform` in stays the way to move one branch of
-        // a chain. `geometry.transform` is the section itself.
+        // a chain. `geometry.transform` is the section itself. `mesh.import`
+        // is a source, but one with two outputs (scene and geometry) whose
+        // placement is `scene.add`'s or `geometry.transform`'s: a section
+        // would have to wrap a port record.
         const WITHOUT: &[&str] = &[
             "attribute.curveu",
             "attribute.delete",
@@ -4809,6 +4946,8 @@ mod tests {
             "geometry.switch",
             "geometry.transform",
             "geometry.twist",
+            "particle.simulate",
+            "mesh.import",
             "style.dash",
             "style.fill",
             "style.stroke",

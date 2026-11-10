@@ -246,6 +246,8 @@ pub enum RavelIcon {
     NodeMeshCylinder,
     /// Node header/menu: `mesh.plane`.
     NodeMeshPlane,
+    /// Node header/menu: `mesh.import`.
+    NodeMeshImport,
     /// Node header/menu: `scene.add`.
     NodeSceneAdd,
     /// Node header/menu: `scene.merge`.
@@ -348,6 +350,10 @@ pub enum RavelIcon {
     NodeScatterPathArray,
     /// Node header/menu: `scatter.scatter`.
     NodeScatterScatter,
+    /// Node header/menu: `scatter.points`.
+    NodeScatterPoints,
+    /// Node header/menu: `particle.simulate`.
+    NodeParticleSimulate,
     /// Node header/menu: `attribute.set`.
     NodeAttributeSet,
     /// Node header/menu: `attribute.delete`.
@@ -557,6 +563,7 @@ impl RavelIcon {
             "mesh.sphere" => Self::NodeMeshSphere,
             "mesh.cylinder" => Self::NodeMeshCylinder,
             "mesh.plane" => Self::NodeMeshPlane,
+            "mesh.import" => Self::NodeMeshImport,
             "scene.add" => Self::NodeSceneAdd,
             "scene.merge" => Self::NodeSceneMerge,
             "scene.camera" => Self::NodeSceneCamera,
@@ -608,6 +615,8 @@ impl RavelIcon {
             "scatter.circular" => Self::NodeScatterCircular,
             "scatter.path_array" => Self::NodeScatterPathArray,
             "scatter.scatter" => Self::NodeScatterScatter,
+            "scatter.points" => Self::NodeScatterPoints,
+            "particle.simulate" => Self::NodeParticleSimulate,
             "attribute.set" => Self::NodeAttributeSet,
             "attribute.delete" => Self::NodeAttributeDelete,
             "attribute.promote" => Self::NodeAttributePromote,
@@ -765,6 +774,7 @@ impl RavelIcon {
             Self::NodeMeshSphere => "icons/circle-dot.svg",
             Self::NodeMeshCylinder => "icons/layers.svg",
             Self::NodeMeshPlane => "icons/square-square.svg",
+            Self::NodeMeshImport => "icons/boxes.svg",
             Self::NodeSceneAdd => "icons/box.svg",
             Self::NodeSceneMerge => "icons/group.svg",
             Self::NodeSceneCamera => "icons/video.svg",
@@ -818,6 +828,8 @@ impl RavelIcon {
             Self::NodeScatterCircular => "icons/circle-dashed.svg",
             Self::NodeScatterPathArray => "icons/waypoints.svg",
             Self::NodeScatterScatter => "icons/sparkles.svg",
+            Self::NodeScatterPoints => "icons/circle-dot.svg",
+            Self::NodeParticleSimulate => "icons/wind.svg",
             Self::NodeAttributeSet => "icons/tag.svg",
             Self::NodeAttributeDelete => "icons/eraser.svg",
             Self::NodeAttributePromote => "icons/chevrons-up.svg",

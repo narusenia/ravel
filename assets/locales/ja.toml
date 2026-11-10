@@ -1194,6 +1194,12 @@ pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."geometry.from_image".group]
 transform = "トランスフォーム"
 
+[node."mesh.import"]
+label = "モデル読み込み"
+description = "アセット表の glTF・GLB・OBJ モデルを読み込む。scene 出力はファイルの階層を保ち、geometry 出力は全メッシュを結合してジオメトリ・フィールドノードに渡す。"
+[node."mesh.import".params]
+asset_id = "読み込むモデルアセット。"
+
 [node."scene.add"]
 label = "シーン追加"
 description = "ジオメトリ・別のシーンを変換付きで 3D シーンに配置する。"
@@ -1823,6 +1829,45 @@ use_centroid = "ピボットではなく出力のバウンディングボック�
 pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."scatter.scatter".group]
 layout = "配置"
+source = "ソース"
+transform = "トランスフォーム"
+
+[node."particle.simulate"]
+label = "パーティクル・シミュレート"
+description = "エミッタジオメトリからポイントパーティクルをフレーム逐次でシミュレートする。出力は id / index / age / life / velocity を持つポイントジオメトリ。"
+[node."particle.simulate".params]
+emit_from = "エミッタジオメトリのどこから発生させるか。最初のパス（弧長）/ ポイント / インスタンス。auto はパスがあればパス、なければポイント、なければインスタンス。"
+jitter = "発生位置のランダムなずれ（円の半径、ピクセル）。"
+velocity_mode = "発射方向の決め方。fixed は initial_velocity のまま、random はその速さでランダムな方向、normal はその速さでエミッタから外向き。"
+rate = "1 秒あたりの発生数。"
+life = "パーティクルの寿命（フレーム）。"
+life_variance = "寿命のランダムな幅（フレーム、±）。"
+max_points = "同時に存在できる最大数。上限に達すると発生を止め、警告をログに出す。"
+seed = "乱数シード。同じシードなら同じパーティクルになる。"
+initial_velocity = "発射速度（ピクセル/秒）。"
+initial_spread = "発射速度に足すランダムな速さ（ピクセル/秒）。"
+force_direction = "スカラーのフォースフィールドが押す向き（ベクトル。長さが力に掛かる）。Vec2 のフォースフィールドはそのまま使う。"
+drag = "速さに比例して減速する（毎秒）。"
+[node."particle.simulate".group]
+emission = "発生"
+emitter = "エミッタ"
+motion = "運動"
+forces = "フォース"
+
+[node."scatter.points"]
+label = "スキャッター（ポイント）"
+description = "points 入力の全ポイントにソースジオメトリのインスタンスを置く。位置・回転・スケールはポイントから取り、ポイントのその他の属性（Cd / alpha / id / age など）はインスタンスへ引き継ぐ。"
+[node."scatter.points".params]
+center_input = "インスタンス化の前に各ソースジオメトリをアンカーへ移動する。"
+piece_mode = "配るものの単位。whole は 1 本のワイヤが 1 ソース、instances はワイヤごとにインスタンスへ分解する。"
+source_mode = "複数ソース接続時の割り当て方: sequential / random。"
+source_seed = "ソース割り当ての乱数シード。"
+translate = "このノードが作った出力を移動する量（ピクセル）。"
+rotation = "出力に適用するオイラー角（度）。2D の回転は Z 軸まわり。"
+scale = "出力に適用する軸ごとの拡大率。"
+use_centroid = "ピボットではなく出力のバウンディングボックス中心を基準に回転・拡大縮小する。"
+pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
+[node."scatter.points".group]
 source = "ソース"
 transform = "トランスフォーム"
 

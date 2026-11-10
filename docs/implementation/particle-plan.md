@@ -207,8 +207,11 @@ per-point 属性:
 
 - 可変入力グループでフィールドを受け、各フレームで
   全パーティクル位置をバッチサンプルして加速度に加算。
-- 方向パラメータ（フィールドごとに `dir_x` / `dir_y`、
-  または `radial`（発生源からの向き））。
+- **向きの規則は 1 本（決定）**: `Vec2` のフィールドは加速度そのもの、スカラーの
+  フィールドは `force_direction`（ノードに 1 つ）に掛ける大きさ。`radial` は専用
+  モードにせず `field.direction_to` × `field.falloff` で書く。理由: 可変入力の
+  スロットはスロットごとのパラメータを持てず、規則が 1 本なら単位 6 のカーネルも
+  1 経路で済む。
 - ドラッグは速度に比例する減衰としてパラメータで持つ
   （フィールドにしない）。
 
@@ -304,3 +307,40 @@ per-point 属性:
 - **トレイル / ストリーク描画**。パーティクルの軌跡を線で描くのは
   別ノードで、本計画には含めない。
 - **パーティクル専用の Properties UI**。既存のパラメータ UI で扱う。
+
+## 実装メモ（単位 1〜5）
+
+計画との差と、実装して初めて決まったこと。仕様は
+`procedural-geometry.md`「パーティクル」、型と地図は `agent-api-reference.md`。
+
+- **実装は `ravel-nodes/src/particle.rs`**（`ParticleSimulate: StatefulProcessor`）。
+  状態は Point ドメインだけの `Geometry`（SoA 列）と、発生の繰り越し（`f64`）・次の
+  `id`・警告の「入った瞬間」フラグ。`output` は `Geometry` を clone する
+  （列は `Arc` 共有なので安い）。GPU 版（単位 6）は同じ列を 1 要素 1 呼び出しで
+  動かせる形にしてある（ステップは要素ごとの式）。
+- **フォースの向きは「フィールドごと」ではなくノード 1 つに 1 つ**
+  （`force_direction`。単位 3 に決定として記載）。アトラクタのテストは
+  `field.direction_to` × `field.falloff` × 強さ（`field.multiply` が
+  スカラーをベクタへ拡げる）。
+- **積分は前進オイラー**（位置が前フレームの速度で動く）。自由落下は離散解
+  `y_n = g·dt²·n(n−1)/2` と一致し、解析解 `½ g t²` とは `g·t·dt/2` だけずれる
+  （テストはこの誤差上限で比べる）。定数の大きさのアトラクタは中心でチャタリング
+  するので、ドラッグと強さを釣り合わせる（`terminal speed = a / drag`）。
+- **`max_points` の既定は 100000**（`PARTICLE_MAX_POINTS_DEFAULT`、テンプレートと
+  プロセッサの既定の食い違いを避けるため 1 箇所）。測定は `perf-baseline.md`
+  「`particle.simulate` 実測」。**rayon は載せなかった**（`ravel-nodes` の本番依存が
+  増える。10 万点で serial 0.5 ms 前後で、100 万点で効く話は単位 6 の領分）。
+- **警告は `tracing::warn!`**（`log` ではなく。コードベースの慣例）で、**条件に
+  入った瞬間に 1 回**（上限に居続けても毎フレームは出さない）。同じ扱いが
+  3D / Mesh のエミッタと、加速度でないフォースの答えにある。
+- **エミッタ**: `emit_from` = `auto` / `points` / `path` / `instances`。パスは最初の
+  1 本だけ（`PathArcTable`）。継承する属性は、点 = その点の行、パス = 最寄りの頂点の行、
+  インスタンス = そのインスタンスの行。発生位置・向きは `seed` と `id` のハッシュだけ。
+- **単位 4 の「scatter のソース」**: `scatter.*` には**ポイント入力からインスタンスを
+  作る経路が無く**、計画の「追加実装は不要な想定」は通らなかったので、ここで
+  `scatter.points`（copy-to-points）を足した（`scatter/points.rs`）。`P` / `rot` /
+  `scale` は粒から取り、`pscale` は一様スケールとして掛け、他の属性はインスタンス
+  ドメインへ引き継ぐ。`Vec3` の `P` は評価エラー（3D の配置は 3D 複製の担当）。
+  ゴールデン `tests/particle_scatter_golden.rs` は「粒ごとにシェイプが立つ」を検証する。
+- **寿命・サイズ・色**は専用 UI 無し。`age` / `life` を `field.attribute` /
+  `@age` / `@life` 式で読み `field.apply` で書く（テストは `pscale = 4(1 − age/life)`）。

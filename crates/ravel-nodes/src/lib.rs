@@ -32,6 +32,7 @@ pub mod media;
 pub mod merge;
 pub mod model;
 pub mod net;
+pub mod particle;
 pub mod rasterize;
 pub mod scatter;
 pub mod scene;
@@ -399,7 +400,12 @@ pub fn processor_for_node_with_fields(
         "scatter.grid" => Some(Arc::new(scatter::GridProcessor::from_node(node))),
         "scatter.circular" => Some(Arc::new(scatter::CircularProcessor::from_node(node))),
         "scatter.path_array" => Some(Arc::new(scatter::PathArrayProcessor::from_node(node))),
+        "scatter.points" => Some(Arc::new(scatter::PointsProcessor::from_node(node))),
         "scatter.scatter" => Some(Arc::new(scatter::ScatterProcessor::from_node(node))),
+        // Particles: the one stateful node
+        "particle.simulate" => Some(ravel_core::eval::stateful_processor(
+            particle::ParticleSimulate,
+        )),
         // Composition shell (synthetic) nodes
         "comp.background" => Some(Arc::new(comp::CompBackgroundProcessor::from_node(node))),
         "comp.network" => Some(Arc::new(comp::CompNetworkProcessor::from_node(node))),

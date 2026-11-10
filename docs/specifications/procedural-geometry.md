@@ -117,7 +117,7 @@ CPU 経路は texel を読むので、GPU 常駐フレームで来た画像は�
 |------|---------|-----|------|------|
 | `P` | Point/Instance | **Vec2 または Vec3** | 位置（必須）。下記「位置の次元」参照 | —（要素があれば必須） |
 | `index` | Point/Instance | I32 | 生成順の安定インデックス | —（`sort` / 展開が振り直す） |
-| `id` | Point/Instance | I32 | 寿命を通じ安定な識別子（sim 用） | — |
+| `id` | Point/Instance | I32 | 寿命を通じ安定な識別子（sim 用。`particle.simulate` は発生順に振る） | — |
 | `rot` | Instance | F32 | 回転（rad）。**2D のみ** | 0 |
 | `scale` | Instance | Vec2 | スケール。**2D のみ** | `(1, 1)` |
 | `shear` | Instance | F32 | 水平せん断（`x' = x + shear · y`、スケール前の形に対する係数）。**2D のみ**。**無ければ 0**。`rot` / `scale` と合わせて線形部分 `R(rot) · S(scale) · H(shear)` を表す。入れ子の合成が書く（下記）ので、組み込みノードは普段は作らず、列があるとき・非 0 のときだけ書かれる | 0 |
@@ -136,8 +136,8 @@ CPU 経路は texel を読むので、GPU 常駐フレームで来た画像は�
 | `dash_offset` | Detail | F32 | 破線の開始位置（`style.dash` が書く） | —（同上） |
 | `cap` | Detail | I32 | 端点の形。0=butt / 1=round / 2=square。未設定は round（`style.stroke` が書く） | round（Detail。連結しない） |
 | `join` | Detail | I32 | 角の形。0=miter / 1=round / 2=bevel。未設定は round（`style.stroke` が書く） | round（同上） |
-| `age` / `life` | Point | F32 | パーティクル経過/寿命 | —（`field.attribute` の `default`） |
-| `velocity` | Point | Vec2 | 速度（sim） | —（同上） |
+| `age` / `life` | Point | F32 | パーティクル経過/寿命（フレーム。`particle.simulate` が書く） | —（`field.attribute` の `default`） |
+| `velocity` | Point | Vec2 | 速度（px/秒。`particle.simulate` が書く） | —（同上） |
 | `piece` | Primitive | I32 | ピース番号（どの破片に属するか）。`geometry.iterate` が既定でこの列の値ごとにジオメトリを割る（REQ-CORE-013）。fracture が書く | —（`geometry.iterate` は列が無いとエラー） |
 | `u` | Point | F32 | パスパラメータ 0..1。**primitive ごとに正規化**する（`attribute.curveu` が書く。閉パスは閉じる区間の分だけ終点が 1 に届かない） | —（同上） |
 
@@ -580,6 +580,70 @@ pub trait StatefulProcessor: Send + Sync + 'static {
 | 前方ジャンプ | 暫定表示 + バックグラウンドで区間充填 |
 | 上流編集 | 影響区間破棄 → 再充填 |
 
+## パーティクル（`particle.simulate`、REQ-MOGRAPH-002）
+
+唯一のステートフルな組み込みノード（`ravel-nodes/src/particle.rs`、計画は
+[`particle-plan.md`](../implementation/particle-plan.md)）。出力は Point ドメインだけの
+Geometry で、状態そのもの。サブネットは作らず、エミッタとフォースは入力で渡す。
+描画は既存のポイントスプライト（`pscale` / `Cd` / `alpha`）で、専用の描画ノードは無い。
+
+| 入力 / パラメータ | 意味 |
+|---|---|
+| `emitter`（Geometry、任意） | 発生源。未接続は原点から発生。接続済みで発生源が空（点もパスも無い）なら**何も発生しない**（エラーにしない）。3D 位置・Mesh・Geometry 以外は何も発生せず、状態に入った瞬間に 1 回警告する |
+| `force`（Field、可変グループ） | フォース。下記の規約 |
+| `emit_from` | `auto`（最初のパス → ポイント → インスタンスの順で、あるもの）/ `points` / `path` / `instances`。`path` は**最初のパスの弧長**（`PathArcTable`）で一様にサンプルする |
+| `rate` / `life` / `life_variance` | 発生数（毎秒）/ 寿命（フレーム）/ 寿命の幅（フレーム、±）。`rate × 1/fps` の端数は次のフレームへ繰り越す（取りこぼさない） |
+| `initial_velocity` / `initial_spread` / `velocity_mode` | 発射速度（px/秒）/ 発射速度に足す円盤状のばらつき（px/秒）/ 向きの決め方。`fixed` は `initial_velocity` のまま、`random` はその速さでランダムな向き、`normal` はその速さでエミッタから外向き（パスは法線、点・インスタンスはエミッタ中心から外向き。向きが定まらなければ `random`） |
+| `jitter` | 発生位置のばらつき（円盤の半径、px） |
+| `drag` | 速さに比例する減速（毎秒）。**フィールドではなくパラメータ** |
+| `force_direction` | スカラーのフォースが押す向き（既定 `(0, 1)` = 下） |
+| `seed` / `max_points` | 乱数シード / 同時生存数の上限（既定 100000） |
+
+**属性**（出力の Point ドメイン）: `P`（Vec2、px）、`velocity`（Vec2、px/秒）、`id`（I32、
+発生順の通し番号で**寿命を通じ不変**）、`index`（I32、毎フレーム詰め直される配列添字）、
+`age`（F32、経過フレーム。発生フレームが 0）、`life`（F32、寿命フレーム）。さらに
+**エミッタの行が持つ属性（`Cd` / `pscale` / ユーザ列など。上の 6 つを除く）を継承する**
+— 点はその点の行、パスは最寄りの頂点の行、インスタンスはそのインスタンスの行。
+寿命・サイズ・色の制御は `age` / `life` を駆動値にした `field.attribute` →
+`field.curve_remap` → `field.apply`（パーティクル専用のカーブ UI は無い）。
+
+**1 フレームの順序**: 生存中の粒を積分 → `age + 1 >= life` の粒を削除 → 新しい粒を発生。
+発生した粒は発生フレームでは動かない（`age` 0）。積分は前進オイラー:
+`P' = P + v·dt`、`v' = v + (a − drag·v)·dt`（`dt = 1/fps`）。`life = L` の粒は `L`
+フレーム見える。
+
+**フォースの規約**:
+
+- 各フレーム、`force` の**全フィールドを、生存中の粒の位置でバッチ 1 回ずつ**サンプルする
+  （サンプルに渡る属性は粒の列なので `field.attribute("age")` が使える）。値は加速度
+  （px/秒²）で、**加算**する。
+- **スカラー**のフィールドは大きさで、`force_direction` の向きに掛ける。**`Vec2`** の
+  フィールドは加速度そのもの。重力 = `field.constant` × `force_direction`、アトラクタ =
+  `field.direction_to` × `field.falloff` × 強さ（`field.multiply` はスカラーを
+  ベクタへ拡げる）。**フィールドごとの向きは持たない**（向きが要るなら `Vec2` を作る）。
+- `Vec2` でもスカラーでもない（または長さの合わない）答えは 0 として扱い、状態に入った
+  瞬間に 1 回警告する。
+
+**上限と警告**: 発生で生存数が `max_points` を超える分は**発生させず**、上限に達した
+フレームに 1 回だけ警告する（上限に居続けても毎フレームは出さない）。黙って切り捨てない。
+`id` は再利用しない（再利用すると別の粒の乱数を再生する）ので、`i32::MAX` 個を
+使い切った後の発生も同じ扱いで止まる。
+
+**決定性**: 乱数は `seed` と `id` のハッシュ（`ops::element_hash`）だけ。同じ seed は
+ビット単位で同じ結果で、スクラブ・巻き戻し・チェックポイントからの再計算でも変わらない。
+`step` は ctx のフレームと fps、前状態、そのフレームの入力とパラメータだけを読む。
+
+**他ノードのソースとして使う**: 出力は普通の点ジオメトリ。**粒ごとにシェイプを立てる**
+のは `scatter.points`（copy-to-points）— 各粒に `instance_source` の 1 インスタンス
+を置き、`P` / `rot` / `scale` は粒から取る（**`pscale` は一様スケールとして `scale`
+に掛かる**。列が無ければ掛けない）。粒のそれ以外の属性（`Cd` / `alpha` / `id` / `age`
+など）はインスタンスドメインへ引き継ぐので、フィールドやスタイルがそのまま読める。
+`Vec3` の `P` と 100 万点超は評価エラー（3D の配置は 3D 複製の担当）。粒の雲そのものを
+`scatter.*` / `geometry.repeat` のソースにしてスタンプすることもできる。
+
+**未対応**（計画の非対象）: 衝突、サブフレームエミッション、多段 sim、トレイル、GPU
+シミュレーション（`particle-plan.md` 単位 6）。エミッタの 3D 位置は未対応。
+
 ## 評価スコープ軸（REQ-CORE-002 / REQ-CORE-011 / REQ-CORE-013）
 
 キャッシュ・dirty のキーは `NodeKey { path: Vec<PathSegment>, node }`。
@@ -728,7 +792,7 @@ PolyExtrude、group の AND / OR / NOT 合成、`shape.box`。
 |------|------|------|
 | `ravel-core/src/types.rs` | `GeometricData` 実装型の追加 | ✅ `Geometry` が実装（geometry/container.rs） |
 | `ravel-core/src/geometry/`（新設） | Geometry / AttributeSet / Field | ✅ 実装済み（式フィールドは REQ-CORE-015 の式言語で実装済み、画像サンプラは未） |
-| `ravel-core/src/eval/sim.rs` | sim キャッシュ、`StatefulProcessor` 統合 | ✅ 実装済み（組み込みのステートフルノードはまだ無い。最初の利用者は `particle-plan.md`） |
+| `ravel-core/src/eval/sim.rs` | sim キャッシュ、`StatefulProcessor` 統合 | ✅ 実装済み（組み込みのステートフルノードは `particle.simulate` だけ） |
 | `ravel-core/src/registry/builtin.rs` | シェイプ系の出力型変更 + 新ノード登録 | ✅ shape / scatter / attribute / field / rasterize テンプレート登録済み |
 | `ravel-nodes` | シェイプ processor のジオメトリ化、Rasterize、属性・フィールド群 | ✅ shape / scatter / attribute / field と rasterize の GPU + CPU reference processor 実装済み |
 | `ravel-core/src/composition/compile.rs` | Shape/Text Layer ソースの展開先変更 | 🔶 Shape は `ShapeGeometry → Rasterize` 展開済み、Text は未 |

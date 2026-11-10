@@ -968,6 +968,30 @@ wall 18.24 − evaluate 11.33 = **6.91 ms が GPU 完了待ち**（512×512 に
   100 万点だと ≈2.0 ms でサイズにも効き始める。VRAM とキャッシュの衝突
   （同計画の未解決節）は別問題として残る。
 
+### `particle.simulate` 実測と `max_points` の既定値（PART-1）
+
+実ノードの定常状態 1 step（発生・削除・積分、フォース無し、Evaluator 経由）。
+`particle_step_time`（`crates/ravel-nodes/src/particle.rs` の `#[ignore]`
+テスト、`--release`）で 3 回測った。**計測時の loadavg は約 11
+（`sysctl hw.ncpu` = 実コア数に対し高負荷）で、他の worktree が走っていた**
+ので絶対値は上振れしている。
+
+| 生存数 | serial ms / step（3 回） |
+|---|---|
+| 10k | 0.047〜0.056 |
+| 100k | 0.45〜0.54 |
+
+proxy（0.38〜0.45 ms）より重いのは、削除のための列の詰め直しと発生を含む
+ため。**rayon は載せていない**: 10 万点で予算の 3% 未満、10k では rayon の
+起動コストの方が大きいと proxy が示しており、`ravel-nodes` の本番依存を
+増やす理由に足りない。100 万点（≈5 ms、描画の `flatten` + `upload` 27 ms が
+別に乗る）で効くので、そこへ行くときに載せる（単位 6 の領分）。
+
+**`max_points` の既定は 100 000**（`PARTICLE_MAX_POINTS_DEFAULT`）。計画の
+「10 万点を狙う」と一致し、ここまでは step が 60fps 予算の 1〜3% に収まる。
+これを超えると律速は step でなく描画（100 万点で 27 ms）なので、既定を上げても
+体感は良くならない。上限はパラメータで引き上げられる。
+
 ## 3D の頂点アップロード（`3d-scene-plan.md` 単位 4）
 
 同計画は「GPU 常駐ジオメトリを前提にせず、`scene.render` の内部で頂点

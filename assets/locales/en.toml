@@ -1768,6 +1768,45 @@ layout = "Layout"
 source = "Source"
 transform = "Transform"
 
+[node."particle.simulate"]
+label = "Particle Simulate"
+description = "Simulates point particles frame by frame from an emitter geometry. Output is a point geometry with id, index, age, life and velocity."
+[node."particle.simulate".params]
+emit_from = "Which part of the emitter geometry particles are born at: its first path (by arc length), its points, or its instances. auto takes the path if there is one, else the points, else the instances."
+jitter = "Random offset of the birth position, as a disc radius in pixels."
+velocity_mode = "How the launch direction is chosen: fixed (initial_velocity as given), random (a random direction at its speed), or normal (away from the emitter at its speed)."
+rate = "Particles emitted per second."
+life = "Lifetime of a particle in frames."
+life_variance = "Random spread of the lifetime in frames, plus or minus."
+max_points = "Most particles alive at once. Emission stops at the limit and a warning is logged."
+seed = "Random seed. The same seed gives the same particles."
+initial_velocity = "Launch velocity in pixels per second."
+initial_spread = "Random extra launch speed in pixels per second."
+force_direction = "Direction a scalar force field pushes along, as a vector (its length scales the push). A Vec2 force field is used as it is."
+drag = "Slows a particle in proportion to its speed (per second)."
+[node."particle.simulate".group]
+emission = "Emission"
+emitter = "Emitter"
+motion = "Motion"
+forces = "Forces"
+
+[node."scatter.points"]
+label = "Scatter Points"
+description = "Places an instance of the source geometry on every point of the points input, taking the point's position, rotation and scale; the point's other attributes (Cd, alpha, id, age, ...) are carried onto the instances."
+[node."scatter.points".params]
+center_input = "Re-centre each source geometry on its anchor before instancing."
+piece_mode = "What is dealt out: whole (one connected wire is one source) or instances (each wire is split into its own instances)."
+source_mode = "How sources are assigned to points when several are connected: sequential or random."
+source_seed = "Random seed for source assignment."
+translate = "Moves the output after this node has built it."
+rotation = "Euler angles in degrees applied to the output; 2D rotation is about Z."
+scale = "Scale factor per axis applied to the output."
+use_centroid = "Rotate and scale about the output's bounding-box center instead of the pivot."
+pivot = "Origin of the rotation and scale while use_centroid is off."
+[node."scatter.points".group]
+source = "Source"
+transform = "Transform"
+
 [node."attribute.set"]
 label = "Attribute Set"
 description = "Writes a constant attribute onto a geometry domain."

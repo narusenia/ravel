@@ -219,12 +219,16 @@ pub fn apply_transform_in_group<'a>(
     // keeps the XY plane (a turn about Z, any xy scale, any z scale or move).
     // Turning a 3D geometry's curves out of that plane would leave the
     // tangents behind in XY while the points moved, so it is refused, as an
-    // expansion refuses a curved source under a 3D placement.
+    // expansion refuses a curved source under a 3D placement. Only selected
+    // points count: an unselected point does not move, so its tangents stay valid.
     if points_spatial
         && (euler[0] != 0.0 || euler[1] != 0.0)
-        && [names::IN_TAN, names::OUT_TAN]
-            .iter()
-            .any(|name| geometry.points().get(name).is_some())
+        && [names::IN_TAN, names::OUT_TAN].iter().any(|name| {
+            geometry
+                .points()
+                .get(name)
+                .is_some_and(|column| (0..column.len()).any(&in_point))
+        })
     {
         return Err(GeometryOpError::TangentsIn3D {
             operation: "geometry.transform",
@@ -3803,5 +3807,21 @@ mod tests {
             ravel_core::eval::ResolvedValue::Vec3([90.0, 0.0, 0.0]),
         );
         assert!(apply_transform(&straight, &turned).is_ok());
+
+        // Only selected points count: unselected curves do not move, so a
+        // group that leaves them out turns freely, and one that takes them in
+        // is refused.
+        for (pick, refused) in [([false, false], false), ([true, false], true)] {
+            let mut grouped = curved_path3();
+            grouped
+                .points_mut()
+                .insert("pick", AttributeArray::Bool(pick.to_vec()))
+                .unwrap();
+            assert_eq!(
+                apply_transform_in_group(&grouped, &turned, "pick").is_err(),
+                refused,
+                "{pick:?}"
+            );
+        }
     }
 }

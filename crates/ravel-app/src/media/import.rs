@@ -265,9 +265,11 @@ pub fn relink_asset_with(asset_id: AssetId, path: PathBuf, prober: MediaProber, 
 /// Classify and probe one file. Pure apart from the injected backends and
 /// `stat`, so it runs on the background executor.
 ///
-/// Kind decision order: a detected multi-frame sequence wins; a still
-/// extension is a single image; anything else must probe as a container or
-/// the file is not imported.
+/// Kind decision order: a model file (glTF / GLB / OBJ) is read in full, so a
+/// file that does not parse is refused here, on the same path and with the
+/// same notice as an unprobeable clip; then a detected multi-frame sequence
+/// wins; a still extension is a single image; anything else must probe as a
+/// container or the file is not imported.
 pub fn probe_path(
     path: &Path,
     prober: &MediaProber,
@@ -277,6 +279,27 @@ pub fn probe_path(
         path: path.to_path_buf(),
         reason,
     };
+
+    if ravel_nodes::model::is_model_path(path) {
+        // Pure Rust, so no `ffmpeg` feature and no injected backend: a model
+        // is parsed outright. The asset is stored as a container (all that
+        // `infer_from_path` can say) — `mesh.import` reads only the resolved
+        // path, never the kind.
+        return match ravel_nodes::model::load(path) {
+            Ok(_) => Ok(ProbedAsset {
+                path: path.to_path_buf(),
+                kind: AssetKind::infer_from_path(path),
+                metadata: AssetMetadata {
+                    codec: path
+                        .extension()
+                        .map(|extension| extension.to_string_lossy().to_ascii_lowercase()),
+                    file_size: file_size(path),
+                    ..AssetMetadata::default()
+                },
+            }),
+            Err(err) => Err(fail(format!("model load failed: {err:#}"))),
+        };
+    }
 
     if let Ok(info) = (prober.detect_sequence)(path)
         && info.frame_count() > 1

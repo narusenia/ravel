@@ -30,6 +30,7 @@ pub mod layer_ref;
 pub mod math;
 pub mod media;
 pub mod merge;
+pub mod model;
 pub mod net;
 pub mod particle;
 pub mod rasterize;
@@ -37,6 +38,8 @@ pub mod scatter;
 pub mod scene;
 pub mod scene_render;
 pub mod shape;
+#[cfg(test)]
+mod sim_test_util;
 pub mod style;
 pub mod subnet;
 pub mod text;
@@ -348,6 +351,7 @@ pub fn processor_for_node_with_fields(
         "geometry.from_image" => Some(Arc::new(geometry::GeometryFromImageProcessor::from_node(
             node,
         ))),
+        "mesh.import" => Some(Arc::new(model::MeshImportProcessor::from_node(node))),
         "scene.add" => Some(Arc::new(scene::SceneAddProcessor::from_node(node))),
         "scene.merge" => Some(Arc::new(scene::SceneMergeProcessor::from_node(node))),
         "scene.camera" => Some(Arc::new(scene::SceneCameraProcessor::from_node(node))),

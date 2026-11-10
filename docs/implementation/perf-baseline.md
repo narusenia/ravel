@@ -2070,7 +2070,7 @@ before は同じテストを可視性ゲートの前のコードで走らせた�
   超過はエラーで、引き上げはユーザーの明示的な操作。
 
 
-## ステートレス評価パスの退行確認（`stateful-eval-plan.md`、REQ-CORE-011）
+## ステートレス評価パスの退行確認（`done/stateful-eval-plan.md`、REQ-CORE-011）
 
 ステートフル評価の追加（`eval.rs` のパラメータオーバーレイ処理の括り出しと
 `pull_input_at` の分離、`Evaluator` のフィールド追加）がステートレスな評価に

@@ -1334,7 +1334,7 @@ mod tests {
     use crossbeam_channel::Receiver;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     const FPS: FrameRate = FrameRate { num: 30, den: 1 };
 
@@ -3068,6 +3068,21 @@ mod tests {
             .collect()
     }
 
+    /// Waits until `frames` holds `count` entries. `finalize` announces a
+    /// frame before the worker inserts it, so counting right after
+    /// [`completed`] races the insert.
+    fn cached(frames: &SharedFrameCache, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while frames.stats().entries < count {
+            assert!(
+                Instant::now() < deadline,
+                "only {} of {count} frames were cached",
+                frames.stats().entries
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     /// The band grows past the playhead while nobody is asking for anything,
     /// and — the half a ranges-only assertion would miss — the frames it
     /// claims are frames a real request is actually served.
@@ -3095,6 +3110,7 @@ mod tests {
         let mut filled = completed(&done, 4);
         filled.sort_unstable();
         assert_eq!(filled, vec![0, 1, 2, 3]);
+        cached(&frames, 4);
         assert_eq!(
             frames.cached_ranges(comp_id(), &EvalContext::new(0, FPS, (2, 2))),
             vec![0..4]
@@ -3140,6 +3156,7 @@ mod tests {
         assert_eq!(update.generation, generation);
 
         assert_eq!(completed(&done, 4).len(), 4);
+        cached(&frames, 4);
         assert_eq!(frames.stats().entries, 4);
         assert!(
             update_rx.try_recv().is_err(),

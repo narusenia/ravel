@@ -199,6 +199,7 @@ pub fn register_builtins(reg: &mut NodeRegistry) {
     reg.register(geometry_iterate());
     reg.register(particle_simulate());
     reg.register(scatter_points());
+    reg.register(mesh_import());
     reg.register(scene_add());
     reg.register(scene_merge());
     reg.register(scene_camera());
@@ -1963,6 +1964,23 @@ fn scene_output() -> OutputPort {
         name: "scene".into(),
         data_type: DataTypeId::SCENE,
     }
+}
+
+/// `mesh.import`: a glTF / GLB / OBJ model from the media asset table.
+///
+/// `asset_id` is the reference a `media` node holds — the decimal
+/// [`AssetId`](crate::id::AssetId) — so the file resolves through the same
+/// project-relative machinery as footage and the same asset queries see it.
+/// Two outputs: the file's node hierarchy as a `scene`, and every mesh baked
+/// into one `geometry` in scene space for the geometry and field nodes.
+fn mesh_import() -> NodeTemplate {
+    NodeTemplate::new("mesh.import", "Import Model", NodeCategory::Geometry)
+        .with_output(scene_output())
+        .with_output(OutputPort {
+            name: "geometry".into(),
+            data_type: DataTypeId::GEOMETRY,
+        })
+        .with_param(string_parameter("asset_id", ""))
 }
 
 /// `scene.add`: place one value in a scene with a 3D transform.
@@ -3730,14 +3748,14 @@ mod tests {
     fn register_all_builtins() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.all_templates().count(), 137);
+        assert_eq!(reg.all_templates().count(), 138);
     }
 
     #[test]
     fn builtins_cover_expected_categories() {
         let mut reg = NodeRegistry::new();
         register_builtins(&mut reg);
-        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 42);
+        assert_eq!(reg.list_by_category(NodeCategory::Geometry).len(), 43);
         assert_eq!(reg.list_by_category(NodeCategory::Scene).len(), 5);
         assert_eq!(reg.list_by_category(NodeCategory::Field).len(), 23);
         assert_eq!(reg.list_by_category(NodeCategory::Image).len(), 33);
@@ -4763,7 +4781,10 @@ mod tests {
         // Operators. They pass a geometry through and change what it carries,
         // not where it is, so the placement belongs to whatever produced it;
         // wiring a `geometry.transform` in stays the way to move one branch of
-        // a chain. `geometry.transform` is the section itself.
+        // a chain. `geometry.transform` is the section itself. `mesh.import`
+        // is a source, but one with two outputs (scene and geometry) whose
+        // placement is `scene.add`'s or `geometry.transform`'s: a section
+        // would have to wrap a port record.
         const WITHOUT: &[&str] = &[
             "attribute.curveu",
             "attribute.delete",
@@ -4789,6 +4810,7 @@ mod tests {
             "geometry.transform",
             "geometry.twist",
             "particle.simulate",
+            "mesh.import",
             "style.dash",
             "style.fill",
             "style.stroke",

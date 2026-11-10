@@ -511,7 +511,7 @@ Hybrid Pull（REQ-CORE-002）は「フレーム t の値は t だけから決ま
 ### 規約
 
 実装は `ravel-core/src/eval/sim.rs`（設計の経緯は
-[`stateful-eval-plan.md`](../implementation/stateful-eval-plan.md)）。
+[`stateful-eval-plan.md`](../implementation/done/stateful-eval-plan.md)）。
 
 ```rust
 pub trait StatefulProcessor: Send + Sync + 'static {
@@ -532,7 +532,9 @@ pub trait StatefulProcessor: Send + Sync + 'static {
   未計算区間 `[last+1, t]` を順に `step` して埋める。**`step` へ渡す入力と
   パラメータは、要求フレームではなく各 step のフレームで解決する**（入力は
   `TimeShift(node, frame)` スコープ）。そうしないと状態が「どのフレームで
-  要求されたか」に依存する。
+  要求されたか」に依存する。サブネットのピン・調整レイヤーの `source`・
+  反復のピースのように**スコープの外から `net.in` へ来る値も同じ**で、各 step の
+  フレームで、それを作ったスコープに引き直す（`architecture.md` のバインディング）。
 - **前方ジャンプ**: `EvalServiceConfig::sim_jump_frames` を設定したサービスは、
   それより長いジャンプに対し最後に届いた状態を `EvalUpdate::provisional =
   true` で即座に返し、評価ワーカー上で充填を続けて同じ世代の確定値を返す。
@@ -542,6 +544,13 @@ pub trait StatefulProcessor: Send + Sync + 'static {
   届くノード）の構造・種別・bypass・全パラメータ（キーフレーム・式を含む）と
   fps・コンプ基準のハッシュをトラックの記録と比べ、変化していたら**全区間破棄**
   する（v1）。ノードの位置・ラベルや上流でないノードの変更では破棄しない。
+  上流が**スコープの外から読むもの**もハッシュに入る: `net.in` に届くなら束縛を
+  作ったスコープのノードの上流、`layer.ref` の参照先レイヤーのネットワークと
+  シェル、シェル読み（`layer.info` / `comp.info`・殻ノード）が読むシェル。
+  外を読まない sim は従来のハッシュのままで、同じネットワーク内の無関係な編集で
+  破棄されない。`layer.info` / `layer.ref` / 殻ノードのシェル読みはコンポジション単位（そのコンポの
+  全レイヤーのシェル）で比べるので別レイヤーのシェル編集でも破棄されるが、`comp.info` は
+  コンポの項目とレイヤー数だけを読むので兄弟のシェル編集では破棄されない。
   処理系の差し替え（`register` / `invalidate_node`）と全無効化は即座に
   トラックを落とし、ノードやレイヤーの削除は文書の差分から解放する。
   **影響開始フレーム以降のみ破棄する最適化は v2 で、未実装。**

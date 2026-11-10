@@ -1194,6 +1194,12 @@ pivot = "use_centroid がオフのときの回転・拡大縮小の原点。"
 [node."geometry.from_image".group]
 transform = "トランスフォーム"
 
+[node."mesh.import"]
+label = "モデル読み込み"
+description = "アセット表の glTF・GLB・OBJ モデルを読み込む。scene 出力はファイルの階層を保ち、geometry 出力は全メッシュを結合してジオメトリ・フィールドノードに渡す。"
+[node."mesh.import".params]
+asset_id = "読み込むモデルアセット。"
+
 [node."scene.add"]
 label = "シーン追加"
 description = "ジオメトリ・別のシーンを変換付きで 3D シーンに配置する。"

@@ -56,7 +56,7 @@ VRAM / RAM / Disk のどの層も存在せず、「プレビュー再生時は V
 |---|---|---|
 | `motion-blur-plan.md` BLUR-2 | 有効判定を整数 frame ではなく時間基準に | 同計画が `CacheMiss` を独自に増やす |
 | `motion-blur-plan.md` BLUR-3 | `quality` を有効判定に参加させる | 同上 |
-| `stateful-eval-plan.md` SIM-1 | フレーム連続区間の保持 | 別 map を新設（`evaluation-scope-plan.md:96` で合意済み）。ただし**予算は未定義** |
+| `done/stateful-eval-plan.md` SIM-1 | フレーム連続区間の保持 | 別 map を新設（`evaluation-scope-plan.md:96` で合意済み）。ただし**予算は未定義** |
 | `done/render-export-plan.md` EXPORT-2 | 書き出しが対話用キャッシュを汚さない / 汚されない | 2 本目の `Evaluator` を立てるだけで、精度の取り違えを防ぐ手段がない |
 | Timeline のキャッシュ帯（本計画で追加） | comp 単位・時間単位のキャッシュ占有範囲 | 問い合わせ API がないので実装できない |
 

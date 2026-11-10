@@ -195,6 +195,83 @@ pub fn builtin_layer_templates() -> &'static [LayerTemplate] {
     })
 }
 
+/// The layer a model asset becomes: `mesh.import` → `scene.add` (scaled up,
+/// because model files are in metres and scene space is pixel-scaled) →
+/// `scene.merge` with a default `scene.camera` → `scene.render` → `net.out`.
+///
+/// Not in [`builtin_layer_templates`]: it is not a layer the user creates from
+/// the menu but what "add as layer" makes of an asset the `media` template
+/// would render as nothing. `mesh.import`'s asset reference is bound by the
+/// caller, exactly as a `media` node's is.
+pub fn model_layer_template() -> LayerTemplate {
+    use crate::graph::ParameterValue;
+    use crate::id::DataTypeId;
+    let node = |key: &str, type_key: &str, x: f32| TemplateNode {
+        key: key.into(),
+        type_key: type_key.into(),
+        label: None,
+        position: (x, 0.0),
+        inputs: vec![],
+        outputs: vec![],
+        params: vec![],
+    };
+    let port_out = |name: &str, data_type: DataTypeId| OutputPort {
+        name: name.into(),
+        data_type,
+    };
+    let mut input = node("in", "net.in", -840.0);
+    input.label = Some("In".into());
+    input.outputs = vec![
+        port_out("base_geometry", DataTypeId::GEOMETRY),
+        port_out("t", DataTypeId::SCALAR),
+        port_out("f", DataTypeId::SCALAR),
+    ];
+    let mut add = node("add", "scene.add", -360.0);
+    add.params = vec![Parameter {
+        key: "scale".into(),
+        value: ParameterValue::vec3(MODEL_UNIT_SCALE, MODEL_UNIT_SCALE, MODEL_UNIT_SCALE),
+    }];
+    let mut camera = node("camera", "scene.camera", -360.0);
+    camera.position = (-360.0, 180.0);
+    let mut out = node("out", "net.out", 360.0);
+    out.label = Some("Out".into());
+    out.inputs = vec![InputPort {
+        name: "frame".into(),
+        accepted_types: vec![DataTypeId::FRAME_BUFFER],
+        is_param: false,
+        is_variadic: false,
+    }];
+    let edge = |from: (&str, &str), to: (&str, &str)| TemplateEdge {
+        from: (from.0.into(), from.1.into()),
+        to: (to.0.into(), to.1.into()),
+    };
+    LayerTemplate {
+        key: "model".into(),
+        display_name: "Model".into(),
+        nodes: vec![
+            input,
+            node("model", "mesh.import", -600.0),
+            add,
+            camera,
+            node("merge", "scene.merge", -120.0),
+            node("render", "scene.render", 120.0),
+            out,
+        ],
+        edges: vec![
+            edge(("model", "scene"), ("add", "object")),
+            edge(("add", "scene"), ("merge", "A")),
+            edge(("camera", "scene"), ("merge", "B")),
+            edge(("merge", "scene"), ("render", "scene")),
+            edge(("render", "output"), ("out", "frame")),
+        ],
+    }
+}
+
+/// Scale applied to an imported model's unit so a model of about one unit
+/// across fills a good part of the default camera's view (about 930 units tall
+/// at the origin). Editable on the layer's `scene.add`.
+pub const MODEL_UNIT_SCALE: f32 = 200.0;
+
 /// Look up a built-in template by key (`"solid"`, `"shape"`, `"media"`,
 /// `"audio"`, `"null"`, `"adjustment"`).
 pub fn builtin_layer_template(key: &str) -> Option<&'static LayerTemplate> {
@@ -249,6 +326,14 @@ mod tests {
                 template.key
             );
         }
+    }
+
+    #[test]
+    fn the_model_template_instantiates_a_frame_producing_network() {
+        let network = model_layer_template().instantiate(&registry()).unwrap();
+        assert!(network.nodes().any(|n| n.type_key == "mesh.import"));
+        let layer = Layer::new(LayerId::new(1), "Model", network);
+        assert!(layer.has_frame_output());
     }
 
     #[test]

@@ -7,7 +7,7 @@ REQ-CORE-011（ステートフル評価）、REQ-CORE-012（フィールド）�
 REQ-GPU-001。
 
 **前提**:
-- `stateful-eval-plan.md`（REQ-CORE-011）— sim キャッシュが無いと成立しない。
+- `done/stateful-eval-plan.md`（REQ-CORE-011）— sim キャッシュが無いと成立しない。
 - `done/per-instance-modulation-plan.md` — フォースはフィールドとして接続する。
 
 ## 問題
@@ -124,7 +124,7 @@ sim を GPU へ移す単位」。10 万点の実用性は単位 1〜5 で足り�
 **決定: キーフレーム化（チェックポイント）。** SIM が既に持つ機構を
 そのまま使う。`SimTrack` は予算を超えると保持フレームを `stride` ごとの
 疎なチェックポイントへ間引き、間のフレームは最寄りのチェックポイントから
-`step` し直す（`stateful-eval-plan.md` の追補）。GPU の状態も同じ規則で
+`step` し直す（`done/stateful-eval-plan.md` の追補）。GPU の状態も同じ規則で
 保持し、課金先を VRAM 側（`VramAllowance`）にするだけで、間引きと再 step の
 論理は CPU と共有する。
 
@@ -225,7 +225,7 @@ per-point 属性:
 
 ### 単位 4: スクラブ耐性と他ノードへの流用
 
-- sim キャッシュ（`stateful-eval-plan.md`）との結合確認。
+- sim キャッシュ（`done/stateful-eval-plan.md`）との結合確認。
 - パーティクル出力を `scatter.*` の `instance_source` ではなく
   **複製元ポイント**として使う経路の確認。
   （`scatter` は Geometry を入力に取るので、追加実装は不要な想定。

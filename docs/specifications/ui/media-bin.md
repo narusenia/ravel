@@ -41,6 +41,10 @@ REQ-PROJ-001。設計は
 - 音声つきの素材は殻に `AudioSource`（同一 asset_id + 最初の音声ストリーム）を
   設定する。映像を持たない音声ファイルは frameless な `audio` テンプレートで
   レイヤー化する
+- モデルファイル（glTF / GLB / OBJ。永続化された path の拡張子で判定。
+  `AssetKind` は増やさない）は `media` ではなく `mesh.import` → `scene.add`
+  → `scene.merge`（既定カメラ）→ `scene.render` のレイヤーにする
+  （`templates::model_layer_template`）。`media` では何も描かれない
 - **複数素材を一度に置いても 1 undo**（1 document commit）
 
 ## 行の操作

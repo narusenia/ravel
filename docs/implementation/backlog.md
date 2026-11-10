@@ -30,7 +30,6 @@
 
 | ID | 単位 | 計画 |
 |---|---|---|
-| SIM-5 | スコープの外から来る入力（時刻ごとの束縛と外部前提） | `stateful-eval-plan.md` |
 | PART-1 | `particle.simulate` の骨格 | `particle-plan.md` |
 | BLUR-4 | `comp.motion_blur` と殻フィールド（BLUR-3 完了で着手可能） | `motion-blur-plan.md` |
 | ALIGN-1 | 整列・分布の計算（ヘッドレス） | `align-panel-plan.md` |
@@ -1243,7 +1242,7 @@ CPU / GPU 両方）。グリフが穴を持つ最初の図形だったので、`
 | SIM-2 | ✅ #639 | 無効化 | SIM-1 |
 | SIM-3 | ✅ #639 | 暫定表示とバックグラウンド充填 | SIM-2 |
 | SIM-4 | ✅ #639 | 文書更新 | SIM-3 |
-| SIM-5 | 🟡 | スコープの外から来る入力（時刻ごとの束縛と外部前提） | SIM-4 |
+| SIM-5 | ✅ #644 | スコープの外から来る入力（時刻ごとの束縛と外部前提） | SIM-4 |
 
 ### パーティクル（REQ-MOGRAPH-002）
 
@@ -1492,7 +1491,7 @@ OPS-1〜13 / PATH-1〜6 / TYPE-* が入ると合わせて 100 箇所を大きく
 | 要件 | 未達の受入条件 | 担当計画 |
 |---|---|---|
 | REQ-CORE-010 | 属性の削除 / Lua 式からの参照 | MOD-4 / なし |
-| REQ-CORE-011 | 全部 | `stateful-eval-plan.md` |
+| REQ-CORE-011 | 全部 | `done/stateful-eval-plan.md` |
 | REQ-MOGRAPH-001 | フィールド変調 / 変調結果 / Lua 式 | MOD-1〜5 / なし |
 | REQ-MOGRAPH-004 | 全部 | `typography-plan.md` |
 | REQ-MOGRAPH-005 | ほぼ全部 | `effects-library-plan.md`（トランジション除く） |

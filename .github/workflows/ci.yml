@@ -39,9 +39,9 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
   # Incremental artifacts only pay off across edits on one machine, which never
-  # happens on a fresh runner. A compiler cache points the same way
-  # independently: an incremental invocation is not a cacheable unit of work,
-  # so leaving them on would make every compile a pass-through.
+  # happens on a fresh runner, so writing them is pure cost. kache strips
+  # `-C incremental` before keying by default, so this is not what makes the
+  # cache hit; it only keeps the compiler from producing state nobody reads.
   CARGO_INCREMENTAL: "0"
   # Full debug info is the largest thing CI builds and the one thing it never
   # reads: no debugger attaches here, and `line-tables-only` still gives test
@@ -309,8 +309,13 @@ jobs:
       # Runs after a failure too: when a build breaks, whether the compiler ran
       # against a warm cache is part of reading the log. The action's post step
       # puts the same numbers in the job summary; this line keeps them in the log.
+      #
+      # Gated on `RUSTC_WRAPPER` rather than on the setup step: the action
+      # returns early without installing anything when a PR description says
+      # `[no-cache]` or the download fails, and the build then runs uncached —
+      # which must not turn into a red job here.
       - name: kache statistics
-        if: ${{ !cancelled() && steps.scope.outputs.run_code == 'true' && env.REMOTE_CACHE_ENABLED == 'true' }}
+        if: ${{ !cancelled() && steps.scope.outputs.run_code == 'true' && env.RUSTC_WRAPPER != '' }}
         shell: bash
         run: kache stats --last-build
 
@@ -405,7 +410,7 @@ jobs:
         run: mise exec -- cargo test -p ravel-media -p ravel-audio -p ravel-nodes -p ravel-cli --features ffmpeg
 
       - name: kache statistics
-        if: ${{ !cancelled() && env.REMOTE_CACHE_ENABLED == 'true' }}
+        if: ${{ !cancelled() && env.RUSTC_WRAPPER != '' }}
         shell: bash
         run: kache stats --last-build
 
@@ -473,6 +478,6 @@ jobs:
         run: mise exec -- cargo bench --workspace -- --test
 
       - name: kache statistics
-        if: ${{ !cancelled() && env.REMOTE_CACHE_ENABLED == 'true' }}
+        if: ${{ !cancelled() && env.RUSTC_WRAPPER != '' }}
         shell: bash
         run: kache stats --last-build

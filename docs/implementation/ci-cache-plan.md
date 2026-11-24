@@ -1,6 +1,6 @@
 # CI キャッシュを sccache + R2 へ移す実装計画
 
-> **Status**: CICACHE-1 実装済み / CICACHE-2 実測済み — 2026-08-08。CICACHE-3 実測の結果 kache へ置き換え — 2026-11-24
+> **Status**: CICACHE-1 実装済み / CICACHE-2 実測済み — 2026-08-08。CICACHE-3 実測の結果 kache へ置き換え（#648）— 2026-11-24。CICACHE-4 は ReFS 切り替え（2026-11-30）待ち
 
 対象: `.github/workflows/ci.yml`。要件文書は無い（開発基盤の改善）。
 

@@ -39,16 +39,16 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
   # Incremental artifacts only pay off across edits on one machine, which never
-  # happens on a fresh runner. sccache points the same way independently: it
-  # passes an incremental invocation straight through to rustc and stores
-  # nothing for it, so leaving them on would make every compile uncacheable.
+  # happens on a fresh runner, so writing them is pure cost. kache strips
+  # `-C incremental` before keying by default, so this is not what makes the
+  # cache hit; it only keeps the compiler from producing state nobody reads.
   CARGO_INCREMENTAL: "0"
   # Full debug info is the largest thing CI builds and the one thing it never
   # reads: no debugger attaches here, and `line-tables-only` still gives test
   # panics their file and line. Measured on one machine, `cargo test
   # --workspace --all-targets --no-run`, alternating runs:
   #
-  #   | debug            | wall            | target/ | sccache stores |
+  #   | debug            | wall            | target/ | cache stores   |
   #   | full (default)   | 207.8 / 203.2 s | 7.4 GB  |         795 MB |
   #   | line-tables-only |         182.5 s | 6.0 GB  |         667 MB |
   #
@@ -56,54 +56,69 @@ env:
   # well outside the ~2% spread between the two full-debug runs. The 16 %
   # smaller objects are the point: a warm job is dominated by *reading* them
   # back (see the cold/warm table below), so shrinking the payload shortens the
-  # part of CI that sccache cannot remove.
+  # part of CI that a compiler cache cannot remove.
   #
   # Set here rather than in `[profile.dev]` so a local `cargo build` keeps the
   # debug info a developer of a desktop application actually wants.
   # **Changing this re-keys every entry in the bucket**: the flags are part of
   # the hash, so the first run after an edit is a cold one.
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
-  # Compiler output is cached in Cloudflare R2 through sccache; see the cache
+  # Compiler output is cached in Cloudflare R2 through kache; see the cache
   # note in the check job for why it is no longer an `actions/cache` archive.
   #
   # A fork's pull request receives no secrets, so this workflow has to build
-  # without sccache rather than fail. `secrets` is not a context any `if:` can
+  # without the remote cache rather than fail. `secrets` is not a context any `if:` can
   # read, so the decision is made once here — workflow-level `env` is one of the
   # few places `secrets` *is* available — and every gate downstream reads it
   # back through the `env` context, which step `if:` does allow.
   #
   # All three are required. A missing account id alone would still produce a
   # syntactically valid endpoint (`https://.r2.cloudflarestorage.com`) that
-  # sccache cannot reach, and an unreachable backend fails the build rather than
+  # the cache cannot reach, and an unreachable backend fails the build rather than
   # degrading to a miss — the exact failure the fork case exists to avoid.
   #
   # Comparing each secret to '' first is load-bearing: GitHub's `&&` returns an
   # operand, not a boolean, so `secrets.A && secrets.B` would interpolate a
   # secret into the environment. Comparisons first make the whole expression
   # boolean, which stringifies to exactly 'true' or 'false'.
-  SCCACHE_ENABLED: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
+  REMOTE_CACHE_ENABLED: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
 
-# Measured effect of the R2 backend, `check` job, wall clock (CICACHE-2):
+  # kache writes the shared prefix only from a push to a protected branch
+  # (`main` is, through the `protect-default` ruleset). Without this a pull
+  # request would only ever read, so its second push would recompile
+  # everything its first push already built. With it, a pull request reads
+  # the shared prefix first and writes what it built under this one. It is
+  # read only in a `pull_request` job, so it is inert everywhere else.
+  KACHE_PULL_REQUEST_PREFIX: kache-pr
+
+# Measured effect of the R2 backend, `check` job, wall clock. sccache rows are
+# CICACHE-2 (2026-08-08); kache rows are CICACHE-3 (2026-11-24, PR #648: cold is
+# the first run against an empty `kache/` prefix, warm is a re-run of it):
 #
-#   |          | cold (empty bucket) | warm  | saved |
-#   | macOS    |             22m 26s | 16m55s | -25% |
-#   | Windows  |             29m 37s | 21m19s | -28% |
+#   |                  | no cache | cold    | warm    |
+#   | macOS,   sccache |        — | 22m26s  | 16m55s  |
+#   | Windows, sccache |        — | 29m37s  | 21m19s  |
+#   | macOS,   kache   |   20m10s | 16m37s  |  7m02s  |
+#   | Windows, kache   |   27m01s | 38m40s  | 12m59s  |
 #
-# Warm hit rates: macOS 99.61 % (6 misses of 1843 requests), Windows 91.90 %
-# (of 1490). Windows sits lower on the one sample there is; both platforms are
-# far from the 0.00 / 0.07 % of the cold run, so the backend is working and the
-# gap is not worth chasing until a second warm sample says it is systematic.
+# Warm is the first of three warm samples: macOS 7m02s / 9m35s / 25m34s,
+# Windows 12m59s / 12m49s / 12m29s. The 25-minute macOS run compiled 151
+# crates that were already stored (kache counts them as "Duplicates") — the
+# remote entries arrived after cargo needed them — so read macOS warm as
+# 7-10 minutes with an occasional slow outlier, not as a fixed 7.
 #
-# Where a warm job's time actually goes, per the same run:
+# Warm kache: macOS 94.9 % of crates from cache (98.7 % by compile time),
+# Windows 99.6 % (99.9 %). The gain over sccache is the linked outputs — test
+# binaries, proc macros, build scripts — that sccache compiled every time:
+# warm Test went 548 s → 187 s on macOS and 740 s → 378 s on Windows.
 #
-#   | step               | macOS | Windows |
-#   | Clippy             |  426s |    459s |
-#   | Test               |  548s |    740s |
-#   | cache restore+save |   13s |     38s |
-#
-# That last row is the headline: archiving `target/` used to cost **~12 minutes
-# on Windows**, and the cache steps are now rounding error. What is left is
-# compilation and test execution, so the next win is not a bigger cache.
+# Two costs to know about. A cold Windows run is ~12 minutes slower than an
+# uncached one: it compiles everything and also uploads ~3 GiB. And Windows
+# restores **copy** (13.3 GiB per warm run): `D:` was NTFS for this measurement,
+# where kache copies. The images move `D:` to ReFS on 2026-11-30, where restores
+# clone instead; re-measure Windows after that, since kache also re-reads key
+# inputs on ReFS and the net effect is not known. Uploads are content-deduplicated — the warm run uploaded a few
+# MiB — so steady-state bucket growth is what each pull request changes.
 
 jobs:
   check:
@@ -218,53 +233,51 @@ jobs:
       - uses: jdx/mise-action@v2
         if: steps.scope.outputs.run_code == 'true'
 
-      # The sccache binary is pinned rather than tracking the action's "latest
-      # release" default: a cache is only useful if the thing computing its keys
-      # does not change under it, and an sccache that hashes differently turns
-      # every entry in the bucket into a miss on a day nobody touched this file.
-      - name: Install sccache
-        if: steps.scope.outputs.run_code == 'true' && env.SCCACHE_ENABLED == 'true'
-        uses: mozilla-actions/sccache-action@v0.0.11
-        with:
-          version: "v0.17.0"
-
-      # `RUSTC_WRAPPER` is set here rather than in the workflow `env` so that a
-      # run without secrets never names a wrapper that was not installed.
-      # Secrets are read through this step's `env` instead of being interpolated
-      # into the script text.
+      # kache replaced sccache (CICACHE-3): it also caches what links — proc
+      # macros, build scripts, test binaries — which sccache passes through.
       #
-      # `SCCACHE_IDLE_TIMEOUT=0` keeps the server alive for the whole job. Stats
-      # live in the server process and it otherwise exits after ten idle
-      # minutes; test *execution* opens no sccache connections, so a long test
-      # phase would leave the stats step to start a fresh server and print zeros
-      # — a false "the cache is not working" rather than a missing number.
-      - name: Enable sccache
-        if: steps.scope.outputs.run_code == 'true' && env.SCCACHE_ENABLED == 'true'
-        shell: bash
-        env:
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: |
-          set -eu
-          {
-            echo "RUSTC_WRAPPER=sccache"
-            echo "SCCACHE_BUCKET=ravel-ci-cache"
-            echo "SCCACHE_ENDPOINT=https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-            echo "SCCACHE_REGION=auto"
-            echo "SCCACHE_IDLE_TIMEOUT=0"
-            echo "AWS_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}"
-            echo "AWS_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}"
-          } >> "$GITHUB_ENV"
+      # The kache binary is pinned rather than tracking the action's "latest
+      # release" default: a cache is only useful if the thing computing its keys
+      # does not change under it, and a kache that hashes differently turns
+      # every entry in the bucket into a miss on a day nobody touched this file.
+      #
+      # The action sets `RUSTC_WRAPPER` itself, so a run without secrets — which
+      # skips this step — never names a wrapper that was not installed. Its post
+      # step pushes what the daemon has not uploaded yet, stops the daemon and
+      # writes the hit/miss report to the job summary.
+      #
+      # `s3-prefix` keeps kache's objects apart from what sccache left at the
+      # bucket root. `cache-dir` under `runner.temp` keeps the store on the
+      # workspace's volume (on Windows that is `D:`, not the home volume), which
+      # a copy-on-write clone needs: macOS restores clone on APFS. Windows
+      # restores **copy** on NTFS — kache only hardlinks there with the unsafe
+      # `windows_hardlink`, which is not set — and clone on ReFS, which the
+      # runner images switch `D:` to from 2026-11-30 (actions/runner-images
+      # #15315). `cache-executables` is opt-in in the action
+      # (and on Windows in kache itself) and is the point of switching.
+      - name: Set up kache
+        if: steps.scope.outputs.run_code == 'true' && env.REMOTE_CACHE_ENABLED == 'true'
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: "v2.3.0"
+          s3-bucket: ravel-ci-cache
+          s3-endpoint: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          s3-region: auto
+          s3-prefix: kache
+          s3-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          cache-dir: ${{ runner.temp }}/kache
+          cache-executables: "true"
+          pr-comment: "false"
 
       # Only `~/.cargo` is archived. `target/` used to be in this list and is
       # what broke the cache: macOS and Windows together came to roughly 11 GB
       # against a 10 GB per-repository limit, so each merge evicted the other
       # platform's generation and pull requests restored nothing. Compiler
-      # output now goes to R2 through sccache, which has no such ceiling and is
+      # output now goes to R2 through the compiler cache, which has no such ceiling and is
       # keyed per compilation unit instead of per tree. What stays here is the
       # crate download side — the registry index, the `.crate` archives and the
-      # git checkouts — which sccache does not cache and which is small enough
+      # git checkouts — which the compiler cache does not hold and which is small enough
       # for both platforms to coexist.
       #
       # Restore on every run, but only write the cache from a main push. See the
@@ -304,13 +317,17 @@ jobs:
         run: mise run test
 
       # Runs after a failure too: when a build breaks, whether the compiler ran
-      # against a warm cache is part of reading the log. `SCCACHE_PATH` is set by
-      # the install step above and is what makes this one line work on Windows
-      # as well.
-      - name: sccache statistics
-        if: ${{ !cancelled() && steps.scope.outputs.run_code == 'true' && env.SCCACHE_ENABLED == 'true' }}
+      # against a warm cache is part of reading the log. The action's post step
+      # puts the same numbers in the job summary; this line keeps them in the log.
+      #
+      # Gated on `RUSTC_WRAPPER` rather than on the setup step: the action
+      # returns early without installing anything when a PR description says
+      # `[no-cache]` or the download fails, and the build then runs uncached —
+      # which must not turn into a red job here.
+      - name: kache statistics
+        if: ${{ !cancelled() && steps.scope.outputs.run_code == 'true' && env.RUSTC_WRAPPER != '' }}
         shell: bash
-        run: ${SCCACHE_PATH} --show-stats
+        run: kache stats --last-build
 
       # Only main writes: a pull request that saved its own generation would
       # produce a cache nobody reads again, and the `github.run_id` in the key
@@ -357,31 +374,22 @@ jobs:
       - uses: jdx/mise-action@v2
 
       # Gated exactly like the check job: a fork's pull request has no secrets
-      # and has to build without sccache rather than fail.
-      - name: Install sccache
-        if: env.SCCACHE_ENABLED == 'true'
-        uses: mozilla-actions/sccache-action@v0.0.11
+      # and has to build without the remote cache rather than fail. The inputs
+      # match the check job's; see the note there.
+      - name: Set up kache
+        if: env.REMOTE_CACHE_ENABLED == 'true'
+        uses: kunobi-ninja/kache-action@v1
         with:
-          version: "v0.17.0"
-
-      - name: Enable sccache
-        if: env.SCCACHE_ENABLED == 'true'
-        shell: bash
-        env:
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: |
-          set -eu
-          {
-            echo "RUSTC_WRAPPER=sccache"
-            echo "SCCACHE_BUCKET=ravel-ci-cache"
-            echo "SCCACHE_ENDPOINT=https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-            echo "SCCACHE_REGION=auto"
-            echo "SCCACHE_IDLE_TIMEOUT=0"
-            echo "AWS_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}"
-            echo "AWS_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}"
-          } >> "$GITHUB_ENV"
+          version: "v2.3.0"
+          s3-bucket: ravel-ci-cache
+          s3-endpoint: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          s3-region: auto
+          s3-prefix: kache
+          s3-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          cache-dir: ${{ runner.temp }}/kache
+          cache-executables: "true"
+          pr-comment: "false"
 
       # Same `~/.cargo` generation as the check job, read-only; the path list
       # must match theirs for the cache version to line up.
@@ -411,10 +419,10 @@ jobs:
       - name: Test (ffmpeg)
         run: mise exec -- cargo test -p ravel-media -p ravel-audio -p ravel-nodes -p ravel-cli --features ffmpeg
 
-      - name: sccache statistics
-        if: ${{ !cancelled() && env.SCCACHE_ENABLED == 'true' }}
+      - name: kache statistics
+        if: ${{ !cancelled() && env.RUSTC_WRAPPER != '' }}
         shell: bash
-        run: ${SCCACHE_PATH} --show-stats
+        run: kache stats --last-build
 
   # Benchmarks only gate main, not pull requests. `mise run clippy` already
   # builds every bench target through --all-targets, so a PR that breaks a
@@ -430,31 +438,22 @@ jobs:
       - uses: jdx/mise-action@v2
 
       # Gated exactly like the check job. A fork pushing to its own `main` runs
-      # this job with no secrets, so it has to build without sccache too.
-      - name: Install sccache
-        if: env.SCCACHE_ENABLED == 'true'
-        uses: mozilla-actions/sccache-action@v0.0.11
+      # this job with no secrets, so it has to build without the remote cache
+      # too. The inputs match the check job's; see the note there.
+      - name: Set up kache
+        if: env.REMOTE_CACHE_ENABLED == 'true'
+        uses: kunobi-ninja/kache-action@v1
         with:
-          version: "v0.17.0"
-
-      - name: Enable sccache
-        if: env.SCCACHE_ENABLED == 'true'
-        shell: bash
-        env:
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        run: |
-          set -eu
-          {
-            echo "RUSTC_WRAPPER=sccache"
-            echo "SCCACHE_BUCKET=ravel-ci-cache"
-            echo "SCCACHE_ENDPOINT=https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-            echo "SCCACHE_REGION=auto"
-            echo "SCCACHE_IDLE_TIMEOUT=0"
-            echo "AWS_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}"
-            echo "AWS_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}"
-          } >> "$GITHUB_ENV"
+          version: "v2.3.0"
+          s3-bucket: ravel-ci-cache
+          s3-endpoint: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          s3-region: auto
+          s3-prefix: kache
+          s3-access-key-id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          cache-dir: ${{ runner.temp }}/kache
+          cache-executables: "true"
+          pr-comment: "false"
 
       # This job used to keep its own cache generation, which made three
       # multi-gigabyte Rust caches compete for a 10 GB per-repository limit —
@@ -466,10 +465,10 @@ jobs:
       # The path list must still match the check job's exactly. `actions/cache`
       # folds the path list into the cache version, so any divergence between
       # the two would miss every time even on a key hit. Both lists are now
-      # `~/.cargo` alone — `target/` moved to sccache — and they have to stay in
+      # `~/.cargo` alone — `target/` moved to the compiler cache — and they have to stay in
       # step.
       #
-      # This job used to pay a fully cold bench-profile build per merge. sccache
+      # This job used to pay a fully cold bench-profile build per merge. Cache
       # keys include the compiler flags, so it shares nothing with the debug
       # builds in the check job, but it does reuse its own output from the
       # previous merge for every crate that did not change.
@@ -488,7 +487,7 @@ jobs:
       - name: Benchmark (dry run)
         run: mise exec -- cargo bench --workspace -- --test
 
-      - name: sccache statistics
-        if: ${{ !cancelled() && env.SCCACHE_ENABLED == 'true' }}
+      - name: kache statistics
+        if: ${{ !cancelled() && env.RUSTC_WRAPPER != '' }}
         shell: bash
-        run: ${SCCACHE_PATH} --show-stats
+        run: kache stats --last-build

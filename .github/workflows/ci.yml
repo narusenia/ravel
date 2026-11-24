@@ -91,28 +91,27 @@ env:
   # read only in a `pull_request` job, so it is inert everywhere else.
   KACHE_PULL_REQUEST_PREFIX: kache-pr
 
-# Measured effect of the R2 backend under sccache, `check` job, wall clock
-# (CICACHE-2). CICACHE-3 measures kache against these numbers:
+# Measured effect of the R2 backend, `check` job, wall clock. sccache rows are
+# CICACHE-2 (2026-08-08); kache rows are CICACHE-3 (2026-11-24, PR #648: cold is
+# the first run against an empty `kache/` prefix, warm is a re-run of it):
 #
-#   |          | cold (empty bucket) | warm  | saved |
-#   | macOS    |             22m 26s | 16m55s | -25% |
-#   | Windows  |             29m 37s | 21m19s | -28% |
+#   |                  | no cache | cold    | warm    |
+#   | macOS,   sccache |        — | 22m26s  | 16m55s  |
+#   | Windows, sccache |        — | 29m37s  | 21m19s  |
+#   | macOS,   kache   |   20m10s | 16m37s  |  7m02s  |
+#   | Windows, kache   |   27m01s | 38m40s  | 12m59s  |
 #
-# Warm hit rates: macOS 99.61 % (6 misses of 1843 requests), Windows 91.90 %
-# (of 1490). Windows sits lower on the one sample there is; both platforms are
-# far from the 0.00 / 0.07 % of the cold run, so the backend is working and the
-# gap is not worth chasing until a second warm sample says it is systematic.
+# Warm kache: macOS 94.9 % of crates from cache (98.7 % by compile time),
+# Windows 99.6 % (99.9 %). The gain over sccache is the linked outputs — test
+# binaries, proc macros, build scripts — that sccache compiled every time:
+# warm Test went 548 s → 187 s on macOS and 740 s → 378 s on Windows.
 #
-# Where a warm job's time actually goes, per the same run:
-#
-#   | step               | macOS | Windows |
-#   | Clippy             |  426s |    459s |
-#   | Test               |  548s |    740s |
-#   | cache restore+save |   13s |     38s |
-#
-# That last row is the headline: archiving `target/` used to cost **~12 minutes
-# on Windows**, and the cache steps are now rounding error. What is left is
-# compilation and test execution, so the next win is not a bigger cache.
+# Two costs to know about. A cold Windows run is ~12 minutes slower than an
+# uncached one: it compiles everything and also uploads ~3 GiB. And Windows
+# restores **copy** (13.3 GiB per warm run) instead of linking, even with the
+# store under `runner.temp`; that is the next thing to look at if Windows warm
+# time matters. Uploads are content-deduplicated — the warm run uploaded a few
+# MiB — so steady-state bucket growth is what each pull request changes.
 
 jobs:
   check:

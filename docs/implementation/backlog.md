@@ -789,6 +789,7 @@ proc-macro のクレート名ハードコードだけだった。**gpui-pre へ�
 |---|---|---|---|
 | CICACHE-1 | ✅ | sccache を導入し `target/` のアーカイブを外す | #334 |
 | CICACHE-2 | ✅ #339 | 効果の計測と設定の詰め（cold/warm 実測、R2 見積もり、`line-tables-only`） | CICACHE-1 ✅ |
+| CICACHE-3 | 🟡 | sccache を kache に置き換える（PR 上で計測し、勝ったときだけ） | CICACHE-2 ✅ |
 
 ### 離散パラメータのキーフレーム（`done/discrete-keyframes-plan.md`）
 

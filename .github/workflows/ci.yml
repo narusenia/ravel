@@ -101,6 +101,12 @@ env:
 #   | macOS,   kache   |   20m10s | 16m37s  |  7m02s  |
 #   | Windows, kache   |   27m01s | 38m40s  | 12m59s  |
 #
+# Warm is the first of three warm samples: macOS 7m02s / 9m35s / 25m34s,
+# Windows 12m59s / 12m49s / 12m29s. The 25-minute macOS run compiled 151
+# crates that were already stored (kache counts them as "Duplicates") — the
+# remote entries arrived after cargo needed them — so read macOS warm as
+# 7-10 minutes with an occasional slow outlier, not as a fixed 7.
+#
 # Warm kache: macOS 94.9 % of crates from cache (98.7 % by compile time),
 # Windows 99.6 % (99.9 %). The gain over sccache is the linked outputs — test
 # binaries, proc macros, build scripts — that sccache compiled every time:

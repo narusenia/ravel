@@ -108,9 +108,10 @@ env:
 #
 # Two costs to know about. A cold Windows run is ~12 minutes slower than an
 # uncached one: it compiles everything and also uploads ~3 GiB. And Windows
-# restores **copy** (13.3 GiB per warm run) instead of linking, even with the
-# store under `runner.temp`; that is the next thing to look at if Windows warm
-# time matters. Uploads are content-deduplicated — the warm run uploaded a few
+# restores **copy** (13.3 GiB per warm run): `D:` was NTFS for this measurement,
+# where kache copies. The images move `D:` to ReFS on 2026-11-30, where restores
+# clone instead; re-measure Windows after that, since kache also re-reads key
+# inputs on ReFS and the net effect is not known. Uploads are content-deduplicated — the warm run uploaded a few
 # MiB — so steady-state bucket growth is what each pull request changes.
 
 jobs:
@@ -241,8 +242,12 @@ jobs:
       #
       # `s3-prefix` keeps kache's objects apart from what sccache left at the
       # bucket root. `cache-dir` under `runner.temp` keeps the store on the
-      # workspace's volume, which on Windows is not the home volume, so restores
-      # can link instead of copy. `cache-executables` is opt-in in the action
+      # workspace's volume (on Windows that is `D:`, not the home volume), which
+      # a copy-on-write clone needs: macOS restores clone on APFS. Windows
+      # restores **copy** on NTFS — kache only hardlinks there with the unsafe
+      # `windows_hardlink`, which is not set — and clone on ReFS, which the
+      # runner images switch `D:` to from 2026-11-30 (actions/runner-images
+      # #15315). `cache-executables` is opt-in in the action
       # (and on Windows in kache itself) and is the point of switching.
       - name: Set up kache
         if: steps.scope.outputs.run_code == 'true' && env.REMOTE_CACHE_ENABLED == 'true'

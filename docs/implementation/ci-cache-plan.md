@@ -74,6 +74,7 @@ sccache はコンパイルをキャッシュするが、**クレートの取得�
 | CICACHE-1 | sccache を導入し `target/` のアーカイブを外す | 上の前提 |
 | CICACHE-2 | 効果の計測と設定の詰め | CICACHE-1 |
 | CICACHE-3 | sccache を kache に置き換える（計測して勝ったときだけ） | CICACHE-2 |
+| CICACHE-4 | `D:` が ReFS になった後の Windows 再計測 | CICACHE-3、runner image の切り替え（2026-11-30） |
 
 ### 単位 1: sccache を導入し `target/` のアーカイブを外す
 
@@ -225,9 +226,7 @@ sccache に残る。
    sccache の数字（cold 22分26秒 / 29分37秒、warm 16分55秒 / 21分19秒）と比べる
 
 **採否の基準**: macOS / Windows **両方で** warm が sccache の warm 以下なら採る。
-片方でも遅ければ PR を閉じて sccache に残り、数字をこの節に残す。ランナーの
-ばらつきで ±5% 程度は動くので、その範囲の差は「同等」と読み、
-「素通しが減った」がヒット率の内訳で確認できれば採る。
+片方でも遅ければ PR を閉じて sccache に残り、数字をこの節に残す。
 
 マージ後の最初の main push は共有 prefix に対して cold になる（main は
 `kache-pr/` を読まない）。それ以降の PR がそれを読む。
@@ -256,9 +255,12 @@ warm はその再実行（`kache-pr/` から読む）。sccache は CICACHE-2 �
 - **Windows の cold は キャッシュ無しより約 12 分遅い。** 全部コンパイルした上で
   約 3 GiB をアップロードするため。cold は prefix が空のとき（kache の
   バージョンやフラグを変えた直後）だけ起きる
-- **Windows の復元がリンクでなくコピー**（warm で 13.3 GiB）。`cache-dir` を
-  `runner.temp` に置いても変わらなかった。Windows の warm をさらに縮めるなら
-  ここから調べる
+- **Windows の復元がリンクでなくコピー**（warm で 13.3 GiB）。計測時の `D:` は
+  NTFS で、kache は NTFS ではコピーする（ハードリンクは危険側の
+  `windows_hardlink` を入れたときだけで、入れていない）。runner image は
+  **2026-11-30 から `D:` を ReFS にする**（actions/runner-images#15315）。ReFS では
+  復元がクローンになる一方、kache はキーの入力を読み直すので、差し引きは
+  分からない。**切り替え後に Windows を測り直す**
 - **R2 の使用量**: 1 プラットフォームの全量で約 3 GiB（圧縮後）。アップロードは
   内容で重複排除され、warm 再実行のアップロードは数 MiB だった。定常の増え方は
   各 PR が変えた分。sccache（1 実行 ≈ 0.7 GB）より大きいが、30 日の
@@ -279,6 +281,21 @@ service に登録する）。リポジトリには何も足さない（`.kache.t
 
 - cold / warm の実測が本節と `ci.yml` のコメントに記録されている ✅
 - 採否が基準に沿って決まり、採った場合は sccache の記述が `ci.yml` から消えている ✅
+
+### 単位 4: `D:` が ReFS になった後の Windows 再計測
+
+CICACHE-3 の Windows は `D:` が NTFS で、復元が全部コピーだった（warm で
+13.3 GiB）。runner image が 2026-11-30 から `D:` を ReFS にする
+（actions/runner-images#15315）。ReFS では復元がクローンになるが、kache は
+ReFS でキーの入力を読み直す。
+
+- 切り替え後の main push（warm）で `check (windows-latest)` の wall clock、
+  `kache stats` の Restored 行（clone / copy の内訳）とキー計算時間を取る
+- CICACHE-3 の warm（12分59秒）より遅くなっていたら原因を切り分ける
+
+**完了条件**
+
+- ReFS での warm の実測が本計画と `ci.yml` のコメントに記録されている
 
 ## 非対象
 
